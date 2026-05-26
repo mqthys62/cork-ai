@@ -1,0 +1,12 @@
+src/
+tests/
+benchmarks/
+examples/
+.github/
+coverage/
+.cork-ai/
+tsconfig.json
+vitest.config.ts
+*.test.ts
+*.spec.ts
+.gitignore

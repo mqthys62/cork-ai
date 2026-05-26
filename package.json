@@ -1,0 +1,80 @@
+{
+  "name": "cork-ai",
+  "version": "0.1.0",
+  "description": "Surgical context optimization for Claude Code — 60–75% token reduction on long sessions",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "cork-ai": "./dist/cli/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup src/index.ts src/cli/index.ts --format cjs,esm --dts --clean",
+    "dev": "tsup src/index.ts src/cli/index.ts --format cjs,esm --dts --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "benchmark": "node --loader tsx/esm benchmarks/cost-comparison.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "context",
+    "optimization",
+    "tokens",
+    "compression",
+    "llm",
+    "ai",
+    "cost"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@anthropic-ai/sdk": ">=0.20.0"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^2.0.0",
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  },
+  "optionalDependencies": {
+    "tiktoken": "^1.0.15"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mathysthery/cork-ai.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mathysthery/cork-ai/issues"
+  },
+  "homepage": "https://github.com/mathysthery/cork-ai#readme"
+}
