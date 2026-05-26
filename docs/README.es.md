@@ -149,19 +149,6 @@ cork-ai report --json       # salida legible por máquinas para dashboards / CI
 
 ---
 
-## Niveles de compresión adaptativos
-
-```
-Uso de tokens        Nivel         Qué se ejecuta
-──────────────────────────────────────────────────────────────
-< 40% del presupuesto → Passthrough  Nada. La sesión es pequeña.
-40–65%               → Nivel 1      Tool results + Headers
-65–80%               → Nivel 2      + Code dedup + Heatmap
-> 80%                → Nivel 3      + Semantic dedup + Summarizer
-```
-
----
-
 ## Funciona junto a RTK
 
 [RTK](https://github.com/rtk-ai/rtk) y cork-ai cubren capas completamente distintas — están diseñados para usarse juntos.
@@ -203,6 +190,32 @@ cd cork-ai && npm install && npm run build
 ```
 
 Luego importar desde `./dist`:
+
+### Niveles de compresión adaptativos (solo API de librería)
+
+Al usar `wrapClient()` o `CtxForge`, cork-ai cuenta los tokens en tu array `messages[]` y decide el nivel de compresión según cuánto se ha llenado la ventana de contexto. Controlas el presupuesto con `maxContextTokens`.
+
+```
+Uso de tokens / maxContextTokens   Nivel    Qué se ejecuta
+──────────────────────────────────────────────────────────────────────
+< 40%   → Passthrough   Nada — el contexto es pequeño.
+40–65%  → Nivel 1       Tool results + Headers
+65–80%  → Nivel 2       + Code dedup + Heatmap
+> 80%   → Nivel 3       + Semantic dedup + Summarizer
+```
+
+Ajusta `maxContextTokens` según tu ventana de contexto real:
+
+```typescript
+// Empezar antes — en una ventana de 200k de Claude,
+// la compresión empieza en 20k tokens en lugar de 80k
+wrapClient(client, { maxContextTokens: 50_000 })
+```
+
+> **Nota**: Esta lógica adaptativa solo aplica a la API de librería. El hook de Claude Code
+> comprime **cada** lectura de archivo de forma incondicional — no conoce el tamaño de la
+> conversación, y eso es intencional.
+
 
 ```typescript
 import Anthropic from '@anthropic-ai/sdk'

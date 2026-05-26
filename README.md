@@ -83,8 +83,6 @@ cork-ai applies independent compression layers, each targeting a different sourc
 | 6 | **Bloated old messages** — exploration text that could be 10% its size | Summarizes while preserving file paths, error messages, and decisions verbatim | **20–30%** |
 | 7 | **Cold start** — next session re-discovers the whole project from scratch | Saves a compressed project snapshot, loads it at session start | **40–60%** next session |
 
-cork-ai is **adaptive**: does nothing when your context is small, scales up compression as the session grows.
-
 ---
 
 ## Measured results
@@ -176,23 +174,6 @@ cork-ai report --json       # machine-readable output for dashboards / CI
 
 ---
 
-## Adaptive compression levels
-
-cork-ai checks token usage before each request and decides what to run:
-
-```
-Token usage          Level         What runs
-──────────────────────────────────────────────────────────────
-< 40% of budget   → Passthrough   Nothing. Session is small.
-40–65%            → Level 1       Tool results + Headers
-65–80%            → Level 2       + Code dedup + Heatmap
-> 80%             → Level 3       + Semantic dedup + Summarizer
-```
-
-On a short session, cork-ai is completely transparent.
-
----
-
 ## Works alongside RTK
 
 [RTK](https://github.com/rtk-ai/rtk) and cork-ai cover completely different layers — they are designed to be used together.
@@ -275,6 +256,32 @@ await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 4096, 
 console.log(`${stats.request.savingsPercent}% saved this request`)
 ```
 
+### Adaptive compression levels (library API only)
+
+When using `wrapClient()` or `CtxForge`, cork-ai counts tokens in your `messages[]` array and decides how aggressively to compress based on how full the context window is. You control the budget via `maxContextTokens`.
+
+```
+Token usage vs. maxContextTokens    Level    What runs
+──────────────────────────────────────────────────────────────────────
+< 40%   → Passthrough   Nothing — context is small, no overhead.
+40–65%  → Level 1       Tool results + Headers
+65–80%  → Level 2       + Code dedup + Heatmap
+> 80%   → Level 3       + Semantic dedup + Summarizer
+```
+
+Tune `maxContextTokens` to match your actual context window and when you want compression to kick in:
+
+```typescript
+// Start compressing earlier — e.g. on Claude's 200k window,
+// this kicks in at 20k tokens instead of 80k
+wrapClient(client, { maxContextTokens: 50_000 })
+```
+
+> **Note**: This adaptive logic only applies to the library API. The Claude Code hook
+> compresses **every** file read unconditionally — it doesn't know the conversation size,
+> and that's intentional: every token saved on a Read is a token saved regardless of
+> where you are in the session.
+
 ### Session cache — carry context across sessions
 
 ```typescript
@@ -315,7 +322,7 @@ const optimized = dsp.build(systemPrompt, recentMessages)
 ```typescript
 wrapClient(client, {
   aggressiveness: 0.6,        // 0 = conservative, 1 = aggressive (default: 0.6)
-  maxContextTokens: 150_000,  // token budget (default: 150,000)
+  maxContextTokens: 150_000,  // token budget — compression kicks in above 40% of this
   budget: {
     maxTokens: 150_000,
     hardLimit: false,          // throw if context still exceeds budget after full compression

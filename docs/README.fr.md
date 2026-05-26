@@ -174,21 +174,6 @@ cork-ai report --json       # sortie machine pour dashboards / CI
 
 ---
 
-## Niveaux de compression adaptatifs
-
-```
-Utilisation tokens   Niveau        Ce qui s'exécute
-──────────────────────────────────────────────────────────────
-< 40% du budget   → Passthrough   Rien. La session est courte.
-40–65%            → Niveau 1      Tool results + Headers
-65–80%            → Niveau 2      + Code dedup + Heatmap
-> 80%             → Niveau 3      + Semantic dedup + Summarizer
-```
-
-Sur une courte session, cork-ai est complètement transparent.
-
----
-
 ## Utilisation conjointe avec RTK
 
 [RTK](https://github.com/rtk-ai/rtk) et cork-ai couvrent des couches complètement différentes — ils sont conçus pour être utilisés ensemble.
@@ -257,7 +242,7 @@ const response = await client.messages.create({
 })
 ```
 
-### Option B — Compression manuelle
+### Option B — Compression manuelle (CtxForge)
 
 ```typescript
 import { CtxForge } from './dist/index.js'
@@ -268,6 +253,32 @@ const { messages, stats } = forge.compress(historique)
 await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 4096, messages })
 console.log(`${stats.request.savingsPercent}% économisé`)
 ```
+
+### Niveaux de compression adaptatifs (API bibliothèque uniquement)
+
+Quand tu utilises `wrapClient()` ou `CtxForge`, cork-ai compte les tokens dans ton tableau `messages[]` et décide du niveau de compression en fonction du taux de remplissage de la fenêtre de contexte. Tu contrôles le budget via `maxContextTokens`.
+
+```
+Utilisation tokens / maxContextTokens   Niveau    Ce qui s'exécute
+────────────────────────────────────────────────────────────────────────
+< 40%   → Passthrough   Rien — le contexte est petit.
+40–65%  → Niveau 1      Tool results + Headers
+65–80%  → Niveau 2      + Code dedup + Heatmap
+> 80%   → Niveau 3      + Semantic dedup + Summarizer
+```
+
+Ajuste `maxContextTokens` selon ta fenêtre de contexte réelle et le moment où tu veux que la compression démarre :
+
+```typescript
+// Commencer plus tôt — ex: sur une fenêtre 200k de Claude,
+// la compression démarre à 20k tokens au lieu de 80k
+wrapClient(client, { maxContextTokens: 50_000 })
+```
+
+> **Note :** Cette logique adaptative ne s'applique qu'à l'API bibliothèque. Le hook Claude Code
+> compresse **chaque** lecture de fichier inconditionnellement — il ne connaît pas la taille de la
+> conversation, et c'est voulu : chaque token économisé sur un Read est économisé peu importe
+> où tu en es dans la session.
 
 ### Cache inter-sessions
 
