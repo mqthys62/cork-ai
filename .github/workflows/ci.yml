@@ -84,3 +84,4 @@ jobs:
           test -f dist/index.js
           test -f dist/index.mjs
           test -f dist/index.d.ts
+          test -f dist/cli/index.js
