@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * cork-ai CLI — stats and savings report.
+ * cork-ai CLI — stats, savings report, and project setup.
  *
  * Commands:
+ *   cork-ai init             Auto-integrate cork-ai into the current project
  *   cork-ai gain             Show savings from the last session
  *   cork-ai gain --history   Show all recorded sessions
  *   cork-ai gain --all       Show all-time totals
@@ -11,6 +12,8 @@
  *   cork-ai --help           Show help
  */
 
+import fs from 'fs'
+import path from 'path'
 import { readGlobalStats, resetGlobalStats, STATS_FILE } from './persistent-stats.js'
 
 const VERSION = '0.1.0'
@@ -64,6 +67,7 @@ function showHelp(): void {
 ${C.bold('cork-ai')} v${VERSION} — Context optimization for Claude Code
 
 ${C.bold('Usage:')}
+  cork-ai init              Auto-integrate cork-ai into the current project
   cork-ai gain              Show savings from the last recorded session
   cork-ai gain --all        Show all-time totals
   cork-ai gain --history    Show all recorded sessions
@@ -202,6 +206,159 @@ function showHistory(): void {
   console.log()
 }
 
+// ─── Init command ─────────────────────────────────────────────────────────────
+
+function findFiles(dir: string, exts: string[], ignore: string[]): string[] {
+  const results: string[] = []
+  let entries: fs.Dirent[]
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return results }
+  for (const e of entries) {
+    if (ignore.includes(e.name)) continue
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) {
+      results.push(...findFiles(full, exts, ignore))
+    } else if (exts.some(x => e.name.endsWith(x))) {
+      results.push(full)
+    }
+  }
+  return results
+}
+
+function detectIsTypeScript(cwd: string): boolean {
+  return fs.existsSync(path.join(cwd, 'tsconfig.json'))
+}
+
+function readPkg(cwd: string): Record<string, unknown> | null {
+  const p = path.join(cwd, 'package.json')
+  try { return JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown> } catch { return null }
+}
+
+function hasSdkDep(pkg: Record<string, unknown> | null): boolean {
+  if (!pkg) return false
+  const deps = { ...(pkg.dependencies as object | undefined), ...(pkg.devDependencies as object | undefined) }
+  return '@anthropic-ai/sdk' in deps
+}
+
+function patchFile(_filePath: string, content: string): string | null {
+  // Already patched
+  if (content.includes('wrapClient') || content.includes('cork-ai')) return null
+
+  const newAnthropicRe = /new Anthropic\s*\([^)]*\)/g
+  if (!newAnthropicRe.test(content)) return null
+
+  // Add import after existing Anthropic import
+  const importLine = content.includes("from '@anthropic-ai/sdk'")
+    ? `from '@anthropic-ai/sdk'`
+    : `from "@anthropic-ai/sdk"`
+
+  const withImport = content.replace(
+    new RegExp(`(import[^\\n]*${importLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`),
+    `$1\nimport { wrapClient } from 'cork-ai'`,
+  )
+
+  // Wrap every `new Anthropic(...)` call
+  const patched = withImport.replace(/new Anthropic(\s*\([^)]*\))/g, 'wrapClient(new Anthropic$1)')
+  return patched === content ? null : patched
+}
+
+function generateWrapperFile(isTs: boolean): string {
+  const imp = isTs
+    ? `import Anthropic from '@anthropic-ai/sdk'\nimport { wrapClient } from 'cork-ai'`
+    : `const Anthropic = require('@anthropic-ai/sdk')\nconst { wrapClient } = require('cork-ai')`
+  const exp = isTs ? 'export const claude' : 'module.exports.claude'
+  return `${imp}
+
+${exp} = wrapClient(new Anthropic(), {
+  maxContextTokens: 150_000,
+  aggressiveness: 0.6,
+  onStats: (stats) => {
+    if (stats.request.savingsPercent > 5) {
+      process.stderr.write(\`[cork-ai] \${stats.request.savingsPercent}% saved\\n\`)
+    }
+  },
+})
+`.trimStart() + `\n// Replace all \`new Anthropic()\` imports with this file.\n`
+  + `// Usage: import { claude } from './cork-ai-client${isTs ? '' : '.js'}'\n`
+}
+
+function runInit(): void {
+  const cwd = process.cwd()
+  const pkg = readPkg(cwd)
+  const isTs = detectIsTypeScript(cwd)
+
+  console.log(`\n${C.bold('cork-ai init')} — Auto-integrating into ${C.cyan(cwd)}\n`)
+
+  // 1. Check @anthropic-ai/sdk is installed
+  if (!hasSdkDep(pkg)) {
+    console.log(`${C.yellow('⚠')}  @anthropic-ai/sdk not found in package.json.`)
+    console.log(`   Run: ${C.cyan('npm install @anthropic-ai/sdk')}\n`)
+  }
+
+  // 2. Scan project files for `new Anthropic(`
+  const IGNORE = ['node_modules', '.git', 'dist', 'build', '.next', 'out', 'coverage', '.cork-ai']
+  const EXTS = isTs ? ['.ts', '.tsx'] : ['.js', '.mjs', '.cjs', '.jsx']
+  const files = findFiles(cwd, EXTS, IGNORE)
+  const SDK_IMPORT_RE = /^(?:import|const|var|let)\s+\w[\s\S]{0,60}['"]@anthropic-ai\/sdk['"]/m
+  const matches = files.filter(f => {
+    try {
+      const c = fs.readFileSync(f, 'utf8')
+      return c.includes('new Anthropic(') && SDK_IMPORT_RE.test(c)
+    } catch { return false }
+  })
+
+  if (matches.length === 0) {
+    // 3a. No existing client — generate a wrapper file
+    const wrapperName = `cork-ai-client.${isTs ? 'ts' : 'js'}`
+    const wrapperPath = path.join(cwd, 'src', wrapperName)
+    const wrapperDir = path.join(cwd, 'src')
+    const dest = fs.existsSync(wrapperDir) ? wrapperPath : path.join(cwd, wrapperName)
+    fs.writeFileSync(dest, generateWrapperFile(isTs), 'utf8')
+    const rel = path.relative(cwd, dest)
+
+    console.log(`${C.green('✔')}  No existing Anthropic client found.`)
+    console.log(`   Generated wrapper: ${C.cyan(rel)}\n`)
+    console.log(`   Import it in your code:`)
+    console.log(`   ${C.dim(`import { claude } from './${rel.replace(/\\/g, '/').replace(/\.(ts|js)$/, '')}'`)}`)
+    console.log(`   ${C.dim(`const response = await claude.messages.create({ ... })`)}`)
+    console.log(`\n   Then run ${C.cyan('cork-ai gain')} after a session to see savings.\n`)
+    return
+  }
+
+  if (matches.length === 1) {
+    // 3b. Exactly one file — auto-patch
+    const file = matches[0]
+    const rel = path.relative(cwd, file)
+    const content = fs.readFileSync(file, 'utf8')
+    const patched = patchFile(file, content)
+
+    if (!patched) {
+      console.log(`${C.green('✔')}  ${C.cyan(rel)} — already integrated or no patchable pattern found.`)
+      console.log(`   Run ${C.cyan('cork-ai gain')} after a session to check savings.\n`)
+      return
+    }
+
+    fs.writeFileSync(file, patched, 'utf8')
+    console.log(`${C.green('✔')}  Patched ${C.cyan(rel)}`)
+    console.log(`   Added: ${C.dim("import { wrapClient } from 'cork-ai'")}`)
+    console.log(`   Wrapped: ${C.dim('new Anthropic(...)  →  wrapClient(new Anthropic(...))')}`)
+    console.log(`\n   Run ${C.cyan('cork-ai gain')} after a session to see savings.\n`)
+    return
+  }
+
+  // 3c. Multiple files — show manual instructions
+  console.log(`${C.yellow('!')}  Found ${matches.length} files with Anthropic client instantiation:`)
+  for (const f of matches) {
+    console.log(`   ${C.cyan(path.relative(cwd, f))}`)
+  }
+  console.log()
+  console.log(`   Add these two lines to the file where you instantiate the client:`)
+  console.log()
+  console.log(`   ${C.dim("import { wrapClient } from 'cork-ai'")}`)
+  console.log(`   ${C.dim('const client = wrapClient(new Anthropic(), { maxContextTokens: 150_000 })')}`)
+  console.log()
+  console.log(`   Run ${C.cyan('cork-ai gain')} after a session to see savings.\n`)
+}
+
 function resetStats(): void {
   const stats = readGlobalStats()
   if (!stats || stats.allTime.totalRequests === 0) {
@@ -223,6 +380,8 @@ if (!cmd || cmd === '--help' || cmd === '-h') {
   showHelp()
 } else if (cmd === '--version' || cmd === '-v') {
   showVersion()
+} else if (cmd === 'init') {
+  runInit()
 } else if (cmd === 'gain') {
   if (flag === '--all') {
     showAllTime()
