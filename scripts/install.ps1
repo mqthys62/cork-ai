@@ -1,11 +1,11 @@
-# cork-ai installer for Windows — https://github.com/mathys62/cork-ai
+# cork-ai installer for Windows — https://github.com/mqthys62/cork-ai
 #
 # Usage (PowerShell):
-#   irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
-$Repo      = "mathys62/cork-ai"
+$Repo      = "mqthys62/cork-ai"
 $InstallDir = "$env:LOCALAPPDATA\cork-ai\bin"
 $BinaryName = "cork-ai-windows-x64.exe"
 $DestName   = "cork-ai.exe"

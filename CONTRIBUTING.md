@@ -5,7 +5,7 @@
 cork-ai is distributed as standalone binaries (no Node.js required to use it), but development requires Node.js ≥ 18 and npm.
 
 ```bash
-git clone https://github.com/mathys62/cork-ai.git
+git clone https://github.com/mqthys62/cork-ai.git
 cd cork-ai
 npm install
 ```

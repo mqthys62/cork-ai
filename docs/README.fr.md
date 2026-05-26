@@ -1,6 +1,6 @@
 # cork-ai — Documentation française
 
-[![CI](https://github.com/mathys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathys62/cork-ai/actions)
+[![CI](https://github.com/mqthys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mqthys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Réduit 60–75% des tokens sur les sessions longues — sans changer ta façon de coder.**
@@ -36,7 +36,7 @@ Claude reçoit le résumé compressé au lieu du fichier complet
 ### macOS / Linux / WSL2
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 ```
 
 Télécharge le bon binaire pour ton OS + architecture, le place dans `~/.local/bin`, et lance `cork-ai hooks install`.
@@ -44,12 +44,12 @@ Télécharge le bon binaire pour ton OS + architecture, le place dans `~/.local/
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
 ### Téléchargement manuel
 
-[Releases GitHub](https://github.com/mathys62/cork-ai/releases/latest) → télécharge le binaire pour ta plateforme :
+[Releases GitHub](https://github.com/mqthys62/cork-ai/releases/latest) → télécharge le binaire pour ta plateforme :
 
 | Plateforme | Fichier |
 |------------|---------|
@@ -215,7 +215,7 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 rtk init -g
 
 # cork-ai — compression de l'outil Read + historique de conversation
-curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 ```
 
 ---
@@ -227,7 +227,7 @@ Si tu construis une application qui appelle l'API Anthropic directement, tu peux
 Compilation depuis les sources :
 
 ```bash
-git clone https://github.com/mathys62/cork-ai.git
+git clone https://github.com/mqthys62/cork-ai.git
 cd cork-ai && npm install && npm run build
 ```
 
@@ -320,4 +320,4 @@ Voir [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Licence
 
-MIT © 2026 mathys62
+MIT © 2026 mqthys62

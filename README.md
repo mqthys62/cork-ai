@@ -1,6 +1,6 @@
 # cork-ai
 
-[![CI](https://github.com/mathys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathys62/cork-ai/actions)
+[![CI](https://github.com/mqthys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mqthys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 > Cut your Claude Code token usage by **60–75%** on long sessions — without changing how you code.
@@ -36,7 +36,7 @@ Claude receives the compressed digest instead of the full file
 ### macOS / Linux / WSL2
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 ```
 
 Downloads the right binary for your OS + architecture, puts it in `~/.local/bin`, and runs `cork-ai hooks install`.
@@ -44,12 +44,12 @@ Downloads the right binary for your OS + architecture, puts it in `~/.local/bin`
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
 ### Manual download
 
-Go to [Releases](https://github.com/mathys62/cork-ai/releases/latest) and download the binary for your platform:
+Go to [Releases](https://github.com/mqthys62/cork-ai/releases/latest) and download the binary for your platform:
 
 | Platform | File |
 |----------|------|
@@ -219,7 +219,7 @@ curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/instal
 rtk init -g
 
 # cork-ai — Read tool + conversation compression
-curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 ```
 
 ---
@@ -231,7 +231,7 @@ If you're building your own application that calls the Anthropic API, you can us
 Build from source:
 
 ```bash
-git clone https://github.com/mathys62/cork-ai.git
+git clone https://github.com/mqthys62/cork-ai.git
 cd cork-ai && npm install && npm run build
 ```
 
@@ -346,4 +346,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT © 2026 mathys62
+MIT © 2026 mqthys62

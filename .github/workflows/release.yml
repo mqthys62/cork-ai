@@ -60,12 +60,12 @@ jobs:
 
             **macOS / Linux / WSL2:**
             ```bash
-            curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
             ```
 
             **Windows (PowerShell):**
             ```powershell
-            irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
+            irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex
             ```
 
             Then: `cork-ai hooks install` to activate Claude Code integration.

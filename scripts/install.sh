@@ -1,12 +1,12 @@
 #!/bin/sh
-# cork-ai installer — https://github.com/mathys62/cork-ai
+# cork-ai installer — https://github.com/mqthys62/cork-ai
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 
 set -e
 
-REPO="mathys62/cork-ai"
+REPO="mqthys62/cork-ai"
 INSTALL_DIR="$HOME/.local/bin"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
