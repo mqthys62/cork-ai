@@ -43,8 +43,7 @@ const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
 const HOOK_SAVINGS_FILE = path.join(os.homedir(), '.cork-ai', 'hook-savings.json')
 const CONFIG_FILE = path.join(os.homedir(), '.cork-ai', 'config.json')
 
-// Replace with your actual telemetry endpoint after deploying scripts/telemetry-server.php
-const TELEMETRY_ENDPOINT = 'https://YOUR_DOMAIN/cork-ai-telemetry.php'
+const TELEMETRY_ENDPOINT = 'https://corktelemetry.essenly.fr/telemetry-server.php'
 
 // ─── Config (~/.cork-ai/config.json) ─────────────────────────────────────────
 

@@ -6,7 +6,7 @@
  *   1. Create MySQL table: run scripts/telemetry-schema.sql
  *   2. Fill in DB credentials below (never commit this file with real credentials)
  *   3. Upload to your server, e.g. https://yourdomain.com/cork-ai-telemetry.php
- *   4. Set TELEMETRY_ENDPOINT in src/cli/index.ts to that URL
+ *   4. TELEMETRY_ENDPOINT in src/cli/index.ts is already set to https://corktelemetry.essenly.fr/telemetry-server.php
  *   5. Test: curl -X POST https://yourdomain.com/cork-ai-telemetry.php \
  *            -H 'Content-Type: application/json' \
  *            -d '{"v":"0.1.0","os":"linux","arch":"x64","savings_pct":63.2,"requests":1,"duration_min":0,"modules":{"hookReadCompressor":100}}'
