@@ -60,22 +60,60 @@ Combined with [RTK](https://github.com/reachingforthejack/rtk): realistic **65�
 
 ## Installation
 
+### One-line install (recommended)
+
+**macOS / Linux / WSL2:**
 ```bash
-npm install -g cork-ai        # global install — gets you the CLI
-npm install cork-ai           # local install — gets you the library
+curl -fsSL https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.sh | sh
 ```
 
-The `@anthropic-ai/sdk` peer dependency is only needed if you use `wrapClient()`:
-
-```bash
-npm install @anthropic-ai/sdk
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.ps1 | iex
 ```
+
+The script auto-detects your package manager (npm / yarn / pnpm / bun), installs cork-ai globally, and runs `cork-ai hooks install` — you're done in one command.
+
+---
+
+### Manual install
+
+**Global install** (for the CLI + Claude Code hooks — works across all your projects):
+```bash
+npm install -g cork-ai     # or: yarn global add cork-ai
+pnpm install -g cork-ai   #     bun install -g cork-ai
+cork-ai hooks install      # ← adds the hook to ~/.claude/settings.json
+```
+
+**Per-project install** (for the library API — `wrapClient`, `CtxForge`):
+```bash
+npm install cork-ai
+npm install @anthropic-ai/sdk   # peer dep, only needed for wrapClient()
+```
+
+---
+
+## How cork-ai integrates with Claude Code
+
+```
+Claude Code reads a file
+        ↓
+cork-ai hook intercepts (PreToolUse)
+        ↓
+Compresses file content → extracts signatures, truncates boilerplate
+        ↓
+Claude receives compressed digest instead of full file
+        ↓
+60–90% fewer tokens per Read — automatically, for every session
+```
+
+After `cork-ai hooks install`, this is **global** — active for every Claude Code session in every project on your machine. No per-project configuration. No code changes.
 
 ---
 
 ## Quickstart — `cork-ai init`
 
-The fastest way to integrate cork-ai into an existing project:
+If you have code that calls the Anthropic API directly (not just Claude Code), run:
 
 ```bash
 cd your-project

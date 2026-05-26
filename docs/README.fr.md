@@ -82,18 +82,50 @@ cork-ai applique des compressions chirurgicales à chaque couche :
 
 ## Installation
 
+### Installation en une ligne (recommandée)
+
+**macOS / Linux / WSL2 :**
 ```bash
-npm install cork-ai
-# ou
-yarn add cork-ai
-# ou
-pnpm add cork-ai
+curl -fsSL https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.sh | sh
 ```
 
-Pour le mode `wrapClient()`, `@anthropic-ai/sdk` est requis :
+**Windows (PowerShell) :**
+```powershell
+irm https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.ps1 | iex
+```
 
+Le script détecte automatiquement ton gestionnaire de paquets (npm / yarn / pnpm / bun), installe cork-ai globalement et configure les hooks Claude Code — **une seule commande**.
+
+---
+
+### Installation manuelle
+
+**Globale** (CLI + hooks Claude Code — actif sur tous tes projets) :
 ```bash
+npm install -g cork-ai        # ou: yarn global add, pnpm install -g, bun install -g
+cork-ai hooks install         # configure ~/.claude/settings.json
+```
+
+**Par projet** (pour l'API bibliothèque) :
+```bash
+npm install cork-ai
 npm install @anthropic-ai/sdk
+```
+
+---
+
+## Comment ça s'intègre à Claude Code
+
+Après `cork-ai hooks install`, c'est **global** — actif pour toutes tes sessions Claude Code sur tous tes projets :
+
+```
+Claude Code lit un fichier
+        ↓
+cork-ai intercepte (PreToolUse Read)
+        ↓
+Compresse → signatures extraites, boilerplate tronqué
+        ↓
+Claude reçoit la version compressée (60–90% moins de tokens)
 ```
 
 ---
