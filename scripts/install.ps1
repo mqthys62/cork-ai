@@ -1,7 +1,7 @@
-# cork-ai installer for Windows — https://github.com/mathysthery/cork-ai
+# cork-ai installer for Windows — https://github.com/mathys62/cork-ai
 #
 # Usage (PowerShell):
-#   irm https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
 #
 # Or save and run:
 #   powershell -ExecutionPolicy Bypass -File install.ps1

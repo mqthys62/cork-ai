@@ -57,5 +57,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark dans `benchmarks/cost-comparison.ts`
 - CI/CD GitHub Actions (Node 18/20/22 × Ubuntu/Windows/macOS)
 
-[Unreleased]: https://github.com/mathysthery/cork-ai/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/mathysthery/cork-ai/releases/tag/v0.1.0
+[Unreleased]: https://github.com/mathys62/cork-ai/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/mathys62/cork-ai/releases/tag/v0.1.0

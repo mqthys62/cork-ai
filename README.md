@@ -1,8 +1,8 @@
 # cork-ai
 
 [![npm version](https://img.shields.io/npm/v/cork-ai.svg)](https://www.npmjs.com/package/cork-ai)
-[![CI](https://github.com/mathysthery/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathysthery/cork-ai/actions)
-[![Coverage](https://codecov.io/gh/mathysthery/cork-ai/branch/main/graph/badge.svg)](https://codecov.io/gh/mathysthery/cork-ai)
+[![CI](https://github.com/mathys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathys62/cork-ai/actions)
+[![Coverage](https://codecov.io/gh/mathys62/cork-ai/branch/main/graph/badge.svg)](https://codecov.io/gh/mathys62/cork-ai)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 
@@ -64,12 +64,12 @@ Combined with [RTK](https://github.com/reachingforthejack/rtk): realistic **65�
 
 **macOS / Linux / WSL2:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
 The script auto-detects your package manager (npm / yarn / pnpm / bun), installs cork-ai globally, and runs `cork-ai hooks install` — you're done in one command.
@@ -376,4 +376,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-MIT © 2026 Mathys Thery
+MIT © 2026 mathys62

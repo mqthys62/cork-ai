@@ -1,7 +1,7 @@
 # cork-ai — Documentación en español
 
 [![npm version](https://img.shields.io/npm/v/cork-ai.svg)](https://www.npmjs.com/package/cork-ai)
-[![CI](https://github.com/mathysthery/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathysthery/cork-ai/actions)
+[![CI](https://github.com/mathys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Optimización quirúrgica del contexto para Claude Code. Reduce un 60–75% los tokens de entrada en sesiones largas.**
@@ -205,4 +205,4 @@ const optimized = dsp.build(systemPrompt, mensajesRecientes)
 
 ## Licencia
 
-MIT © 2026 Mathys Thery
+MIT © 2026 mathys62

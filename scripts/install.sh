@@ -1,11 +1,11 @@
 #!/bin/sh
-# cork-ai installer — https://github.com/mathysthery/cork-ai
+# cork-ai installer — https://github.com/mathys62/cork-ai
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
 #
 # Or with a specific version:
-#   curl -fsSL https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.sh | sh -s -- --version 0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh -s -- --version 0.1.0
 
 set -e
 

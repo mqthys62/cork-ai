@@ -1,7 +1,7 @@
 # cork-ai — Documentation française
 
 [![npm version](https://img.shields.io/npm/v/cork-ai.svg)](https://www.npmjs.com/package/cork-ai)
-[![CI](https://github.com/mathysthery/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathysthery/cork-ai/actions)
+[![CI](https://github.com/mathys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Optimisation chirurgicale du contexte pour Claude Code. Réduit 60–75% des tokens sur les sessions longues.**
@@ -86,12 +86,12 @@ cork-ai applique des compressions chirurgicales à chaque couche :
 
 **macOS / Linux / WSL2 :**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
 ```
 
 **Windows (PowerShell) :**
 ```powershell
-irm https://raw.githubusercontent.com/mathysthery/cork-ai/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
 Le script détecte automatiquement ton gestionnaire de paquets (npm / yarn / pnpm / bun), installe cork-ai globalement et configure les hooks Claude Code — **une seule commande**.
@@ -329,4 +329,4 @@ Voir [CONTRIBUTING.md](../CONTRIBUTING.md) pour lancer les tests, ajouter un mod
 
 ## Licence
 
-MIT © 2026 Mathys Thery
+MIT © 2026 mathys62
