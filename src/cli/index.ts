@@ -24,8 +24,10 @@
  */
 
 import fs from 'fs'
+import https from 'https'
 import os from 'os'
 import path from 'path'
+import readline from 'readline'
 import {
   readGlobalStats,
   resetGlobalStats,
@@ -39,6 +41,63 @@ import {
 const VERSION = '0.1.0'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
 const HOOK_SAVINGS_FILE = path.join(os.homedir(), '.cork-ai', 'hook-savings.json')
+const CONFIG_FILE = path.join(os.homedir(), '.cork-ai', 'config.json')
+
+// Replace with your actual telemetry endpoint after deploying scripts/telemetry-server.php
+const TELEMETRY_ENDPOINT = 'https://YOUR_DOMAIN/cork-ai-telemetry.php'
+
+// ─── Config (~/.cork-ai/config.json) ─────────────────────────────────────────
+
+interface CorkConfig {
+  telemetry?: boolean  // undefined = never asked, true = opted in, false = opted out
+}
+
+function loadConfig(): CorkConfig {
+  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as CorkConfig } catch { return {} }
+}
+
+function saveConfig(cfg: CorkConfig): void {
+  try {
+    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true })
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8')
+  } catch { /* non-critical */ }
+}
+
+function isTelemetryEnabled(): boolean {
+  if (process.env.CORK_AI_TELEMETRY === '0' || process.env.DO_NOT_TRACK === '1') return false
+  return loadConfig().telemetry === true
+}
+
+// ─── Telemetry (fire-and-forget, anonymous) ───────────────────────────────────
+
+interface TelemetryPayload {
+  v: string
+  os: string
+  arch: string
+  savings_pct: number
+  requests: number
+  duration_min: number
+  modules: Record<string, number>
+}
+
+function sendTelemetry(payload: TelemetryPayload): void {
+  if (TELEMETRY_ENDPOINT.includes('YOUR_DOMAIN')) return  // not configured yet
+  try {
+    const body = JSON.stringify(payload)
+    const url = new URL(TELEMETRY_ENDPOINT)
+    const req = https.request({
+      hostname: url.hostname,
+      path: url.pathname,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      timeout: 2000,
+    }, () => {})
+    req.on('error', () => {})
+    req.on('timeout', () => req.destroy())
+    req.write(body)
+    req.end()
+  } catch { /* never blocks execution */ }
+}
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 
@@ -116,6 +175,9 @@ ${C.bold('Claude Code integration:')}
 
 ${C.bold('Other:')}
   cork-ai reset             Reset all stats
+  cork-ai telemetry on      Enable anonymous usage stats (opt-in)
+  cork-ai telemetry off     Disable telemetry
+  cork-ai telemetry status  Show telemetry state
   cork-ai --version         Show version
 
 ${C.bold('Stats file:')} ${STATS_FILE}
@@ -423,7 +485,7 @@ function isCorkHookInstalled(settings: ClaudeSettings): boolean {
   )
 }
 
-function hooksInstall(): void {
+async function hooksInstall(): Promise<void> {
   const settings = loadClaudeSettings()
   settings.hooks ??= {}
   settings.hooks.PreToolUse ??= []
@@ -452,6 +514,27 @@ function hooksInstall(): void {
   console.log(`   ${C.dim('Large files')} (>500 tokens) → extracted signatures + key sections.`)
   console.log(`   ${C.dim('Savings:')} 40-90% on code files, 20-50% on text files.`)
   console.log()
+
+  // Ask for telemetry consent (only if never asked and stdin is interactive)
+  const cfg = loadConfig()
+  if (cfg.telemetry === undefined && process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    const answer = await new Promise<string>(resolve => {
+      rl.question(
+        `   ${C.dim('Help improve cork-ai? Send anonymous compression stats (no file paths, no content).')} [y/N]: `,
+        a => { rl.close(); resolve(a.trim().toLowerCase()) }
+      )
+    })
+    const opted = answer === 'y' || answer === 'yes'
+    saveConfig({ ...cfg, telemetry: opted })
+    if (opted) {
+      console.log(`   ${C.green('✔')}  Telemetry enabled — thank you! Run ${C.cyan('cork-ai telemetry off')} to disable.`)
+    } else {
+      console.log(`   ${C.dim('Telemetry off. Enable later with: cork-ai telemetry on')}`)
+    }
+    console.log()
+  }
+
   console.log(`   Restart Claude Code for the hook to take effect.`)
   console.log(`   Run ${C.cyan('cork-ai gain')} after sessions to see savings.\n`)
 }
@@ -651,6 +734,7 @@ async function runHook(): Promise<void> {
 
   // Record this hook compression as a session in global stats
   // (lightweight: 1 "request" = 1 hook call)
+  const savingsPct = Math.round((saved / originalTokens) * 1000) / 10
   try {
     recordSession({
       projectPath: (event.cwd as string) || process.cwd(),
@@ -660,11 +744,23 @@ async function runHook(): Promise<void> {
       originalTokens,
       compressedTokens,
       savedTokens: saved,
-      savingsPercent: Math.round((saved / originalTokens) * 1000) / 10,
+      savingsPercent: savingsPct,
       estimatedCostSaved: (saved / 1_000_000) * 3.0,
       byModule: { hookReadCompressor: saved },
     })
   } catch { /* non-critical */ }
+
+  if (isTelemetryEnabled()) {
+    sendTelemetry({
+      v: VERSION,
+      os: process.platform,
+      arch: process.arch,
+      savings_pct: savingsPct,
+      requests: 1,
+      duration_min: 0,
+      modules: { hookReadCompressor: 100 },
+    })
+  }
 
   console.log(JSON.stringify({
     decision: 'block',
@@ -807,6 +903,31 @@ function runInit(): void {
 
 // ─── reset ────────────────────────────────────────────────────────────────────
 
+// ─── Telemetry commands ───────────────────────────────────────────────────────
+
+function telemetryOn(): void {
+  saveConfig({ ...loadConfig(), telemetry: true })
+  console.log(`\n${C.green('✔')}  Telemetry enabled. Anonymous compression stats will be sent after each session.`)
+  console.log(`   ${C.dim('What is sent: cork-ai version, OS, compression %, module breakdown. Never file paths or content.')}`)
+  console.log(`   Run ${C.cyan('cork-ai telemetry off')} to disable.\n`)
+}
+
+function telemetryOff(): void {
+  saveConfig({ ...loadConfig(), telemetry: false })
+  console.log(`\n${C.green('✔')}  Telemetry disabled. No data will be sent.\n`)
+}
+
+function telemetryStatus(): void {
+  const enabled = isTelemetryEnabled()
+  const cfg = loadConfig()
+  console.log()
+  console.log(`  Telemetry: ${enabled ? C.green('● enabled') : C.yellow('○ disabled')}`)
+  if (cfg.telemetry === undefined) console.log(`  ${C.dim('(never configured — run cork-ai telemetry on to enable)')}`)
+  if (process.env.DO_NOT_TRACK === '1') console.log(`  ${C.dim('(overridden by DO_NOT_TRACK=1)')}`)
+  if (process.env.CORK_AI_TELEMETRY === '0') console.log(`  ${C.dim('(overridden by CORK_AI_TELEMETRY=0)')}`)
+  console.log()
+}
+
 function resetStats(): void {
   const stats = readGlobalStats()
   if (!stats || stats.allTime.totalRequests === 0) {
@@ -818,39 +939,46 @@ function resetStats(): void {
 
 // ─── Main dispatcher ──────────────────────────────────────────────────────────
 
-const args = process.argv.slice(2)
-const cmd = args[0]
-const sub = args[1]
+;(async () => {
+  const args = process.argv.slice(2)
+  const cmd = args[0]
+  const sub = args[1]
 
-if (!cmd || cmd === '--help' || cmd === '-h') {
-  showHelp()
-} else if (cmd === '--version' || cmd === '-v') {
-  showVersion()
-} else if (cmd === 'hook') {
-  // Internal: called by Claude Code PreToolUse hook
-  runHook().catch(() => process.exit(0))
-} else if (cmd === 'init') {
-  runInit()
-} else if (cmd === 'hooks') {
-  if (sub === 'install') hooksInstall()
-  else if (sub === 'remove' || sub === 'uninstall') hooksRemove()
-  else if (sub === 'status') hooksStatus()
-  else { console.error(`\nUsage: cork-ai hooks [install|remove|status]\n`); process.exit(1) }
-} else if (cmd === 'gain') {
-  if (sub === '--all') showAllTime()
-  else if (sub === '--history') showHistory()
-  else showLastSession()
-} else if (cmd === 'report') {
-  if (sub === '--daily') reportPeriod('day')
-  else if (sub === '--weekly') reportPeriod('week')
-  else if (sub === '--monthly') reportPeriod('month')
-  else if (sub === '--projects') reportProjects()
-  else if (sub === '--forecast') reportForecast()
-  else if (sub === '--json') reportJson()
-  else reportFull()
-} else if (cmd === 'reset') {
-  resetStats()
-} else {
-  console.error(`\nUnknown command: ${cmd}\nRun \`cork-ai --help\` for usage.\n`)
-  process.exit(1)
-}
+  if (!cmd || cmd === '--help' || cmd === '-h') {
+    showHelp()
+  } else if (cmd === '--version' || cmd === '-v') {
+    showVersion()
+  } else if (cmd === 'hook') {
+    // Internal: called by Claude Code PreToolUse hook
+    await runHook().catch(() => process.exit(0))
+  } else if (cmd === 'init') {
+    runInit()
+  } else if (cmd === 'hooks') {
+    if (sub === 'install') await hooksInstall()
+    else if (sub === 'remove' || sub === 'uninstall') hooksRemove()
+    else if (sub === 'status') hooksStatus()
+    else { console.error(`\nUsage: cork-ai hooks [install|remove|status]\n`); process.exit(1) }
+  } else if (cmd === 'telemetry') {
+    if (sub === 'on') telemetryOn()
+    else if (sub === 'off') telemetryOff()
+    else if (sub === 'status' || !sub) telemetryStatus()
+    else { console.error(`\nUsage: cork-ai telemetry [on|off|status]\n`); process.exit(1) }
+  } else if (cmd === 'gain') {
+    if (sub === '--all') showAllTime()
+    else if (sub === '--history') showHistory()
+    else showLastSession()
+  } else if (cmd === 'report') {
+    if (sub === '--daily') reportPeriod('day')
+    else if (sub === '--weekly') reportPeriod('week')
+    else if (sub === '--monthly') reportPeriod('month')
+    else if (sub === '--projects') reportProjects()
+    else if (sub === '--forecast') reportForecast()
+    else if (sub === '--json') reportJson()
+    else reportFull()
+  } else if (cmd === 'reset') {
+    resetStats()
+  } else {
+    console.error(`\nUnknown command: ${cmd}\nRun \`cork-ai --help\` for usage.\n`)
+    process.exit(1)
+  }
+})()
