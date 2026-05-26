@@ -1,72 +1,118 @@
 # cork-ai — Documentación en español
 
-[![npm version](https://img.shields.io/npm/v/cork-ai.svg)](https://www.npmjs.com/package/cork-ai)
 [![CI](https://github.com/mathys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mathys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Optimización quirúrgica del contexto para Claude Code. Reduce un 60–75% los tokens de entrada en sesiones largas.**
+**Reduce un 60–75% los tokens en sesiones largas — sin cambiar cómo trabajas.**
 
 > [English (principal)](../README.md) · [Français](README.fr.md)
 
 ---
 
-## El problema
+## ¿Qué es cork-ai?
 
-En una sesión de Claude Code de 2 horas, cada solicitud a la API contiene:
+Cada vez que Claude Code hace una llamada a la API, envía el **historial completo** — cada archivo leído, cada salida bash, cada cabecera repetida. En una sesión de 2 horas, eso supera fácilmente **100.000 tokens por solicitud**, la mayoría redundantes.
 
-- El **system prompt completo** (~2.000–5.000 tokens) — reenviado íntegramente en cada turno
-- **Todo el historial de conversación** desde el inicio de la sesión
-- **Todos los resultados de herramientas** (archivos leídos, salida bash, resultados de búsqueda) — completos
-- **Cabeceras auto-inyectadas** (CWD, archivos abiertos, timestamp) — casi idénticas en cada mensaje
+cork-ai se interpone entre Claude Code y la API de Anthropic. Comprime lo redundante antes de cada llamada. **Tu flujo de trabajo no cambia. Los resultados no cambian. La factura, sí.**
 
-Resultado: 100.000–150.000 tokens por solicitud en sesiones largas, con costos que crecen exponencialmente.
-
-## La solución
-
-cork-ai aplica compresiones precisas en cada capa del contexto:
-
-| Módulo | Qué hace | Ganancia estimada |
-|--------|---------|------------------|
-| Tool Result Compressor | Extrae firmas de código, trunca bash, resume JSON | **30–50%** |
-| Header Stripper | Deduplica cabeceras repetitivas de Claude Code | **5–10%** |
-| Code Deduplicator | Reemplaza bloques de código ya escritos en archivos | **10–20%** |
-| Heatmap Manager | Resume mensajes antiguos de baja relevancia | **15–25%** |
-| Semantic Deduplicator | Deduplica conceptos expresados diferente (TF-IDF) | **10–15%** |
-| Selective Summarizer | Resume preservando información crítica verbatim | **20–30%** |
-| Session Cache | Snapshot del proyecto entre sesiones | **40–60%** en la siguiente sesión |
-
-**Ganancias combinadas:**
-
-| Escenario | Sin librería | Con librería | Reducción |
-|-----------|-------------|-------------|-----------|
-| Sesión corta (< 30 min) | ~15.000 tokens | ~12.000 | ~20% |
-| Sesión media (1h) | ~60.000 tokens | ~22.000 | ~63% |
-| Sesión larga (2h+) | ~140.000 tokens | ~38.000 | ~73% |
-| Siguiente sesión (mismo proyecto) | ~50.000 tokens | ~18.000 | ~64% |
+```
+Claude Code lee un archivo
+        ↓
+cork-ai intercepta (hook PreToolUse Read)
+        ↓
+Comprime: extrae firmas, trunca boilerplate
+        ↓
+Claude recibe el resumen comprimido en vez del archivo completo
+        ↓
+60–90% menos tokens por Read — automáticamente, en cada sesión
+```
 
 ---
 
 ## Instalación
 
-```bash
-npm install cork-ai
-# o
-yarn add cork-ai
-# o
-pnpm add cork-ai
-```
+**Sin Node.js, sin npm.** cork-ai es un binario standalone.
 
-Para el modo `wrapClient()`, se requiere `@anthropic-ai/sdk`:
+### macOS / Linux / WSL2
 
 ```bash
-npm install @anthropic-ai/sdk
+curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
 ```
+
+Descarga el binario correcto para tu OS + arquitectura, lo coloca en `~/.local/bin` y ejecuta `cork-ai hooks install`.
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
+```
+
+### Descarga manual
+
+[Releases de GitHub](https://github.com/mathys62/cork-ai/releases/latest) → descarga el binario para tu plataforma:
+
+| Plataforma | Archivo |
+|------------|---------|
+| Linux x64 | `cork-ai-linux-x64` |
+| Linux arm64 | `cork-ai-linux-arm64` |
+| macOS Intel | `cork-ai-darwin-x64` |
+| macOS Apple Silicon | `cork-ai-darwin-arm64` |
+| Windows x64 | `cork-ai-windows-x64.exe` |
+
+```bash
+chmod +x cork-ai-linux-x64
+mv cork-ai-linux-x64 ~/.local/bin/cork-ai
+cork-ai hooks install
+```
+
+Listo. Reinicia Claude Code — la compresión está activa para todas tus sesiones en todos tus proyectos.
 
 ---
 
-## Inicio rápido — `cork-ai init`
+## Cómo funciona — 7 estrategias de compresión
 
-La forma más rápida de integrar cork-ai en un proyecto existente:
+| # | Qué se desperdicia | Cómo lo soluciona cork-ai | Ahorro |
+|---|-------------------|---------------------------|--------|
+| 1 | **Lecturas de archivos** — cada `Read` envía el archivo completo, siempre | Extrae firmas de código, trunca bash, aplana JSON | **30–50%** |
+| 2 | **Cabeceras repetitivas** — Claude Code inyecta CWD, OS, archivos abiertos en cada mensaje | Conserva la primera, reemplaza el resto con un diff corto | **5–10%** |
+| 3 | **Código duplicado** — el código recién escrito en disco se reenvía en el historial | Reemplazado por `[code written to src/foo.ts — omitted]` | **10–20%** |
+| 4 | **Historial irrelevante** — vieja discusión de CSS mientras se depura SQL | Scoring de relevancia, resume los mensajes de baja puntuación a una línea | **15–25%** |
+| 5 | **Conceptos repetidos** — la misma idea expresada de 5 formas distintas | TF-IDF + similitud Jaccard, reemplaza casi-duplicados con una referencia | **10–15%** |
+| 6 | **Mensajes viejos verbosos** — texto de exploración que podría ocupar el 10% | Resumido preservando verbatim rutas, errores y decisiones | **20–30%** |
+| 7 | **Arranque en frío** — la siguiente sesión redescubre todo el proyecto desde cero | Snapshot comprimido del proyecto, recargado al inicio | **40–60%** siguiente sesión |
+
+cork-ai es **adaptativo**: no hace nada en sesiones cortas y escala la compresión a medida que el contexto crece.
+
+---
+
+## Resultados medidos
+
+| Duración de sesión | Sin cork-ai | Con cork-ai | Reducción |
+|-------------------|------------|------------|-----------|
+| Corta (< 30 min) | ~15.000 tokens | ~12.000 | ~20% |
+| Media (1h) | ~60.000 tokens | ~22.000 | **~63%** |
+| Larga (2h+) | ~140.000 tokens | ~38.000 | **~73%** |
+| Siguiente sesión (mismo proyecto) | ~50.000 tokens | ~18.000 | **~64%** |
+
+Combinado con [RTK](https://github.com/rtk-ai/rtk): **75–85% de reducción total** en sesiones largas.
+
+---
+
+## CLI
+
+### `cork-ai hooks install`
+
+Registra cork-ai como hook de Claude Code globalmente en `~/.claude/settings.json`. Activo para todas las sesiones en todos los proyectos, sin configuración por proyecto.
+
+```bash
+cork-ai hooks install   # activar
+cork-ai hooks status    # comprobar si está activo
+cork-ai hooks remove    # desactivar
+```
+
+### `cork-ai init`
+
+Si tienes código que llama a la API de Anthropic directamente:
 
 ```bash
 cd tu-proyecto
@@ -74,134 +120,120 @@ cork-ai init
 ```
 
 cork-ai escanea los archivos que instancian `new Anthropic()` y:
+- **Parchea automáticamente** el archivo — añade `wrapClient` y envuelve el cliente
+- **Genera** un `cork-ai-client.ts` listo para importar — si no hay cliente existente
+- **Muestra instrucciones precisas** — si hay varios archivos
 
-- **Parchea automáticamente** el archivo (añade `wrapClient`) — si se encuentra un único archivo
-- **Genera** un archivo wrapper `cork-ai-client.ts` listo para usar — si no hay cliente existente
-- **Muestra instrucciones precisas** — si se encuentran varios archivos
+### `cork-ai gain`
 
-Sin fichero de configuración, sin edición manual. Ejecuta `cork-ai gain` después de tu primera sesión.
+Consulta tus ahorros tras cada sesión:
 
----
-
-## Modos de uso
-
-### Modo 1 — Middleware transparente (recomendado)
-
-```typescript
-import Anthropic from '@anthropic-ai/sdk'
-import { wrapClient } from 'cork-ai'
-
-const client = wrapClient(new Anthropic(), {
-  maxContextTokens: 150_000,
-  aggressiveness: 0.6,
-})
-
-// Interfaz idéntica al SDK — no hay cambios en tu código
-const response = await client.messages.create({
-  model: 'claude-sonnet-4-6',
-  max_tokens: 4096,
-  messages: historial,
-})
-
-// Ver estadísticas
-const stats = client.getStats()
-console.log(`Ahorrado: ${stats?.request.savingsPercent}%`)
+```bash
+cork-ai gain              # última sesión
+cork-ai gain --all        # total acumulado
+cork-ai gain --history    # todas las sesiones registradas
 ```
 
-### Modo 2 — Compresión manual
+### `cork-ai report`
 
-```typescript
-import { CtxForge } from 'cork-ai'
+Reporting de nivel empresarial:
 
-const forge = new CtxForge({ maxContextTokens: 150_000 })
-const { messages, stats } = forge.compress(historial)
-
-// Enviar los mensajes comprimidos a la API tú mismo
-await anthropic.messages.create({ model: '...', max_tokens: 4096, messages })
-```
-
----
-
-## Integración con Claude Code
-
-### Opción A — En tu wrapper de API
-
-```typescript
-// src/claude.ts
-import Anthropic from '@anthropic-ai/sdk'
-import { wrapClient } from 'cork-ai'
-
-export const claude = wrapClient(new Anthropic(), {
-  maxContextTokens: 150_000,
-  aggressiveness: 0.6,
-  onStats: (stats) => {
-    if (stats.request.savingsPercent > 5) {
-      process.stderr.write(`[cork-ai] ${stats.request.savingsPercent}% ahorrado\n`)
-    }
-  },
-})
-```
-
-### Opción B — Caché entre sesiones
-
-```typescript
-import { SessionCache } from 'cork-ai'
-
-const cache = new SessionCache()
-
-// Al iniciar: inyectar contexto de la sesión anterior
-const contextoAnterior = cache.load(process.cwd())
-if (contextoAnterior) systemPrompt += '\n\n' + contextoAnterior
-
-// Al terminar: guardar esta sesión
-process.on('exit', () => cache.save(historial, process.cwd()))
+```bash
+cork-ai report --daily      # tendencia diaria
+cork-ai report --weekly     # desglose semanal
+cork-ai report --monthly    # desglose mensual
+cork-ai report --projects   # por proyecto, ordenado por ahorro
+cork-ai report --forecast   # proyección anual + ROI
+cork-ai report --json       # salida legible por máquinas para dashboards / CI
 ```
 
 ---
 
 ## Niveles de compresión adaptativos
 
-| Uso de tokens | Nivel | Módulos activos |
-|---------------|-------|----------------|
-| < 40% del presupuesto | Passthrough | Ninguno |
-| 40–65% | Nivel 1 | Tool results + Headers |
-| 65–80% | Nivel 2 | + Code dedup + Heatmap |
-| > 80% | Nivel 3 | + Semantic dedup + Selective summarizer |
-
-cork-ai **no hace nada** en sesiones pequeñas y se activa automáticamente a medida que crece el contexto.
+```
+Uso de tokens        Nivel         Qué se ejecuta
+──────────────────────────────────────────────────────────────
+< 40% del presupuesto → Passthrough  Nada. La sesión es pequeña.
+40–65%               → Nivel 1      Tool results + Headers
+65–80%               → Nivel 2      + Code dedup + Heatmap
+> 80%                → Nivel 3      + Semantic dedup + Summarizer
+```
 
 ---
 
-## System prompt dinámico
+## Funciona junto a RTK
+
+[RTK](https://github.com/rtk-ai/rtk) y cork-ai cubren capas completamente distintas — están diseñados para usarse juntos.
+
+```
+Lo que RTK comprime (llamadas Bash):
+  git status, git diff, cargo test, npm test, docker ps, grep, ls …
+  → 60–90% de ahorro en salidas de comandos shell
+
+Lo que cork-ai comprime (herramientas nativas de Claude Code + conversación):
+  Read → contenido de archivos comprimido en firmas
+  Historial → cabeceras deduplicadas, código deduplicado, mensajes viejos resumidos
+  → 40–90% en lecturas de archivos, 20–60% en historial de conversación
+
+─────────────────────────────────────────────────────────────────
+Juntos → 75–85% de reducción total en sesiones largas
+```
+
+```bash
+# RTK — compresión de comandos Bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+
+# cork-ai — compresión de la herramienta Read + historial
+curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+```
+
+---
+
+## API de librería (para desarrolladores de apps IA)
+
+Si estás construyendo una aplicación que llama a la API de Anthropic directamente, puedes usar cork-ai como librería para comprimir tu historial automáticamente.
+
+Compilar desde el código fuente:
+
+```bash
+git clone https://github.com/mathys62/cork-ai.git
+cd cork-ai && npm install && npm run build
+```
+
+Luego importar desde `./dist`:
 
 ```typescript
-const systemPrompt = `
-Instrucciones generales — siempre incluidas.
+import Anthropic from '@anthropic-ai/sdk'
+import { wrapClient } from './dist/index.js'
 
-<!-- @cork-ai section: python -->
-Para Python: type hints, pytest, list comprehensions.
-<!-- @cork-ai end -->
+const client = wrapClient(new Anthropic(), {
+  maxContextTokens: 150_000,
+  aggressiveness: 0.6,
+})
 
-<!-- @cork-ai section: typescript triggers: typescript, ts, tsx -->
-Para TypeScript: tipos estrictos, sin any, imports con .js.
-<!-- @cork-ai end -->
-`
-
-import { DynamicSystemPrompt } from 'cork-ai'
-const dsp = new DynamicSystemPrompt()
-const optimized = dsp.build(systemPrompt, mensajesRecientes)
+// Interfaz idéntica al SDK bruto — sin cambios en el resto del código
+const response = await client.messages.create({
+  model: 'claude-sonnet-4-6',
+  max_tokens: 4096,
+  messages: historial,
+})
 ```
 
 ---
 
 ## Compatibilidad
 
-- **Node.js**: 18, 20, 22
-- **SO**: Linux, macOS (Intel + Apple Silicon), Windows (nativo + WSL2)
-- **Sin dependencias nativas**: sin binarios compilados, sin ML, sin servicios externos
-- **Peer dependency**: `@anthropic-ai/sdk >=0.20.0` (opcional — solo para `wrapClient()`)
+- **SO**: Linux (Ubuntu 20.04+, Debian, Alpine), macOS (Intel + Apple Silicon), Windows (nativo + WSL2)
+- **Sin dependencias runtime** — binario standalone, sin Node.js ni npm
+- **API de librería**: requiere Node.js ≥ 18 y `@anthropic-ai/sdk ≥ 0.20.0`
 
 ---
+
+## Contribuir
+
+Ver [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Licencia
 
