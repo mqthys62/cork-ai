@@ -54,7 +54,7 @@ cork-ai is **adaptive**: it does nothing when your context is small, and scales 
 | Long (2h+) | ~140,000 tokens | ~38,000 | **~73%** |
 | Next session (same project) | ~50,000 tokens | ~18,000 | **~64%** |
 
-Combined with [RTK](https://github.com/reachingforthejack/rtk): realistic **65–75% total reduction** on long sessions.
+Combined with [RTK](https://github.com/rtk-ai/rtk): realistic **75–85% total reduction** on long sessions (RTK covers Bash outputs, cork-ai covers file reads and conversation history).
 
 ---
 
@@ -240,9 +240,11 @@ export const claude = wrapClient(new Anthropic(), {
 
 If you have an existing `claude.ts` or `ai.ts` in each project, add the wrap there. It's two lines and `cork-ai gain` still aggregates stats globally.
 
-**Why cork-ai is a library (not a CLI proxy like RTK)**
+**Why cork-ai uses hooks (not a Bash proxy like RTK)**
 
-RTK intercepts bash commands at the shell level — it doesn't need to understand your code. cork-ai compresses JavaScript/TypeScript message arrays, which requires integration at the code level where API calls happen. The upside: cork-ai can be much smarter about what it compresses. The tradeoff: it needs to be imported. Once imported, `cork-ai gain` works globally for all stats.
+[RTK](https://github.com/rtk-ai/rtk) intercepts Bash tool calls and compresses `git`, `cargo`, `npm test`, and other shell command outputs. RTK explicitly states it does not touch Claude Code built-in tools: *"Read, Grep, and Glob do not pass through the Bash hook."*
+
+cork-ai fills exactly that gap — it compresses what RTK can't reach: file contents (Read tool), conversation history, repeated headers, and duplicate code blocks. The two tools cover different layers with zero overlap.
 
 ---
 
@@ -348,16 +350,33 @@ const optimized = dsp.build(systemPrompt, recentMessages)
 
 ## Works alongside RTK
 
-If you already use RTK for global summarization, cork-ai adds the layers RTK doesn't cover:
+[RTK](https://github.com/rtk-ai/rtk) and cork-ai cover completely different layers — they are designed to be used together.
 
 ```
-RTK     → summarizes entire old exchanges into a compact block
-cork-ai → compresses tool results, headers, code, history scoring
-────────────────────────────────────────────────────────────────
-Together → 65–75% total reduction on long sessions
+What RTK compresses (Bash tool calls):
+  git status, git diff, cargo test, npm test, docker ps, grep, ls …
+  → 60–90% savings on shell command outputs
+
+What cork-ai compresses (Claude Code built-in tools + conversation):
+  Read → file contents compressed to signatures
+  Conversation history → headers deduped, code deduped, old messages summarized
+  → 40–90% savings on file reads, 20–60% on conversation history
+
+─────────────────────────────────────────────────────────────────
+Together → 75–85% total token reduction on long sessions
 ```
 
-They don't conflict. Use both.
+RTK's own README notes: *"Claude Code built-in tools like Read, Grep, and Glob do not pass through the Bash hook."* cork-ai is the answer to that exact limitation.
+
+Install both:
+```bash
+# RTK — Bash command compression
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+
+# cork-ai — Read tool + conversation compression
+curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+```
 
 ---
 

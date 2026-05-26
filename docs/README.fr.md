@@ -297,18 +297,34 @@ const optimized = dsp.build(systemPrompt, messagesRecents)
 
 ---
 
-## Intégration avec RTK
+## Utilisation avec RTK
 
-RTK gère la summarization globale des anciens échanges. cork-ai s'en occupe des couches que RTK n'adresse pas :
+[RTK](https://github.com/rtk-ai/rtk) et cork-ai couvrent des couches complètement différentes — ils sont faits pour être utilisés ensemble.
 
 ```
-cork-ai : tool_results → headers → code dupliqué → heatmap
-RTK     : summarization globale des vieux échanges
-─────────────────────────────────────────────────────────
-Résultat combiné : 65–75% de réduction totale
+Ce que RTK compresse (appels Bash) :
+  git status, git diff, cargo test, npm test, docker ps, grep, ls …
+  → 60–90% d'économie sur les sorties de commandes shell
+
+Ce que cork-ai compresse (outils natifs Claude Code + conversation) :
+  Read → contenu de fichiers compressé en signatures
+  Historique → headers dédupliqués, code dédupliqué, vieux messages résumés
+  → 40–90% sur les lectures de fichiers, 20–60% sur l'historique
+
+──────────────────────────────────────────────────────────────────
+Ensemble → 75–85% de réduction totale sur les longues sessions
 ```
 
-Les deux sont complémentaires, pas concurrents.
+Le README de RTK précise lui-même : *"Claude Code built-in tools like Read, Grep, and Glob do not pass through the Bash hook."* cork-ai est la réponse exacte à cette limitation.
+
+```bash
+# RTK — compression des commandes Bash
+curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
+rtk init -g
+
+# cork-ai — compression de l'outil Read + historique de conversation
+curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+```
 
 ---
 
