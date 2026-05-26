@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build standalone binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Run tests
+        run: bun run test
+
+      - name: Build binaries (cross-compile all targets)
+        run: |
+          mkdir -p release
+
+          bun build --compile --minify src/cli/index.ts \
+            --target=bun-linux-x64   --outfile release/cork-ai-linux-x64
+          bun build --compile --minify src/cli/index.ts \
+            --target=bun-linux-arm64 --outfile release/cork-ai-linux-arm64
+          bun build --compile --minify src/cli/index.ts \
+            --target=bun-darwin-x64  --outfile release/cork-ai-darwin-x64
+          bun build --compile --minify src/cli/index.ts \
+            --target=bun-darwin-arm64 --outfile release/cork-ai-darwin-arm64
+          bun build --compile --minify src/cli/index.ts \
+            --target=bun-windows-x64 --outfile release/cork-ai-windows-x64.exe
+
+          # Checksums
+          cd release && sha256sum * > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/cork-ai-linux-x64
+            release/cork-ai-linux-arm64
+            release/cork-ai-darwin-x64
+            release/cork-ai-darwin-arm64
+            release/cork-ai-windows-x64.exe
+            release/checksums.txt
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            **macOS / Linux / WSL2:**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
+            ```
+
+            **Windows (PowerShell):**
+            ```powershell
+            irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
+            ```
+
+            Then: `cork-ai hooks install` to activate Claude Code integration.
+
+            ## Binaries
+
+            | Platform | File |
+            |----------|------|
+            | Linux x64 | `cork-ai-linux-x64` |
+            | Linux arm64 | `cork-ai-linux-arm64` |
+            | macOS Intel | `cork-ai-darwin-x64` |
+            | macOS Apple Silicon | `cork-ai-darwin-arm64` |
+            | Windows x64 | `cork-ai-windows-x64.exe` |

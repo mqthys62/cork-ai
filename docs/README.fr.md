@@ -82,34 +82,39 @@ cork-ai applique des compressions chirurgicales à chaque couche :
 
 ## Installation
 
-### Installation en une ligne (recommandée)
+**Pas de npm, pas de Node.js requis.** cork-ai est distribué comme binaire standalone.
 
-**macOS / Linux / WSL2 :**
+### macOS / Linux / WSL2
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
 ```
 
-**Windows (PowerShell) :**
+Télécharge le bon binaire pour ton OS + architecture depuis GitHub Releases, le place dans `~/.local/bin`, et lance `cork-ai hooks install`.
+
+### Windows (PowerShell)
+
 ```powershell
 irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
-Le script détecte automatiquement ton gestionnaire de paquets (npm / yarn / pnpm / bun), installe cork-ai globalement et configure les hooks Claude Code — **une seule commande**.
+### Téléchargement manuel
 
----
+[Releases GitHub](https://github.com/mathys62/cork-ai/releases/latest) → télécharge le binaire pour ta plateforme :
 
-### Installation manuelle
+| Plateforme | Fichier |
+|------------|---------|
+| Linux x64 | `cork-ai-linux-x64` |
+| Linux arm64 | `cork-ai-linux-arm64` |
+| macOS Intel | `cork-ai-darwin-x64` |
+| macOS Apple Silicon | `cork-ai-darwin-arm64` |
+| Windows x64 | `cork-ai-windows-x64.exe` |
 
-**Globale** (CLI + hooks Claude Code — actif sur tous tes projets) :
+### Pour les développeurs (API bibliothèque)
+
+Si tu veux utiliser `wrapClient` ou `CtxForge` dans ton propre code :
 ```bash
-npm install -g cork-ai        # ou: yarn global add, pnpm install -g, bun install -g
-cork-ai hooks install         # configure ~/.claude/settings.json
-```
-
-**Par projet** (pour l'API bibliothèque) :
-```bash
-npm install cork-ai
-npm install @anthropic-ai/sdk
+npm install cork-ai && npm install @anthropic-ai/sdk
 ```
 
 ---

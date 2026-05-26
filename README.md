@@ -60,35 +60,47 @@ Combined with [RTK](https://github.com/rtk-ai/rtk): realistic **75–85% total r
 
 ## Installation
 
-### One-line install (recommended)
+**No npm, no Node.js required.** cork-ai is distributed as a standalone binary.
 
-**macOS / Linux / WSL2:**
+### macOS / Linux / WSL2
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.sh | sh
 ```
 
-**Windows (PowerShell):**
+Downloads the right binary for your OS + architecture from GitHub Releases, puts it in `~/.local/bin`, and runs `cork-ai hooks install`.
+
+### Windows (PowerShell)
+
 ```powershell
 irm https://raw.githubusercontent.com/mathys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
-The script auto-detects your package manager (npm / yarn / pnpm / bun), installs cork-ai globally, and runs `cork-ai hooks install` — you're done in one command.
+### Manual download
 
----
+Go to [Releases](https://github.com/mathys62/cork-ai/releases/latest) and download the binary for your platform:
 
-### Manual install
+| Platform | File |
+|----------|------|
+| Linux x64 | `cork-ai-linux-x64` |
+| Linux arm64 | `cork-ai-linux-arm64` |
+| macOS Intel | `cork-ai-darwin-x64` |
+| macOS Apple Silicon | `cork-ai-darwin-arm64` |
+| Windows x64 | `cork-ai-windows-x64.exe` |
 
-**Global install** (for the CLI + Claude Code hooks — works across all your projects):
 ```bash
-npm install -g cork-ai     # or: yarn global add cork-ai
-pnpm install -g cork-ai   #     bun install -g cork-ai
-cork-ai hooks install      # ← adds the hook to ~/.claude/settings.json
+chmod +x cork-ai-linux-x64
+mv cork-ai-linux-x64 ~/.local/bin/cork-ai
+cork-ai hooks install
 ```
 
-**Per-project install** (for the library API — `wrapClient`, `CtxForge`):
+### For developers using the library API
+
+If you want to use `wrapClient` or `CtxForge` in your own code:
+
 ```bash
 npm install cork-ai
-npm install @anthropic-ai/sdk   # peer dep, only needed for wrapClient()
+npm install @anthropic-ai/sdk   # only needed for wrapClient()
 ```
 
 ---
