@@ -1,6 +1,6 @@
 /**
  * Persistent stats — sauvegarde les économies dans ~/.cork-ai/stats.json.
- * Permet à `cork-ai gain` d'afficher les stats globales entre sessions.
+ * Permet à `cork-ai gain` et `cork-ai report` d'afficher les stats globales.
  */
 
 import fs from 'fs'
@@ -26,6 +26,7 @@ export interface GlobalStats {
 
 export interface SessionRecord {
   sessionId: string
+  projectPath?: string
   startedAt: string
   endedAt: string
   requests: number
@@ -35,6 +36,37 @@ export interface SessionRecord {
   savingsPercent: number
   estimatedCostSaved: number
   byModule: Record<string, number>
+}
+
+export interface ProjectStats {
+  projectPath: string
+  projectName: string
+  sessionCount: number
+  totalRequests: number
+  totalOriginalTokens: number
+  totalSavedTokens: number
+  totalCostSaved: number
+  avgSavingsPercent: number
+  lastSessionAt: string
+}
+
+export interface PeriodBucket {
+  label: string        // "2026-05-26", "2026-W21", "2026-05"
+  sessionCount: number
+  totalOriginalTokens: number
+  totalSavedTokens: number
+  totalCostSaved: number
+  avgSavingsPercent: number
+}
+
+export interface ForecastStats {
+  basedOnDays: number
+  avgDailyTokensSaved: number
+  avgDailyCostSaved: number
+  projectedAnnualTokensSaved: number
+  projectedAnnualCostSaved: number
+  projectedMonthlyTokensSaved: number
+  projectedMonthlyCostSaved: number
 }
 
 function ensureDir(): void {
@@ -68,18 +100,17 @@ function saveStats(stats: GlobalStats): void {
   fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), 'utf-8')
 }
 
-/**
- * Enregistre une session terminée dans les stats globales.
- */
+// ─── Write ────────────────────────────────────────────────────────────────────
+
 export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   const stats = loadStats()
   const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
   const record: SessionRecord = { sessionId, ...session }
 
   stats.sessions.push(record)
-  // Garder les 100 dernières sessions
-  if (stats.sessions.length > 100) {
-    stats.sessions = stats.sessions.slice(-100)
+  // Keep last 500 sessions for meaningful trend analysis
+  if (stats.sessions.length > 500) {
+    stats.sessions = stats.sessions.slice(-500)
   }
 
   stats.allTime.totalRequests += session.requests
@@ -91,20 +122,10 @@ export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   saveStats(stats)
 }
 
-/**
- * Lit les stats globales depuis le fichier persistant.
- */
 export function readGlobalStats(): GlobalStats | null {
-  try {
-    return loadStats()
-  } catch {
-    return null
-  }
+  try { return loadStats() } catch { return null }
 }
 
-/**
- * Remet les stats à zéro.
- */
 export function resetGlobalStats(): void {
   ensureDir()
   const fresh: GlobalStats = {
@@ -121,6 +142,141 @@ export function resetGlobalStats(): void {
     sessions: [],
   }
   fs.writeFileSync(STATS_FILE, JSON.stringify(fresh, null, 2), 'utf-8')
+}
+
+// ─── Aggregations ─────────────────────────────────────────────────────────────
+
+export function getStatsByProject(stats: GlobalStats): ProjectStats[] {
+  const map = new Map<string, ProjectStats>()
+
+  for (const s of stats.sessions) {
+    const p = s.projectPath || 'unknown'
+    const name = p === 'unknown' ? 'Unknown project' : path.basename(p)
+    const existing = map.get(p)
+
+    if (!existing) {
+      map.set(p, {
+        projectPath: p,
+        projectName: name,
+        sessionCount: 1,
+        totalRequests: s.requests,
+        totalOriginalTokens: s.originalTokens,
+        totalSavedTokens: s.savedTokens,
+        totalCostSaved: s.estimatedCostSaved,
+        avgSavingsPercent: s.savingsPercent,
+        lastSessionAt: s.startedAt,
+      })
+    } else {
+      existing.sessionCount++
+      existing.totalRequests += s.requests
+      existing.totalOriginalTokens += s.originalTokens
+      existing.totalSavedTokens += s.savedTokens
+      existing.totalCostSaved += s.estimatedCostSaved
+      existing.avgSavingsPercent =
+        (existing.avgSavingsPercent * (existing.sessionCount - 1) + s.savingsPercent) /
+        existing.sessionCount
+      if (s.startedAt > existing.lastSessionAt) existing.lastSessionAt = s.startedAt
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => b.totalSavedTokens - a.totalSavedTokens)
+}
+
+function isoWeek(date: Date): string {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()))
+  const dayNum = d.getUTCDay() || 7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum)
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1))
+  const weekNo = Math.ceil(((d.getTime() - yearStart.getTime()) / 86400000 + 1) / 7)
+  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`
+}
+
+function sessionLabel(s: SessionRecord, period: 'day' | 'week' | 'month'): string {
+  const d = new Date(s.startedAt)
+  if (period === 'day') return d.toISOString().slice(0, 10)
+  if (period === 'week') return isoWeek(d)
+  return d.toISOString().slice(0, 7)
+}
+
+export function getStatsByPeriod(
+  stats: GlobalStats,
+  period: 'day' | 'week' | 'month',
+  lookback = 30,
+): PeriodBucket[] {
+  const cutoff = new Date()
+  if (period === 'day') cutoff.setDate(cutoff.getDate() - lookback)
+  else if (period === 'week') cutoff.setDate(cutoff.getDate() - lookback * 7)
+  else cutoff.setMonth(cutoff.getMonth() - lookback)
+
+  const map = new Map<string, PeriodBucket>()
+
+  for (const s of stats.sessions) {
+    if (new Date(s.startedAt) < cutoff) continue
+    const label = sessionLabel(s, period)
+    const existing = map.get(label)
+
+    if (!existing) {
+      map.set(label, {
+        label,
+        sessionCount: 1,
+        totalOriginalTokens: s.originalTokens,
+        totalSavedTokens: s.savedTokens,
+        totalCostSaved: s.estimatedCostSaved,
+        avgSavingsPercent: s.savingsPercent,
+      })
+    } else {
+      existing.sessionCount++
+      existing.totalOriginalTokens += s.originalTokens
+      existing.totalSavedTokens += s.savedTokens
+      existing.totalCostSaved += s.estimatedCostSaved
+      existing.avgSavingsPercent =
+        (existing.avgSavingsPercent * (existing.sessionCount - 1) + s.savingsPercent) /
+        existing.sessionCount
+    }
+  }
+
+  return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label))
+}
+
+export function getForecast(stats: GlobalStats): ForecastStats {
+  if (stats.sessions.length === 0) {
+    return {
+      basedOnDays: 0,
+      avgDailyTokensSaved: 0,
+      avgDailyCostSaved: 0,
+      projectedAnnualTokensSaved: 0,
+      projectedAnnualCostSaved: 0,
+      projectedMonthlyTokensSaved: 0,
+      projectedMonthlyCostSaved: 0,
+    }
+  }
+
+  // Use last 30 days of data for forecast
+  const cutoff = new Date()
+  cutoff.setDate(cutoff.getDate() - 30)
+  const recent = stats.sessions.filter(s => new Date(s.startedAt) >= cutoff)
+  const sample = recent.length > 0 ? recent : stats.sessions
+
+  const totalSaved = sample.reduce((s, r) => s + r.savedTokens, 0)
+  const totalCost = sample.reduce((s, r) => s + r.estimatedCostSaved, 0)
+
+  // Span in days
+  const oldest = new Date(sample[0].startedAt)
+  const newest = new Date(sample[sample.length - 1].startedAt)
+  const spanDays = Math.max(1, Math.ceil((newest.getTime() - oldest.getTime()) / 86400000) + 1)
+
+  const avgDailyTokensSaved = totalSaved / spanDays
+  const avgDailyCostSaved = totalCost / spanDays
+
+  return {
+    basedOnDays: spanDays,
+    avgDailyTokensSaved,
+    avgDailyCostSaved,
+    projectedAnnualTokensSaved: avgDailyTokensSaved * 365,
+    projectedAnnualCostSaved: avgDailyCostSaved * 365,
+    projectedMonthlyTokensSaved: avgDailyTokensSaved * 30,
+    projectedMonthlyCostSaved: avgDailyCostSaved * 30,
+  }
 }
 
 export { GLOBAL_DIR, STATS_FILE }

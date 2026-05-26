@@ -105,6 +105,7 @@ export function wrapClient<T extends AnthropicClient>(
     const session = tracker.getSessionStats()
     if (session.requestCount === 0) return
     recordSession({
+      projectPath: process.cwd(),
       startedAt: sessionStart,
       endedAt: new Date().toISOString(),
       requests: session.requestCount,
