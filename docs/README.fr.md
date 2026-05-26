@@ -10,6 +10,25 @@
 
 ---
 
+## Démarrage rapide — `cork-ai init`
+
+La façon la plus rapide d'intégrer cork-ai dans un projet existant :
+
+```bash
+cd ton-projet
+cork-ai init
+```
+
+cork-ai scanne les fichiers qui instancient `new Anthropic()` et soit :
+
+- **Patche automatiquement** le fichier (ajout de `wrapClient`) — si un seul fichier est trouvé
+- **Génère** un fichier wrapper `cork-ai-client.ts` prêt à l'emploi — si aucun client existant
+- **Affiche les instructions ciblées** — si plusieurs fichiers sont trouvés
+
+C'est tout. Pas de fichier de config, pas d'édition manuelle. Lance `cork-ai gain` après ta première session.
+
+---
+
 ## CLI — `cork-ai gain`
 
 Après chaque session, consulte tes économies depuis n'importe où :

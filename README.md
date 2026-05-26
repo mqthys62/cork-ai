@@ -73,6 +73,25 @@ npm install @anthropic-ai/sdk
 
 ---
 
+## Quickstart — `cork-ai init`
+
+The fastest way to integrate cork-ai into an existing project:
+
+```bash
+cd your-project
+cork-ai init
+```
+
+cork-ai scans for files that instantiate `new Anthropic()` and either:
+
+- **Auto-patches** the file (adds `wrapClient` import + wraps the client) — when exactly one file is found
+- **Generates** a ready-to-import `cork-ai-client.ts` wrapper — when no existing client is found
+- **Shows targeted instructions** — when multiple files are found
+
+That's it. No config file, no manual edits. Run `cork-ai gain` after your first session.
+
+---
+
 ## CLI — `cork-ai gain`
 
 After sessions run, check your savings from anywhere:
