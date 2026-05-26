@@ -345,11 +345,15 @@ function reportForecast(): void {
     const setupMinutes = 5
     const setupCost = (setupMinutes / 60) * devCostPerHour
     const roi = ((f.projectedAnnualCostSaved - setupCost) / setupCost) * 100
+    const roiColor = roi > 0 ? C.green : C.yellow
+    const paybackNote = roi > 0
+      ? 'payback in < 1 day'
+      : `projection based on ${stats.sessions.length} session${stats.sessions.length !== 1 ? 's' : ''} — grows with usage`
 
     console.log(`  ${C.dim('ROI estimate (vs. 5-min setup)')}`)
     console.log(`  Setup cost:  ~${fmtUsdLong(setupCost)} (5 min dev time)`)
     console.log(`  Annual gain: ${C.green(fmtUsdLong(f.projectedAnnualCostSaved))} API savings`)
-    console.log(`  ${C.bold('ROI:')}        ${C.green(fmtPct(roi))} — payback in < 1 day`)
+    console.log(`  ${C.bold('ROI:')}        ${roiColor(fmtPct(roi))} — ${paybackNote}`)
   }
 
   console.log(divider())

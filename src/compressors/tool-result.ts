@@ -365,9 +365,3 @@ export function clearCache(): void {
   contentCache.clear()
 }
 
-/**
- * Retourne la taille du cache courant.
- */
-export function getCacheSize(): number {
-  return contentCache.size
-}
