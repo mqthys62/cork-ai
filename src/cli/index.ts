@@ -74,9 +74,9 @@ interface TelemetryPayload {
   os: string
   arch: string
   savings_pct: number
-  requests: number
-  duration_min: number
-  modules: Record<string, number>
+  file_ext: string       // e.g. ".ts", ".py", ".json" — no paths, just extension
+  compress_type: string  // "code" | "json" | "text"
+  skipped: boolean       // true = file not compressed (too small or < 15% gain)
 }
 
 function sendTelemetry(payload: TelemetryPayload): void {
@@ -582,7 +582,6 @@ const CODE_EXTS = new Set([
   '.rb', '.php', '.swift', '.kt', '.scala', '.r',
 ])
 
-const TEXT_EXTS = new Set(['.md', '.txt', '.rst', '.yaml', '.yml', '.toml', '.ini', '.conf', '.env'])
 
 function extractCodeSignatures(content: string, filePath: string): string {
   const ext = path.extname(filePath).toLowerCase()
@@ -676,12 +675,13 @@ function compressText(content: string): string {
   return `${head.join('\n')}\n\n[... ${omitted} lines omitted — use Read with offset to see more ...]\n\n${tail.join('\n')}`
 }
 
-function compressContent(content: string, filePath: string): string {
+type CompressType = 'code' | 'json' | 'text'
+
+function compressContent(content: string, filePath: string): { result: string; compressType: CompressType } {
   const ext = path.extname(filePath).toLowerCase()
-  if (CODE_EXTS.has(ext)) return extractCodeSignatures(content, filePath)
-  if (ext === '.json') return compressJson(content)
-  if (TEXT_EXTS.has(ext)) return compressText(content)
-  return compressText(content)
+  if (CODE_EXTS.has(ext)) return { result: extractCodeSignatures(content, filePath), compressType: 'code' }
+  if (ext === '.json') return { result: compressJson(content), compressType: 'json' }
+  return { result: compressText(content), compressType: 'text' }
 }
 
 function saveHookSavings(savedTokens: number, filePath: string): void {
@@ -721,18 +721,25 @@ async function runHook(): Promise<void> {
   const lines = content.split('\n')
   const slice = lines.slice(offset, offset + limit).join('\n')
 
+  const ext = path.extname(filePath).toLowerCase() || 'none'
   const originalTokens = estimateTokens(slice)
-  if (originalTokens < 400) process.exit(0)  // not worth compressing
 
-  const compressed = compressContent(slice, filePath)
+  if (originalTokens < 400) {
+    if (isTelemetryEnabled()) sendTelemetry({ v: VERSION, os: process.platform, arch: process.arch, savings_pct: 0, file_ext: ext, compress_type: 'text', skipped: true })
+    process.exit(0)
+  }
+
+  const { result: compressed, compressType } = compressContent(slice, filePath)
   const compressedTokens = estimateTokens(compressed)
-  if (compressedTokens >= originalTokens * 0.85) process.exit(0)  // less than 15% gain, skip
+
+  if (compressedTokens >= originalTokens * 0.85) {
+    if (isTelemetryEnabled()) sendTelemetry({ v: VERSION, os: process.platform, arch: process.arch, savings_pct: 0, file_ext: ext, compress_type: compressType, skipped: true })
+    process.exit(0)
+  }
 
   const saved = originalTokens - compressedTokens
   saveHookSavings(saved, filePath)
 
-  // Record this hook compression as a session in global stats
-  // (lightweight: 1 "request" = 1 hook call)
   const savingsPct = Math.round((saved / originalTokens) * 1000) / 10
   try {
     recordSession({
@@ -755,9 +762,9 @@ async function runHook(): Promise<void> {
       os: process.platform,
       arch: process.arch,
       savings_pct: savingsPct,
-      requests: 1,
-      duration_min: 0,
-      modules: { hookReadCompressor: 100 },
+      file_ext: ext,
+      compress_type: compressType,
+      skipped: false,
     })
   }
 

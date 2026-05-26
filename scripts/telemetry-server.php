@@ -1,18 +1,17 @@
 <?php
 /**
- * cork-ai telemetry endpoint — deploy on o2switch (or any PHP host)
+ * cork-ai telemetry endpoint — deploy on o2switch
  *
  * Setup:
- *   1. Create MySQL table: run scripts/telemetry-schema.sql
- *   2. Fill in DB credentials below (never commit this file with real credentials)
- *   3. Upload to your server, e.g. https://yourdomain.com/cork-ai-telemetry.php
- *   4. TELEMETRY_ENDPOINT in src/cli/index.ts is already set to https://corktelemetry.essenly.fr/telemetry-server.php
- *   5. Test: curl -X POST https://yourdomain.com/cork-ai-telemetry.php \
+ *   1. Create MySQL table: run scripts/telemetry-schema.sql in phpMyAdmin
+ *   2. Fill in DB credentials below
+ *   3. Upload this file to the corktelemetry.essenly.fr subdomain folder
+ *   4. Test: curl -X POST https://corktelemetry.essenly.fr/telemetry-server.php \
  *            -H 'Content-Type: application/json' \
- *            -d '{"v":"0.1.0","os":"linux","arch":"x64","savings_pct":63.2,"requests":1,"duration_min":0,"modules":{"hookReadCompressor":100}}'
+ *            -d '{"v":"0.1.0","os":"linux","arch":"x64","savings_pct":63.2,"file_ext":".ts","compress_type":"code","skipped":false}'
  */
 
-// ─── Database credentials (edit these) ───────────────────────────────────────
+// ─── Database credentials ─────────────────────────────────────────────────────
 define('DB_HOST', 'localhost');
 define('DB_NAME', 'YOUR_DB_NAME');
 define('DB_USER', 'YOUR_DB_USER');
@@ -35,8 +34,6 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     exit;
 }
 
-// ─── Parse body ──────────────────────────────────────────────────────────────
-
 $body = file_get_contents('php://input');
 if (!$body) {
     http_response_code(400);
@@ -51,26 +48,15 @@ if (!$data || !isset($data['v'], $data['os'], $data['arch'], $data['savings_pct'
     exit;
 }
 
-// ─── Validate and sanitize ───────────────────────────────────────────────────
+// ─── Validate and sanitize ────────────────────────────────────────────────────
 
-$version     = substr(preg_replace('/[^0-9a-z.\-]/', '', (string)($data['v'] ?? '')), 0, 20);
-$os          = substr(preg_replace('/[^a-z0-9]/', '', (string)($data['os'] ?? '')), 0, 20);
-$arch        = substr(preg_replace('/[^a-z0-9]/', '', (string)($data['arch'] ?? '')), 0, 20);
-$savings_pct = min(100, max(0, (float)($data['savings_pct'] ?? 0)));
-$requests    = min(10000, max(0, (int)($data['requests'] ?? 1)));
-$duration    = min(1440, max(0, (int)($data['duration_min'] ?? 0)));
-$modules_raw = $data['modules'] ?? [];
-
-// Sanitize module keys and values (no file paths, just percentages)
-$modules = [];
-if (is_array($modules_raw)) {
-    foreach ($modules_raw as $k => $v) {
-        $clean_key = substr(preg_replace('/[^a-zA-Z0-9_]/', '', (string)$k), 0, 50);
-        if ($clean_key) {
-            $modules[$clean_key] = min(100, max(0, (float)$v));
-        }
-    }
-}
+$version      = substr(preg_replace('/[^0-9a-z.\-]/', '', (string)($data['v'] ?? '')), 0, 20);
+$os           = substr(preg_replace('/[^a-z0-9]/', '', (string)($data['os'] ?? '')), 0, 20);
+$arch         = substr(preg_replace('/[^a-z0-9]/', '', (string)($data['arch'] ?? '')), 0, 20);
+$savings_pct  = min(100, max(0, (float)($data['savings_pct'] ?? 0)));
+$file_ext     = substr(preg_replace('/[^a-z0-9.]/', '', strtolower((string)($data['file_ext'] ?? ''))), 0, 20);
+$compress_type = substr(preg_replace('/[^a-z]/', '', (string)($data['compress_type'] ?? '')), 0, 10);
+$skipped      = !empty($data['skipped']) ? 1 : 0;
 
 if (!$version || !$os || !$arch) {
     http_response_code(400);
@@ -78,7 +64,7 @@ if (!$version || !$os || !$arch) {
     exit;
 }
 
-// ─── Insert (no IP stored) ───────────────────────────────────────────────────
+// ─── Insert (no IP stored) ────────────────────────────────────────────────────
 
 try {
     $pdo = new PDO(
@@ -90,26 +76,25 @@ try {
 
     $stmt = $pdo->prepare("
         INSERT INTO telemetry_events
-            (version, os, arch, savings_pct, requests, duration_min, modules)
+            (version, os, arch, savings_pct, file_ext, compress_type, skipped)
         VALUES
-            (:version, :os, :arch, :savings_pct, :requests, :duration_min, :modules)
+            (:version, :os, :arch, :savings_pct, :file_ext, :compress_type, :skipped)
     ");
 
     $stmt->execute([
-        ':version'     => $version,
-        ':os'          => $os,
-        ':arch'        => $arch,
-        ':savings_pct' => $savings_pct,
-        ':requests'    => $requests,
-        ':duration_min' => $duration,
-        ':modules'     => json_encode($modules),
+        ':version'       => $version,
+        ':os'            => $os,
+        ':arch'          => $arch,
+        ':savings_pct'   => $savings_pct,
+        ':file_ext'      => $file_ext,
+        ':compress_type' => $compress_type,
+        ':skipped'       => $skipped,
     ]);
 
     echo json_encode(['ok' => true]);
 
 } catch (PDOException $e) {
     http_response_code(500);
-    // Never expose DB details in the response
     echo json_encode(['error' => 'Database error']);
     error_log('[cork-ai telemetry] DB error: ' . $e->getMessage());
 }
