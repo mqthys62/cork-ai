@@ -1,95 +1,126 @@
 # Contributing to cork-ai
 
-## Lancer les tests
+## Development setup
+
+cork-ai is distributed as standalone binaries (no Node.js required to use it), but development requires Node.js ≥ 18 and npm.
 
 ```bash
-# Installer les dépendances
+git clone https://github.com/mathys62/cork-ai.git
+cd cork-ai
 npm install
+```
 
-# Lancer tous les tests
+## Running tests
+
+```bash
+# Run all tests
 npm test
 
-# Tests en mode watch
+# Watch mode
 npm run test:watch
 
-# Coverage
+# Coverage report
 npm run test:coverage
 
-# Vérification des types TypeScript
+# TypeScript type checking
 npm run typecheck
 
-# Build
+# Build library + CLI
 npm run build
 ```
 
-## Ajouter un nouveau module
+All 144 tests must pass before opening a PR.
 
-1. **Créer le fichier source** dans `src/compressors/` ou `src/managers/`
+## Project structure
 
-2. **Implémenter l'interface** `CompressResult` :
+```
+src/
+├── cli/               # Standalone CLI (cork-ai hook, gain, report, init, hooks)
+│   ├── index.ts       # All CLI commands — compiled to a standalone binary
+│   └── persistent-stats.ts  # ~/.cork-ai/stats.json read/write
+├── compressors/       # Stateless content compression modules
+├── managers/          # Stateful modules and orchestration
+├── core/              # Infrastructure (tokenizer, pipeline, interceptor, wrapClient)
+├── stats/             # Per-request and per-session stats tracking
+└── types/             # Shared TypeScript types
+```
+
+Modules in `compressors/` and `managers/` do not know about each other. Everything goes through the pipeline (`src/core/pipeline.ts`).
+
+The CLI (`src/cli/index.ts`) only imports Node.js built-ins (`fs`, `os`, `path`) and local files — no npm dependencies. This is required for `bun build --compile` to produce a zero-dependency binary.
+
+## Adding a new compression module
+
+1. **Create the source file** in `src/compressors/` (stateless) or `src/managers/` (stateful / orchestrated)
+
+2. **Implement the `CompressResult` interface**:
    ```typescript
    export function myModule(messages: Message[], options?: Partial<MyOptions>): CompressResult {
      return { messages: [...], savedTokens: 0 }
    }
    ```
 
-3. **Ajouter les tests** dans `tests/unit/my-module.test.ts` :
-   - Cas nominal
-   - Messages vides
-   - Edge cases (contenu court, déjà minimal, etc.)
-   - Vérifier que le nombre de messages est préservé
+3. **Write tests** in `tests/unit/my-module.test.ts`:
+   - Happy path
+   - Empty messages array
+   - Edge cases: short content, already minimal content, content just above/below threshold
+   - Verify the message count is preserved (modules summarize, never delete)
 
-4. **Enregistrer le module** dans `src/managers/budget.ts` :
-   - Ajouter un `ModuleName` dans `src/types/index.ts`
-   - Ajouter l'appel dans `compressWithBudget()` au bon niveau (1, 2 ou 3)
+4. **Register the module** in `src/managers/budget.ts`:
+   - Add a `ModuleName` in `src/types/index.ts`
+   - Add the call in `compressWithBudget()` at the appropriate level (1, 2, or 3)
 
-5. **Exporter depuis** `src/index.ts`
+5. **Export from** `src/index.ts`
 
-6. **Mettre à jour** `CHANGELOG.md` et `README.md`
+6. **Update** `CHANGELOG.md` under `[Unreleased]` and add a row to the README table
 
-## Convention de commits
+## CLI commands
 
-Ce projet suit [Conventional Commits](https://www.conventionalcommits.org/) :
+The CLI is a single compiled file. All commands are in `src/cli/index.ts`.
 
-```
-feat: ajouter un nouveau module de compression
-fix: corriger le calcul des tokens dans le tokenizer
-docs: mettre à jour le README avec les exemples
-test: ajouter les tests d'intégration
-chore: mettre à jour les dépendances
-refactor: simplifier l'orchestrateur du pipeline
-perf: optimiser la détection de contenu JSON
+To add a new command, add a branch to the `main()` switch and wire it to a function. Keep all compression logic inline or in `src/cli/` — do not import from `src/compressors/` or `src/managers/` in the CLI (it would break binary compilation).
+
+To test a CLI command during development:
+```bash
+npm run build
+node dist/cli/index.js <command>
 ```
 
-## Process de PR
-
-1. **Fork** le dépôt
-2. **Créer une branche** descriptive : `feat/selective-cache` ou `fix/json-detection`
-3. **Écrire les tests** avant le code (TDD recommandé)
-4. **Vérifier** que `npm test` et `npm run typecheck` passent
-5. **Ouvrir la PR** avec une description claire
-   - Ce que le module fait
-   - Le gain estimé en tokens
-   - Les edge cases couverts
-
-## Règles de code
-
-- TypeScript strict, zéro `any` sauf justification commentée
-- Chaque fonction publique doit avoir un JSDoc
-- Pas de dépendances ML ou natives
-- Tester sur Windows (chemins avec `path.join`) et Linux
-- Coverage > 80% pour tout nouveau code
-
-## Structure des modules
-
-```
-src/
-├── compressors/   # Compression directe du contenu (sans état inter-appels)
-├── managers/      # Gestionnaires avec état ou orchestration
-├── core/          # Infrastructure (tokenizer, pipeline, interceptor)
-├── stats/         # Tracking des économies
-└── types/         # Types TypeScript partagés
+To test the hook specifically:
+```bash
+echo '{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/path/to/file.ts"},"session_id":"test","cwd":"/tmp"}' \
+  | node dist/cli/index.js hook
 ```
 
-Les modules de `compressors/` et `managers/` ne se connaissent pas entre eux.
-Tout passe par le pipeline (`src/core/pipeline.ts`).
+## Commit convention
+
+This project follows [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+feat: add new compression module
+fix: correct token count in tokenizer
+docs: update README with usage examples
+test: add integration tests for budget manager
+chore: update dependencies
+refactor: simplify pipeline orchestrator
+perf: optimize JSON content detection
+```
+
+## PR process
+
+1. **Fork** the repository
+2. **Create a descriptive branch**: `feat/selective-cache` or `fix/json-detection`
+3. **Write tests first** (TDD recommended)
+4. **Verify** `npm test` and `npm run typecheck` both pass
+5. **Open a PR** with a clear description:
+   - What the module does
+   - Estimated token savings
+   - Edge cases covered
+
+## Code rules
+
+- TypeScript strict — no `any` without a justification comment
+- No ML or native compiled dependencies
+- Test on both Windows paths (`path.join`) and Linux
+- Coverage > 80% for all new code
+- No comments that explain *what* the code does — only *why* if non-obvious
