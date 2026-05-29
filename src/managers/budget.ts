@@ -40,12 +40,14 @@ function getCompressionLevel(tokenCount: number, maxTokens: number): Compression
 
 /**
  * Calcule le seuil heatmap ajusté selon la pression budgétaire.
+ * Monotone : plus la pression est forte, plus le seuil baisse (moins de messages
+ * compressés par le heatmap — on délègue davantage aux autres modules).
+ * Valeurs abaissées pour ne pas écraser les messages avec code blocks (floor=0.30).
  */
 function adaptiveHeatmapThreshold(ratio: number): number {
-  // Plus la pression est forte, plus on comprime agressivement (seuil plus élevé)
-  if (ratio < 0.65) return 0.4
-  if (ratio < 0.80) return 0.3
-  return 0.2
+  if (ratio < 0.65) return 0.40 // level1 — heatmap ne tourne pas ici (safety)
+  if (ratio < 0.80) return 0.25 // level2 — légèrement moins agressif (était 0.30)
+  return 0.15                   // all — délègue à semantic dedup + summarizer (était 0.20)
 }
 
 /**

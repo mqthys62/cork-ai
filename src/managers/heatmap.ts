@@ -22,6 +22,11 @@ const DEFAULT_OPTIONS: HeatmapOptions = {
   threshold: 0.3,
 }
 
+// Les messages contenant des blocs de code sont des contrats d'API ou des
+// résultats de lecture — les supprimer fait perdre des informations critiques
+// (signatures, configs, stack traces). Score plancher pour les protéger.
+const CODE_BLOCK_SCORE_FLOOR = 0.30
+
 // Patterns de contenu à haute valeur permanente
 const HIGH_VALUE_PATTERNS = [
   // Décisions
@@ -103,11 +108,20 @@ function scoreMessage(
   if (referenceScore > 0) reasons.push('référencé récemment')
 
   // Score combiné (pondéré)
-  const score =
+  let score =
     recencyScore * 0.35 +
     relevanceScore * 0.30 +
     contentScore * 0.25 +
     referenceScore * 0.10
+
+  // Plancher pour les messages contenant des blocs de code : les signatures de
+  // fonctions, interfaces et configs sont des contrats critiques pour la qualité
+  // du code produit — on ne les résume jamais, quel que soit leur score de récence.
+  const hasCodeBlock = /```[\s\S]{10,}```/.test(text)
+  if (hasCodeBlock) {
+    score = Math.max(score, CODE_BLOCK_SCORE_FLOOR)
+    reasons.push('contient un bloc de code')
+  }
 
   return {
     messageIndex: msgIdx,
