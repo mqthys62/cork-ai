@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-01
+
+### Fixed
+
+- **`gain` vide sur Mac** — le hook utilisait `cork-ai hook` comme commande nue, qui échoue silencieusement quand `~/.local/bin` n'est pas dans le PATH de Claude Code (Electron n'hérite pas de `~/.zshrc`). `hooks install` résout maintenant le chemin absolu du binaire et l'inscrit directement dans `settings.json`. `hooks remove`/`hooks status` acceptent les deux formats.
+- **`gain` n'affichait qu'une requête** — chaque appel au hook créait une entrée `requests: 1` dans `stats.json`. Les données sont maintenant accumulées dans `~/.cork-ai/live-session.json` : même projet + moins de 2 h d'inactivité = même session. `gain` sans argument affiche la session en cours et les totaux globaux en pied.
+- **Télémétrie jamais proposée lors de l'install** — `process.stdin.isTTY` est `false` dans `curl | sh`, donc la question était sautée. `install.sh` utilise désormais `/dev/tty` pour lire la réponse sur le terminal réel, et `hooks install` applique le même fallback.
+
+### Added
+
+- `~/.cork-ai/live-session.json` — agrège les compressions en temps réel ; flushed dans `stats.json` à l'expiration ou au changement de projet.
+- `cork-ai gain` (sans args) affiche : session en cours (ou dernière session terminée) + totaux globaux en pied de page.
+- `cork-ai gain --history` affiche la session live en tête de liste (marquée `●`).
+- `cork-ai gain --all` inclut la session live dans les totaux.
+- `cork-ai reset` efface également `live-session.json`.
+- `cork-ai hooks status` affiche la commande exacte installée (utile pour diagnostiquer les problèmes de PATH).
+
 ## [0.1.0] - 2026-05-26
 
 ### Added — CLI
@@ -128,5 +145,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark in `benchmarks/cost-comparison.ts`
 - CI/CD GitHub Actions (Node 18/20/22 × Ubuntu/Windows/macOS)
 
-[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/mqthys62/cork-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mqthys62/cork-ai/releases/tag/v0.1.0

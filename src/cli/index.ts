@@ -4,7 +4,7 @@
  *
  * Commands:
  *   cork-ai init                  Auto-integrate cork-ai into the current project
- *   cork-ai gain                  Show savings from the last session
+ *   cork-ai gain                  Show current session + all-time savings
  *   cork-ai gain --all            Show all-time totals
  *   cork-ai gain --history        Show all recorded sessions
  *   cork-ai report                Full enterprise report (trends + projects + forecast)
@@ -31,16 +31,17 @@ import readline from 'readline'
 import {
   readGlobalStats,
   resetGlobalStats,
-  recordSession,
+  accumulateInSession,
+  readLiveSession,
+  clearLiveSession,
   getStatsByProject,
   getStatsByPeriod,
   getForecast,
   STATS_FILE,
 } from './persistent-stats.js'
 
-const VERSION = '0.1.0'
+const VERSION = '0.2.0'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
-const HOOK_SAVINGS_FILE = path.join(os.homedir(), '.cork-ai', 'hook-savings.json')
 const CONFIG_FILE = path.join(os.homedir(), '.cork-ai', 'config.json')
 
 const TELEMETRY_ENDPOINT = 'https://corktelemetry.essenly.fr/telemetry-server.php'
@@ -74,13 +75,13 @@ interface TelemetryPayload {
   os: string
   arch: string
   savings_pct: number
-  file_ext: string       // e.g. ".ts", ".py", ".json" — no paths, just extension
-  compress_type: string  // "code" | "json" | "text"
-  skipped: boolean       // true = file not compressed (too small or < 15% gain)
+  file_ext: string
+  compress_type: string
+  skipped: boolean
 }
 
 function sendTelemetry(payload: TelemetryPayload): void {
-  if (TELEMETRY_ENDPOINT.includes('YOUR_DOMAIN')) return  // not configured yet
+  if (TELEMETRY_ENDPOINT.includes('YOUR_DOMAIN')) return
   try {
     const body = JSON.stringify(payload)
     const url = new URL(TELEMETRY_ENDPOINT)
@@ -154,8 +155,8 @@ ${C.bold('Quick start:')}
   cork-ai hooks install     Add hooks so Claude Code uses cork-ai directly
 
 ${C.bold('Stats:')}
-  cork-ai gain              Last session savings
-  cork-ai gain --all        All-time totals
+  cork-ai gain              Current session + all-time savings
+  cork-ai gain --all        All-time totals only
   cork-ai gain --history    All recorded sessions
 
 ${C.bold('Enterprise report:')}
@@ -188,68 +189,120 @@ function showVersion(): void { console.log(`cork-ai v${VERSION}`) }
 // ─── gain ─────────────────────────────────────────────────────────────────────
 
 function showLastSession(): void {
+  const live = readLiveSession()
   const stats = readGlobalStats()
-  if (!stats || stats.sessions.length === 0) {
+
+  const hasHistory = stats && stats.allTime.totalRequests > 0
+  const hasCompletedSessions = stats && stats.sessions.length > 0
+
+  if (!live && !hasHistory) {
     console.log(`\n${C.yellow('No sessions recorded yet.')}\n`)
-    console.log(`Run ${C.cyan('cork-ai init')} to integrate, or ${C.cyan('cork-ai hooks install')} to add Claude Code hooks.`)
+    console.log(`Run ${C.cyan('cork-ai hooks install')} to start tracking automatically.`)
     console.log(`Stats file: ${C.dim(STATS_FILE)}\n`)
     return
   }
 
-  const last = stats.sessions[stats.sessions.length - 1]
-  const pct = last.originalTokens > 0 ? (last.savedTokens / last.originalTokens) * 100 : 0
+  // ── Section 1 : session en cours (ou dernière session terminée) ──
+  if (live) {
+    const pct = live.originalTokens > 0 ? (live.savedTokens / live.originalTokens) * 100 : 0
+    console.log(`\n${C.bold('cork-ai — Session en cours')}`)
+    console.log(divider())
+    console.log(`  ${C.dim('Démarrée')}    ${fmtDate(live.startedAt)}`)
+    if (live.projectPath) console.log(`  ${C.dim('Projet')}      ${C.cyan(path.basename(live.projectPath))}`)
+    console.log(`  ${C.dim('Requêtes')}    ${C.bold(fmt(live.requests))}`)
+    console.log()
+    console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(live.originalTokens))}`)
+    console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(live.compressedTokens))}`)
+    console.log(`  ${C.dim('Économisés')}  ${C.green(fmt(live.savedTokens))} tokens`)
+    console.log()
+    console.log(`  ${C.bold('Économies')}   ${C.green(bar(pct))}`)
+    console.log(`  ${C.bold('Coût évité')} ${C.green(fmtUsd(live.estimatedCostSaved))} USD`)
+    console.log()
 
-  console.log(`\n${C.bold('cork-ai — Last Session')}`)
-  console.log(divider())
-  console.log(`  ${C.dim('Date')}        ${fmtDate(last.startedAt)}`)
-  if (last.projectPath) console.log(`  ${C.dim('Project')}     ${C.cyan(path.basename(last.projectPath))}`)
-  console.log(`  ${C.dim('Requests')}    ${fmt(last.requests)}`)
-  console.log()
-  console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(last.originalTokens))}`)
-  console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(last.compressedTokens))}`)
-  console.log(`  ${C.dim('Saved')}       ${C.green(fmt(last.savedTokens))} tokens`)
-  console.log()
-  console.log(`  ${C.bold('Savings')}     ${C.green(bar(pct))}`)
-  console.log(`  ${C.bold('Cost saved')}  ${C.green(fmtUsd(last.estimatedCostSaved))} USD`)
-  console.log()
-
-  if (Object.keys(last.byModule).length > 0) {
-    console.log(`  ${C.dim('By module:')}`)
-    const sorted = Object.entries(last.byModule).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a)
-    for (const [name, saved] of sorted) {
-      const modPct = last.originalTokens > 0 ? (saved / last.originalTokens) * 100 : 0
-      console.log(`    ${name.padEnd(24)} ${C.green(fmt(saved).padStart(8))} tokens  (${fmtPct(modPct)})`)
+    if (Object.keys(live.byModule).length > 0) {
+      console.log(`  ${C.dim('Par module:')}`)
+      const sorted = Object.entries(live.byModule).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a)
+      for (const [name, saved] of sorted) {
+        const modPct = live.originalTokens > 0 ? (saved / live.originalTokens) * 100 : 0
+        console.log(`    ${name.padEnd(24)} ${C.green(fmt(saved).padStart(8))} tokens  (${fmtPct(modPct)})`)
+      }
+      console.log()
     }
+  } else if (hasCompletedSessions) {
+    // Pas de session live → afficher la dernière session terminée
+    const last = stats!.sessions[stats!.sessions.length - 1]
+    const pct = last.originalTokens > 0 ? (last.savedTokens / last.originalTokens) * 100 : 0
+    console.log(`\n${C.bold('cork-ai — Dernière session')}`)
+    console.log(divider())
+    console.log(`  ${C.dim('Date')}        ${fmtDate(last.startedAt)}`)
+    if (last.projectPath) console.log(`  ${C.dim('Projet')}      ${C.cyan(path.basename(last.projectPath))}`)
+    console.log(`  ${C.dim('Requêtes')}    ${fmt(last.requests)}`)
+    console.log()
+    console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(last.originalTokens))}`)
+    console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(last.compressedTokens))}`)
+    console.log(`  ${C.dim('Économisés')}  ${C.green(fmt(last.savedTokens))} tokens`)
+    console.log()
+    console.log(`  ${C.bold('Économies')}   ${C.green(bar(pct))}`)
+    console.log(`  ${C.bold('Coût évité')} ${C.green(fmtUsd(last.estimatedCostSaved))} USD`)
     console.log()
   }
 
-  console.log(divider())
-  console.log(`  ${C.dim('All-time:')} ${C.green(fmt(stats.allTime.totalSavedTokens))} tokens saved — ${C.green(fmtUsd(stats.allTime.estimatedCostSaved))} USD`)
-  console.log()
+  // ── Section 2 : totaux globaux (session live incluse si active) ──
+  if (stats) {
+    const liveSaved  = live?.savedTokens ?? 0
+    const liveCost   = live?.estimatedCostSaved ?? 0
+    const liveReqs   = live?.requests ?? 0
+    const totalSaved = stats.allTime.totalSavedTokens + liveSaved
+    const totalCost  = stats.allTime.estimatedCostSaved + liveCost
+    const totalReqs  = stats.allTime.totalRequests + liveReqs
+    const sessionCnt = stats.sessions.length + (live ? 1 : 0)
+
+    console.log(divider())
+    console.log(
+      `  ${C.dim('Global :')} ${C.green(fmt(totalSaved))} tokens économisés` +
+      ` — ${C.green(fmtUsd(totalCost))} USD` +
+      `  ${C.dim(`(${fmt(totalReqs)} req · ${fmt(sessionCnt)} sessions)`)}`
+    )
+    console.log()
+  }
 }
 
 function showAllTime(): void {
   const stats = readGlobalStats()
-  if (!stats || stats.allTime.totalRequests === 0) {
+  const live = readLiveSession()
+
+  // Inclure la session live dans les totaux
+  const liveSaved  = live?.savedTokens ?? 0
+  const liveCost   = live?.estimatedCostSaved ?? 0
+  const liveReqs   = live?.requests ?? 0
+  const liveOrig   = live?.originalTokens ?? 0
+
+
+  const totalRequests = (stats?.allTime.totalRequests ?? 0) + liveReqs
+  const totalOriginal = (stats?.allTime.totalOriginalTokens ?? 0) + liveOrig
+  const totalSaved    = (stats?.allTime.totalSavedTokens ?? 0) + liveSaved
+  const totalCost     = (stats?.allTime.estimatedCostSaved ?? 0) + liveCost
+  const sessionCnt    = (stats?.sessions.length ?? 0) + (live ? 1 : 0)
+
+  if (totalRequests === 0) {
     console.log(`\n${C.yellow('No data recorded yet.')}\n`); return
   }
 
-  const at = stats.allTime
-  const pct = at.totalOriginalTokens > 0 ? (at.totalSavedTokens / at.totalOriginalTokens) * 100 : 0
-  const avgPerSession = stats.sessions.length > 0 ? at.totalSavedTokens / stats.sessions.length : 0
+  const pct = totalOriginal > 0 ? (totalSaved / totalOriginal) * 100 : 0
+  const avgPerSession = sessionCnt > 0 ? totalSaved / sessionCnt : 0
 
   console.log(`\n${C.bold('cork-ai — All-Time Stats')}`)
   console.log(divider())
-  console.log(`  ${C.dim('Tracking since')} ${fmtDate(stats.createdAt)}`)
-  console.log(`  ${C.dim('Sessions')}       ${fmt(stats.sessions.length)}`)
-  console.log(`  ${C.dim('Requests')}       ${fmt(at.totalRequests)}`)
+  if (stats) console.log(`  ${C.dim('Tracking since')} ${fmtDate(stats.createdAt)}`)
+  console.log(`  ${C.dim('Sessions')}       ${fmt(sessionCnt)}`)
+  console.log(`  ${C.dim('Requests')}       ${fmt(totalRequests)}`)
   console.log()
-  console.log(`  ${C.dim('Total tokens in')}   ${C.cyan(fmt(at.totalOriginalTokens))}`)
-  console.log(`  ${C.dim('Total tokens out')}  ${C.green(fmt(at.totalCompressedTokens))}`)
-  console.log(`  ${C.dim('Total saved')}       ${C.green(fmt(at.totalSavedTokens))} tokens`)
+  console.log(`  ${C.dim('Total tokens in')}   ${C.cyan(fmt(totalOriginal))}`)
+  console.log(`  ${C.dim('Total tokens out')}  ${C.green(fmt(totalOriginal - totalSaved))}`)
+  console.log(`  ${C.dim('Total saved')}       ${C.green(fmt(totalSaved))} tokens`)
   console.log()
   console.log(`  ${C.bold('Overall savings')}   ${C.green(bar(pct))}`)
-  console.log(`  ${C.bold('Total cost saved')}  ${C.green(fmtUsdLong(at.estimatedCostSaved))} USD`)
+  console.log(`  ${C.bold('Total cost saved')}  ${C.green(fmtUsdLong(totalCost))} USD`)
   console.log(`  ${C.bold('Avg / session')}     ${C.green(fmt(Math.round(avgPerSession)))} tokens`)
   console.log(divider())
   console.log()
@@ -257,14 +310,28 @@ function showAllTime(): void {
 
 function showHistory(): void {
   const stats = readGlobalStats()
+  const live = readLiveSession()
   if (!stats || stats.sessions.length === 0) {
     console.log(`\n${C.yellow('No sessions recorded yet.')}\n`); return
   }
 
-  console.log(`\n${C.bold('cork-ai — Session History')} (${stats.sessions.length} sessions)`)
+  const totalSessions = stats.sessions.length + (live ? 1 : 0)
+  console.log(`\n${C.bold('cork-ai — Session History')} (${totalSessions} sessions)`)
   console.log(divider())
   console.log(`  ${'Date'.padEnd(20)} ${'Project'.padEnd(18)} ${'Saved tokens'.padStart(13)} ${'Savings'.padStart(9)} ${'Cost saved'.padStart(11)}`)
   console.log(divider())
+
+  // Session live en tête si active
+  if (live) {
+    const pct = live.originalTokens > 0 ? (live.savedTokens / live.originalTokens) * 100 : 0
+    const project = path.basename(live.projectPath).slice(0, 17)
+    console.log(
+      `  ${(fmtDate(live.startedAt) + ' ●').padEnd(20)} ${project.padEnd(18)} ` +
+      `${C.green(fmt(live.savedTokens).padStart(13))} ` +
+      `${C.green(fmtPct(pct).padStart(9))} ` +
+      `${C.green(fmtUsd(live.estimatedCostSaved).padStart(11))}`
+    )
+  }
 
   const recent = stats.sessions.slice(-25).reverse()
   for (const s of recent) {
@@ -282,14 +349,19 @@ function showHistory(): void {
     console.log(`  ${C.dim(`... and ${stats.sessions.length - 25} older sessions`)}`)
   }
 
-  const at = stats.allTime
-  const totalPct = at.totalOriginalTokens > 0 ? (at.totalSavedTokens / at.totalOriginalTokens) * 100 : 0
+  const liveSaved = live?.savedTokens ?? 0
+  const liveCost  = live?.estimatedCostSaved ?? 0
+  const totalSaved = stats.allTime.totalSavedTokens + liveSaved
+  const totalCost  = stats.allTime.estimatedCostSaved + liveCost
+  const totalOrig  = stats.allTime.totalOriginalTokens + (live?.originalTokens ?? 0)
+  const totalPct   = totalOrig > 0 ? (totalSaved / totalOrig) * 100 : 0
+
   console.log(divider())
   console.log(
     `  ${'TOTAL'.padEnd(20)} ${''.padEnd(18)} ` +
-    `${C.green(fmt(at.totalSavedTokens).padStart(13))} ` +
+    `${C.green(fmt(totalSaved).padStart(13))} ` +
     `${C.green(fmtPct(totalPct).padStart(9))} ` +
-    `${C.green(fmtUsdLong(at.estimatedCostSaved).padStart(11))}`
+    `${C.green(fmtUsdLong(totalCost).padStart(11))}`
   )
   console.log()
 }
@@ -400,9 +472,8 @@ function reportForecast(): void {
   console.log(`                        ${C.green(fmtUsdLong(f.projectedAnnualCostSaved))} USD saved  ${C.green(yearBar)}`)
   console.log()
 
-  // ROI story for teams
   if (f.projectedAnnualCostSaved > 0) {
-    const devCostPerHour = 75  // conservative estimate
+    const devCostPerHour = 75
     const setupMinutes = 5
     const setupCost = (setupMinutes / 60) * devCostPerHour
     const roi = ((f.projectedAnnualCostSaved - setupCost) / setupCost) * 100
@@ -464,8 +535,8 @@ interface HookGroup {
   hooks: { type: string; command: string }[]
 }
 
-const CORK_HOOK_COMMAND = 'cork-ai hook'
 const CORK_HOOK_MATCHER = 'Read'
+const CORK_HOOK_FALLBACK = 'cork-ai hook'
 
 function loadClaudeSettings(): ClaudeSettings {
   try { return JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf-8')) as ClaudeSettings }
@@ -479,9 +550,33 @@ function saveClaudeSettings(settings: ClaudeSettings): void {
 
 function isCorkHookInstalled(settings: ClaudeSettings): boolean {
   const pre = settings.hooks?.PreToolUse ?? []
+  // Accepte les deux formats : 'cork-ai hook' et '"/full/path/to/cork-ai" hook'
   return pre.some(g =>
-    g.hooks?.some(h => h.command === CORK_HOOK_COMMAND)
+    g.hooks?.some(h => h.command.includes('cork-ai') && h.command.endsWith('hook'))
   )
+}
+
+// Résout le chemin absolu du binaire cork-ai pour que le hook
+// fonctionne même quand Claude Code n'hérite pas du PATH shell (Mac, Electron).
+function resolveHookBinary(): string {
+  // Binaire compilé standalone (bun build --compile) : execPath = le binaire lui-même
+  const exec = process.execPath
+  if (exec && !/\bnode(\.exe)?\b/i.test(path.basename(exec)) && fs.existsSync(exec)) {
+    return exec
+  }
+
+  // Emplacements d'installation courants
+  const candidates = [
+    path.join(os.homedir(), '.local', 'bin', 'cork-ai'),
+    '/usr/local/bin/cork-ai',
+    '/opt/homebrew/bin/cork-ai',
+    '/usr/bin/cork-ai',
+  ]
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c
+  }
+
+  return ''  // fallback : on utilisera CORK_HOOK_FALLBACK
 }
 
 async function hooksInstall(): Promise<void> {
@@ -494,48 +589,87 @@ async function hooksInstall(): Promise<void> {
     return
   }
 
-  // Find existing Read group or create one
+  // Utiliser le chemin absolu du binaire pour que le hook fonctionne
+  // même si ~/.local/bin n'est pas dans le PATH de Claude Code (Mac / Electron)
+  const binaryPath = resolveHookBinary()
+  const hookCmd = binaryPath ? `"${binaryPath}" hook` : CORK_HOOK_FALLBACK
+
   const existingGroup = settings.hooks.PreToolUse.find(g => g.matcher === CORK_HOOK_MATCHER)
   if (existingGroup) {
-    existingGroup.hooks.push({ type: 'command', command: CORK_HOOK_COMMAND })
+    existingGroup.hooks.push({ type: 'command', command: hookCmd })
   } else {
     settings.hooks.PreToolUse.push({
       matcher: CORK_HOOK_MATCHER,
-      hooks: [{ type: 'command', command: CORK_HOOK_COMMAND }],
+      hooks: [{ type: 'command', command: hookCmd }],
     })
   }
 
   saveClaudeSettings(settings)
   console.log(`\n${C.green('✔')}  cork-ai hook installed.`)
   console.log(`   Added PreToolUse hook for Read tool → ${C.cyan(CLAUDE_SETTINGS)}`)
+  if (binaryPath) {
+    console.log(`   Binary: ${C.dim(binaryPath)}`)
+  }
   console.log()
   console.log(`   ${C.dim('What it does:')} compresses file contents before Claude reads them.`)
   console.log(`   ${C.dim('Large files')} (>500 tokens) → extracted signatures + key sections.`)
   console.log(`   ${C.dim('Savings:')} 40-90% on code files, 20-50% on text files.`)
   console.log()
 
-  // Ask for telemetry consent (only if never asked and stdin is interactive)
+  // Télémétrie — demande si jamais configurée
+  // On utilise /dev/tty si disponible pour fonctionner même depuis curl | sh
   const cfg = loadConfig()
-  if (cfg.telemetry === undefined && process.stdin.isTTY) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    const answer = await new Promise<string>(resolve => {
-      rl.question(
-        `   ${C.dim('Help improve cork-ai? Send anonymous compression stats (no file paths, no content).')} [y/N]: `,
-        a => { rl.close(); resolve(a.trim().toLowerCase()) }
-      )
-    })
-    const opted = answer === 'y' || answer === 'yes'
-    saveConfig({ ...cfg, telemetry: opted })
-    if (opted) {
-      console.log(`   ${C.green('✔')}  Telemetry enabled — thank you! Run ${C.cyan('cork-ai telemetry off')} to disable.`)
-    } else {
-      console.log(`   ${C.dim('Telemetry off. Enable later with: cork-ai telemetry on')}`)
-    }
-    console.log()
+  if (cfg.telemetry === undefined) {
+    await askTelemetryConsent(cfg)
   }
 
   console.log(`   Restart Claude Code for the hook to take effect.`)
   console.log(`   Run ${C.cyan('cork-ai gain')} after sessions to see savings.\n`)
+}
+
+async function askTelemetryConsent(cfg: CorkConfig): Promise<void> {
+  const prompt = `   ${C.dim('Help improve cork-ai? Send anonymous compression stats (no file paths, no content).')} [y/N]: `
+
+  // Essai 1 : stdin interactif
+  if (process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
+    const answer = await new Promise<string>(resolve => {
+      rl.question(prompt, a => { rl.close(); resolve(a.trim().toLowerCase()) })
+    })
+    applyTelemetryChoice(cfg, answer)
+    return
+  }
+
+  // Essai 2 : /dev/tty (fonctionne quand stdin est un pipe, ex. curl | sh)
+  if (process.platform !== 'win32') {
+    try {
+      const tty = fs.openSync('/dev/tty', 'r+')
+
+      // Écriture directe du prompt sur le terminal
+      fs.writeSync(tty, '\n' + prompt)
+      const buf = Buffer.alloc(64)
+      const n = fs.readSync(tty, buf, 0, 63, null)
+      fs.closeSync(tty)
+      const answer = buf.subarray(0, n).toString().trim().toLowerCase()
+      applyTelemetryChoice(cfg, answer)
+      return
+    } catch { /* /dev/tty non disponible (CI, conteneur) */ }
+  }
+
+  // Pas d'interactivité possible : télémétrie désactivée par défaut, info affichée
+  saveConfig({ ...cfg, telemetry: false })
+  console.log(`   ${C.dim('Telemetry off by default. Enable later: cork-ai telemetry on')}`)
+}
+
+function applyTelemetryChoice(cfg: CorkConfig, answer: string): void {
+  const opted = answer === 'y' || answer === 'yes'
+  saveConfig({ ...cfg, telemetry: opted })
+  if (opted) {
+    console.log(`   ${C.green('✔')}  Telemetry enabled — thank you! Run ${C.cyan('cork-ai telemetry off')} to disable.`)
+  } else {
+    console.log(`   ${C.dim('Telemetry off. Enable later with: cork-ai telemetry on')}`)
+  }
+  console.log()
 }
 
 function hooksRemove(): void {
@@ -546,7 +680,7 @@ function hooksRemove(): void {
 
   const pre = settings.hooks?.PreToolUse ?? []
   for (const group of pre) {
-    group.hooks = group.hooks.filter(h => h.command !== CORK_HOOK_COMMAND)
+    group.hooks = group.hooks.filter(h => !(h.command.includes('cork-ai') && h.command.endsWith('hook')))
   }
   if (settings.hooks) {
     settings.hooks.PreToolUse = pre.filter(g => g.hooks.length > 0)
@@ -563,7 +697,14 @@ function hooksStatus(): void {
   console.log()
   console.log(`  cork-ai hook: ${installed ? C.green('● installed') : C.yellow('○ not installed')}`)
   console.log(`  Settings file: ${C.dim(CLAUDE_SETTINGS)}`)
-  if (!installed) {
+  if (installed) {
+    // Afficher la commande installée
+    const pre = settings.hooks?.PreToolUse ?? []
+    for (const g of pre) {
+      const h = g.hooks?.find(h => h.command.includes('cork-ai') && h.command.endsWith('hook'))
+      if (h) console.log(`  Command: ${C.dim(h.command)}`)
+    }
+  } else {
     console.log(`\n  Run ${C.cyan('cork-ai hooks install')} to enable Claude Code integration.`)
   }
   console.log()
@@ -571,7 +712,6 @@ function hooksStatus(): void {
 
 // ─── hook (PreToolUse handler called by Claude Code) ─────────────────────────
 
-// Token estimator (no external deps in hook path)
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3.5)
 }
@@ -589,7 +729,6 @@ function extractCodeSignatures(content: string, filePath: string): string {
   const total = lines.length
   const kept: string[] = []
 
-  // Always keep imports block (first contiguous block of imports)
   let inImports = true
   for (const line of lines) {
     const trimmed = line.trim()
@@ -605,7 +744,6 @@ function extractCodeSignatures(content: string, filePath: string): string {
 
   if (kept.length > 0 && kept[kept.length - 1] !== '') kept.push('')
 
-  // Extract function/class/interface/type signatures
   const signatureRe = /^(export\s+)?(default\s+)?(async\s+)?(function|class|interface|type|enum|const|let|var|def |fn |pub |impl |struct |trait )\s+\w/
   const methodRe = /^(\s{2,})(async\s+)?(\w+)\s*[\(<]/
   const decoratorRe = /^\s*@\w+/
@@ -624,7 +762,6 @@ function extractCodeSignatures(content: string, filePath: string): string {
     if (signatureRe.test(trimmed)) {
       if (!lastWasSignature && kept.length > 0 && kept[kept.length - 1] !== '') kept.push('')
       kept.push(line)
-      // Include opening brace line if separate
       if (!line.includes('{') && i + 1 < lines.length && lines[i + 1].trim() === '{') {
         kept.push(lines[i + 1])
         i++
@@ -653,7 +790,6 @@ function extractCodeSignatures(content: string, filePath: string): string {
 function compressJson(content: string): string {
   try {
     const obj = JSON.parse(content) as unknown
-    // Keep structure but truncate deep/long values
     const slim = JSON.stringify(obj, (_k, v) => {
       if (typeof v === 'string' && v.length > 200) return v.slice(0, 200) + '…'
       if (Array.isArray(v) && v.length > 20) return [...v.slice(0, 20), `… (${v.length - 20} more)`]
@@ -684,17 +820,6 @@ function compressContent(content: string, filePath: string): { result: string; c
   return { result: compressText(content), compressType: 'text' }
 }
 
-function saveHookSavings(savedTokens: number, filePath: string): void {
-  try {
-    fs.mkdirSync(path.dirname(HOOK_SAVINGS_FILE), { recursive: true })
-    let data: { total: number; byFile: Record<string, number> } = { total: 0, byFile: {} }
-    try { data = JSON.parse(fs.readFileSync(HOOK_SAVINGS_FILE, 'utf-8')) as typeof data } catch { /* fresh */ }
-    data.total += savedTokens
-    data.byFile[path.basename(filePath)] = (data.byFile[path.basename(filePath)] ?? 0) + savedTokens
-    fs.writeFileSync(HOOK_SAVINGS_FILE, JSON.stringify(data, null, 2), 'utf-8')
-  } catch { /* non-critical */ }
-}
-
 async function runHook(): Promise<void> {
   let input = ''
   for await (const chunk of process.stdin) input += chunk
@@ -715,7 +840,6 @@ async function runHook(): Promise<void> {
   let content: string
   try { content = fs.readFileSync(filePath, 'utf-8') } catch { process.exit(0) }
 
-  // Respect offset/limit from tool_input
   const offset = (toolInput.offset as number) ?? 0
   const limit = (toolInput.limit as number) ?? 2000
   const lines = content.split('\n')
@@ -738,19 +862,15 @@ async function runHook(): Promise<void> {
   }
 
   const saved = originalTokens - compressedTokens
-  saveHookSavings(saved, filePath)
-
   const savingsPct = Math.round((saved / originalTokens) * 1000) / 10
+
+  // Accumuler dans la session live (une session = 2h d'activité sur le même projet)
   try {
-    recordSession({
+    accumulateInSession({
       projectPath: (event.cwd as string) || process.cwd(),
-      startedAt: new Date().toISOString(),
-      endedAt: new Date().toISOString(),
-      requests: 1,
       originalTokens,
       compressedTokens,
       savedTokens: saved,
-      savingsPercent: savingsPct,
       estimatedCostSaved: (saved / 1_000_000) * 3.0,
       byModule: { hookReadCompressor: saved },
     })
@@ -774,7 +894,7 @@ async function runHook(): Promise<void> {
   }))
 }
 
-// ─── Init command (previously implemented) ────────────────────────────────────
+// ─── Init command ─────────────────────────────────────────────────────────────
 
 function findFiles(dir: string, exts: string[], ignore: string[]): string[] {
   const results: string[] = []
@@ -937,9 +1057,11 @@ function telemetryStatus(): void {
 function resetStats(): void {
   const stats = readGlobalStats()
   if (!stats || stats.allTime.totalRequests === 0) {
-    console.log('Nothing to reset.'); return
+    const live = readLiveSession()
+    if (!live) { console.log('Nothing to reset.'); return }
   }
   resetGlobalStats()
+  clearLiveSession()
   console.log(`\n${C.green('Stats reset.')} All data cleared from ${STATS_FILE}\n`)
 }
 
@@ -955,7 +1077,6 @@ function resetStats(): void {
   } else if (cmd === '--version' || cmd === '-v') {
     showVersion()
   } else if (cmd === 'hook') {
-    // Internal: called by Claude Code PreToolUse hook
     await runHook().catch(() => process.exit(0))
   } else if (cmd === 'init') {
     runInit()

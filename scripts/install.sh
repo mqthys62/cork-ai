@@ -119,7 +119,6 @@ fi
 
 # Verify
 if ! command -v cork-ai >/dev/null 2>&1; then
-  # Try running directly
   if "$DEST" --version >/dev/null 2>&1; then
     ok "$($DEST --version)"
     warn "cork-ai not in PATH yet — open a new terminal or run: source ~/.bashrc"
@@ -144,6 +143,42 @@ if "$CORK_AI" hooks install 2>/dev/null; then
 else
   warn "Could not configure Claude Code hooks automatically."
   printf "\n  Run once your shell is refreshed: ${CYAN}cork-ai hooks install${RESET}\n"
+fi
+
+# ─── Telemetry consent ────────────────────────────────────────────────────────
+# Demande via /dev/tty pour fonctionner même depuis curl | sh (stdin = pipe)
+
+TELEMETRY_CONFIGURED="$("$CORK_AI" telemetry status 2>/dev/null | grep -c 'never configured' || true)"
+
+if [ "$TELEMETRY_CONFIGURED" -gt 0 ] 2>/dev/null; then
+  printf "\n"
+  printf '%s\n' "────────────────────────────────────────────────────"
+  printf "  ${DIM}Help improve cork-ai?${RESET}\n"
+  printf "  ${DIM}Send anonymous compression stats (no file paths, no content).${RESET}\n"
+  printf "  ${DIM}What is sent: version, OS, compression %%. Never file paths or content.${RESET}\n"
+  printf "\n"
+
+  # Essai via /dev/tty (fonctionne même dans curl | sh)
+  TELEMETRY_ANSWER=""
+  if [ -w /dev/tty ] && [ -r /dev/tty ] 2>/dev/null; then
+    printf "  Enable telemetry? [y/N]: " > /dev/tty
+    read -r TELEMETRY_ANSWER < /dev/tty || TELEMETRY_ANSWER=""
+  elif [ -t 0 ]; then
+    # stdin est un terminal natif
+    printf "  Enable telemetry? [y/N]: "
+    read -r TELEMETRY_ANSWER || TELEMETRY_ANSWER=""
+  fi
+
+  case "$TELEMETRY_ANSWER" in
+    y|Y|yes|YES)
+      "$CORK_AI" telemetry on >/dev/null 2>&1
+      ok "Telemetry enabled — thank you!"
+      ;;
+    *)
+      "$CORK_AI" telemetry off >/dev/null 2>&1
+      info "Telemetry off. Enable later: cork-ai telemetry on"
+      ;;
+  esac
 fi
 
 # ─── Done ─────────────────────────────────────────────────────────────────────

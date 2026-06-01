@@ -100,7 +100,7 @@ function saveStats(stats: GlobalStats): void {
   fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), 'utf-8')
 }
 
-// ─── Write ────────────────────────────────────────────────────────────────────
+// ─── Write (sessions terminées) ───────────────────────────────────────────────
 
 export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   const stats = loadStats()
@@ -108,7 +108,6 @@ export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   const record: SessionRecord = { sessionId, ...session }
 
   stats.sessions.push(record)
-  // Keep last 500 sessions for meaningful trend analysis
   if (stats.sessions.length > 500) {
     stats.sessions = stats.sessions.slice(-500)
   }
@@ -142,6 +141,117 @@ export function resetGlobalStats(): void {
     sessions: [],
   }
   fs.writeFileSync(STATS_FILE, JSON.stringify(fresh, null, 2), 'utf-8')
+}
+
+// ─── Live session (agrège tous les hook calls d'une même session) ─────────────
+
+export interface LiveSession {
+  sessionId: string
+  projectPath: string
+  startedAt: string
+  lastActivityAt: string
+  requests: number
+  originalTokens: number
+  compressedTokens: number
+  savedTokens: number
+  estimatedCostSaved: number
+  byModule: Record<string, number>
+}
+
+export const LIVE_SESSION_FILE = path.join(GLOBAL_DIR, 'live-session.json')
+const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000  // 2h d'inactivité = nouvelle session
+
+export function readLiveSession(): LiveSession | null {
+  try {
+    const data = JSON.parse(fs.readFileSync(LIVE_SESSION_FILE, 'utf-8')) as LiveSession
+    const elapsed = Date.now() - new Date(data.lastActivityAt).getTime()
+    return elapsed <= SESSION_TIMEOUT_MS ? data : null
+  } catch {
+    return null
+  }
+}
+
+function flushLiveSessionToHistory(live: LiveSession): void {
+  const stats = loadStats()
+  const savingsPercent = live.originalTokens > 0
+    ? (live.savedTokens / live.originalTokens) * 100 : 0
+
+  stats.sessions.push({
+    sessionId: live.sessionId,
+    projectPath: live.projectPath,
+    startedAt: live.startedAt,
+    endedAt: live.lastActivityAt,
+    requests: live.requests,
+    originalTokens: live.originalTokens,
+    compressedTokens: live.compressedTokens,
+    savedTokens: live.savedTokens,
+    savingsPercent,
+    estimatedCostSaved: live.estimatedCostSaved,
+    byModule: live.byModule,
+  })
+  if (stats.sessions.length > 500) stats.sessions = stats.sessions.slice(-500)
+
+  stats.allTime.totalRequests += live.requests
+  stats.allTime.totalOriginalTokens += live.originalTokens
+  stats.allTime.totalCompressedTokens += live.compressedTokens
+  stats.allTime.totalSavedTokens += live.savedTokens
+  stats.allTime.estimatedCostSaved += live.estimatedCostSaved
+
+  saveStats(stats)
+}
+
+export function accumulateInSession(event: {
+  projectPath: string
+  originalTokens: number
+  compressedTokens: number
+  savedTokens: number
+  estimatedCostSaved: number
+  byModule: Record<string, number>
+}): void {
+  ensureDir()
+
+  let live: LiveSession | null = null
+  try {
+    const existing = JSON.parse(fs.readFileSync(LIVE_SESSION_FILE, 'utf-8')) as LiveSession
+    const elapsed = Date.now() - new Date(existing.lastActivityAt).getTime()
+    if (elapsed <= SESSION_TIMEOUT_MS && existing.projectPath === event.projectPath) {
+      live = existing
+    } else {
+      // Session expirée ou projet différent : flush avant de créer une nouvelle
+      flushLiveSessionToHistory(existing)
+    }
+  } catch { /* pas de session live existante */ }
+
+  if (live) {
+    live.lastActivityAt = new Date().toISOString()
+    live.requests++
+    live.originalTokens += event.originalTokens
+    live.compressedTokens += event.compressedTokens
+    live.savedTokens += event.savedTokens
+    live.estimatedCostSaved += event.estimatedCostSaved
+    for (const [mod, saved] of Object.entries(event.byModule)) {
+      live.byModule[mod] = (live.byModule[mod] ?? 0) + saved
+    }
+  } else {
+    live = {
+      sessionId: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      projectPath: event.projectPath,
+      startedAt: new Date().toISOString(),
+      lastActivityAt: new Date().toISOString(),
+      requests: 1,
+      originalTokens: event.originalTokens,
+      compressedTokens: event.compressedTokens,
+      savedTokens: event.savedTokens,
+      estimatedCostSaved: event.estimatedCostSaved,
+      byModule: { ...event.byModule },
+    }
+  }
+
+  fs.writeFileSync(LIVE_SESSION_FILE, JSON.stringify(live, null, 2), 'utf-8')
+}
+
+export function clearLiveSession(): void {
+  try { fs.unlinkSync(LIVE_SESSION_FILE) } catch { /* pas de session à effacer */ }
 }
 
 // ─── Aggregations ─────────────────────────────────────────────────────────────
@@ -260,7 +370,6 @@ export function getForecast(stats: GlobalStats): ForecastStats {
   const totalSaved = sample.reduce((s, r) => s + r.savedTokens, 0)
   const totalCost = sample.reduce((s, r) => s + r.estimatedCostSaved, 0)
 
-  // Span in days
   const oldest = new Date(sample[0].startedAt)
   const newest = new Date(sample[sample.length - 1].startedAt)
   const spanDays = Math.max(1, Math.ceil((newest.getTime() - oldest.getTime()) / 86400000) + 1)
