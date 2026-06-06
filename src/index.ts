@@ -1,10 +1,10 @@
 /**
- * cork-ai — Optimisation chirurgicale du contexte pour Claude Code.
- * Réduit de 60–75% le coût en tokens sur les sessions longues.
+ * cork-ai — Surgical context optimization for Claude Code.
+ * Reduces token cost by 60–75% on long sessions.
  *
- * Deux modes d'utilisation :
- * 1. wrapClient() — middleware transparent sur le SDK Anthropic
- * 2. CtxForge — compression manuelle à la demande
+ * Two usage modes:
+ * 1. wrapClient() — transparent middleware on the Anthropic SDK
+ * 2. CtxForge — on-demand manual compression
  */
 
 import { runPipeline } from './core/pipeline.js'
@@ -12,15 +12,15 @@ import { StatsTracker } from './stats/tracker.js'
 import { restore as restoreToolResult } from './compressors/tool-result.js'
 import type { CorkAIOptions, FullStats, Message } from './types/index.js'
 
-// ─── Point d'entrée public ────────────────────────────────────────────────────
+// ─── Public entry point ───────────────────────────────────────────────────────
 
 export { wrapClient } from './core/interceptor.js'
 export type { WrappedClient } from './core/interceptor.js'
 
-// ─── CtxForge — compression manuelle ─────────────────────────────────────────
+// ─── CtxForge — manual compression ─────────────────────────────────────────
 
 /**
- * Interface manuelle pour compression à la demande.
+ * Manual interface for on-demand compression.
  * @example
  * const forge = new CtxForge({ maxContextTokens: 150000 })
  * const { messages, stats } = forge.compress(conversationHistory)
@@ -36,9 +36,9 @@ export class CtxForge {
   }
 
   /**
-   * Compresse un historique de conversation.
-   * @param messages - Messages à compresser
-   * @returns Messages compressés + stats complètes
+   * Compresses a conversation history.
+   * @param messages - Messages to compress
+   * @returns Compressed messages + full stats
    */
   compress(messages: Message[]): { messages: Message[]; stats: FullStats } {
     const result = runPipeline(messages, this.opts, this.tracker)
@@ -47,21 +47,21 @@ export class CtxForge {
   }
 
   /**
-   * Retourne les stats de la dernière compression.
+   * Returns stats from the last compression.
    */
   getStats(): FullStats | null {
     return this.lastStats
   }
 
   /**
-   * Restaure le contenu original d'un bloc compressé.
+   * Restores the original content of a compressed block.
    */
   restore(refId: string): string | null {
     return restoreToolResult(refId)
   }
 
   /**
-   * Remet la session à zéro.
+   * Resets the session.
    */
   reset(): void {
     this.tracker.reset()
@@ -74,7 +74,7 @@ export class CtxForge {
 export { recordSession, readGlobalStats, resetGlobalStats } from './cli/persistent-stats.js'
 export type { GlobalStats, SessionRecord } from './cli/persistent-stats.js'
 
-// ─── Exports des modules individuels (usage avancé) ──────────────────────────
+// ─── Individual module exports (advanced use) ───────────────────────────────
 
 export { compressToolResults, restore, clearCache } from './compressors/tool-result.js'
 export { stripHeaders } from './compressors/header-stripper.js'
@@ -89,7 +89,7 @@ export { StatsTracker } from './stats/tracker.js'
 export { countTokens, countMessageTokens, isTiktokenAvailable } from './core/tokenizer.js'
 export { runPipeline } from './core/pipeline.js'
 
-// ─── Types publics ────────────────────────────────────────────────────────────
+// ─── Public types ─────────────────────────────────────────────────────────────
 
 export type {
   Message,

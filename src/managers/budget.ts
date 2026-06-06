@@ -1,8 +1,8 @@
 /**
- * Budget Manager — orchestration adaptative de la compression selon le budget tokens.
- * Paliers : passthrough < 40%, L1 40–65%, L1+L2 65–80%, tout > 80%.
+ * Budget Manager — adaptive compression orchestration based on token budget.
+ * Levels: passthrough < 40%, L1 40–65%, L1+L2 65–80%, all > 80%.
  *
- * C'est le module central qui décide quoi activer selon la pression budgétaire.
+ * This is the central module that decides what to activate based on budget pressure.
  */
 
 import { compressToolResults } from '../compressors/tool-result.js'
@@ -28,7 +28,7 @@ const DEFAULT_BUDGET: BudgetConfig = {
 type CompressionLevel = 'none' | 'level1' | 'level2' | 'all'
 
 /**
- * Détermine le niveau de compression selon le ratio tokens/budget.
+ * Determines the compression level based on the token/budget ratio.
  */
 function getCompressionLevel(tokenCount: number, maxTokens: number): CompressionLevel {
   const ratio = tokenCount / maxTokens
@@ -39,22 +39,22 @@ function getCompressionLevel(tokenCount: number, maxTokens: number): Compression
 }
 
 /**
- * Calcule le seuil heatmap ajusté selon la pression budgétaire.
- * Monotone : plus la pression est forte, plus le seuil baisse (moins de messages
- * compressés par le heatmap — on délègue davantage aux autres modules).
- * Valeurs abaissées pour ne pas écraser les messages avec code blocks (floor=0.30).
+ * Computes the adjusted heatmap threshold based on budget pressure.
+ * Monotone: the higher the pressure, the lower the threshold (fewer messages
+ * compressed by the heatmap — more delegation to other modules).
+ * Lowered values to avoid crushing messages with code blocks (floor=0.30).
  */
 function adaptiveHeatmapThreshold(ratio: number): number {
   if (ratio < 0.65) return 0.40 // level1 — heatmap ne tourne pas ici (safety)
-  if (ratio < 0.80) return 0.25 // level2 — légèrement moins agressif (était 0.30)
-  return 0.15                   // all — délègue à semantic dedup + summarizer (était 0.20)
+  if (ratio < 0.80) return 0.25 // level2 — slightly less aggressive (was 0.30)
+  return 0.15                   // all — delegates to semantic dedup + summarizer (was 0.20)
 }
 
 /**
- * Compresse les messages selon le budget disponible.
- * @param messages - Historique de conversation
- * @param options - Options globales cork-ai
- * @returns Messages compressés + tokens économisés par module
+ * Compresses messages according to the available budget.
+ * @param messages - Conversation history
+ * @param options - Global cork-ai options
+ * @returns Compressed messages + tokens saved per module
  */
 export function compressWithBudget(
   messages: Message[],
@@ -67,11 +67,11 @@ export function compressWithBudget(
   const originalTokens = countMessageTokens(messages)
   const ratio = originalTokens / budget.maxTokens
 
-  // Vérifier la limite stricte avant même de compresser
+  // Check the hard limit before compressing
   if (budget.hardLimit && ratio > 1.0) {
     throw new Error(
-      `[cork-ai] Le contexte dépasse le budget maximum : ${originalTokens} tokens > ${budget.maxTokens} tokens. ` +
-      `Réduisez le nombre de messages ou augmentez maxContextTokens.`
+      `[cork-ai] Context exceeds the maximum budget: ${originalTokens} tokens > ${budget.maxTokens} tokens. ` +
+      `Reduce the number of messages or increase maxContextTokens.`
     )
   }
 
@@ -93,7 +93,7 @@ export function compressWithBudget(
     byModule[name] = (byModule[name] ?? 0) + result.savedTokens
   }
 
-  // Niveau 1 : Tool results + Headers (toujours en premier — plus gros gain)
+  // Level 1: Tool results + Headers (always first — biggest gain)
   if (level === 'level1' || level === 'level2' || level === 'all') {
     apply('toolResultCompressor', msgs =>
       compressToolResults(msgs, { aggressiveness })
@@ -103,7 +103,7 @@ export function compressWithBudget(
     )
   }
 
-  // Niveau 2 : Code dedup + Heatmap
+  // Level 2: Code dedup + Heatmap
   if (level === 'level2' || level === 'all') {
     apply('codeDedup', msgs =>
       deduplicateCode(msgs, { aggressiveness })
@@ -115,7 +115,7 @@ export function compressWithBudget(
     )
   }
 
-  // Niveau 3 : Semantic dedup + Selective summarizer
+  // Level 3: Semantic dedup + Selective summarizer
   if (level === 'all') {
     apply('semanticDedup', msgs =>
       deduplicateSemantic(msgs, { similarityThreshold: 0.82 })
@@ -125,12 +125,12 @@ export function compressWithBudget(
     )
   }
 
-  // Vérifier la limite stricte après compression
+  // Check the hard limit after compression
   if (budget.hardLimit) {
     const finalTokens = countMessageTokens(current)
     if (finalTokens > budget.maxTokens) {
       throw new Error(
-        `[cork-ai] Même après compression, le contexte dépasse le budget : ` +
+        `[cork-ai] Even after compression, context still exceeds the budget: ` +
         `${finalTokens} tokens > ${budget.maxTokens} tokens.`
       )
     }
@@ -140,7 +140,7 @@ export function compressWithBudget(
 }
 
 /**
- * Classe publique pour l'usage avancé.
+ * Public class for advanced use.
  */
 export class BudgetManager {
   private opts: CorkAIOptions

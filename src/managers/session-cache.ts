@@ -1,8 +1,8 @@
 /**
  * Session Cache — snapshot de projet inter-sessions.
- * Gain estimé : 40–60% des tokens input sur les sessions suivantes.
+ * Estimated gain: 40–60% of input tokens on subsequent sessions.
  *
- * Sauvegarde un snapshot ultra-compressé du projet à la fin d'une session.
+ * Saves an ultra-compressed project snapshot at the end of a session.
  * La session suivante charge ce snapshot comme contexte initial.
  */
 
@@ -32,7 +32,7 @@ interface FileSignature {
 const SNAPSHOT_VERSION = '1'
 const CACHE_DIR = '.cork-ai/cache'
 
-// Patterns pour extraire les décisions
+// Patterns to extract decisions
 const DECISION_PATTERNS = [
   /(?:on garde|c'est décidé|la règle est|il est décidé|on a choisi|we decided|final decision|the rule is)(.{0,200})/gi,
   /(?:convention|standard|pattern):\s*(.{0,150})/gi,
@@ -51,7 +51,7 @@ const CONVENTION_PATTERNS = [
 ]
 
 /**
- * Calcule le hash du projet basé sur son chemin absolu.
+ * Computes the project hash based on its absolute path.
  */
 function computeProjectHash(projectPath: string): string {
   const normalized = path.resolve(projectPath).toLowerCase()
@@ -74,7 +74,7 @@ function extractAllText(messages: Message[]): string {
 }
 
 /**
- * Extrait les décisions prises pendant la session.
+ * Extracts decisions made during the session.
  */
 function extractDecisions(text: string): string[] {
   const decisions: Set<string> = new Set()
@@ -90,7 +90,7 @@ function extractDecisions(text: string): string[] {
 }
 
 /**
- * Extrait les erreurs rencontrées et solutions appliquées.
+ * Extracts errors encountered and solutions applied.
  */
 function extractErrors(text: string): string[] {
   const errors: Set<string> = new Set()
@@ -106,7 +106,7 @@ function extractErrors(text: string): string[] {
 }
 
 /**
- * Extrait les conventions de code détectées.
+ * Extracts detected code conventions.
  */
 function extractConventions(text: string): string[] {
   const conventions: Set<string> = new Set()
@@ -122,7 +122,7 @@ function extractConventions(text: string): string[] {
 }
 
 /**
- * Extrait les signatures des fichiers clés mentionnés dans la conversation.
+ * Extracts signatures of key files mentioned in the conversation.
  */
 function extractKeyFiles(messages: Message[]): FileSignature[] {
   const fileMap = new Map<string, string[]>()
@@ -178,45 +178,45 @@ function extractCodeSignatures(content: string): string[] {
 }
 
 /**
- * Déduit le rôle d'un fichier depuis son chemin.
+ * Infers the role of a file from its path.
  */
 function inferFileRole(filePath: string): string {
   const name = path.basename(filePath).toLowerCase()
-  if (name.includes('index')) return 'point d\'entrée'
+  if (name.includes('index')) return 'entry point'
   if (name.includes('test') || name.includes('spec')) return 'tests'
   if (name.includes('config')) return 'configuration'
   if (name.includes('router') || name.includes('route')) return 'routage'
-  if (name.includes('model') || name.includes('schema')) return 'modèle de données'
+  if (name.includes('model') || name.includes('schema')) return 'data model'
   if (name.includes('service')) return 'service'
   if (name.includes('util') || name.includes('helper')) return 'utilitaires'
   return 'source'
 }
 
 /**
- * Sérialise le snapshot en texte compact pour l'injection dans le system prompt.
+ * Serializes the snapshot into compact text for injection into the system prompt.
  */
 function snapshotToText(snapshot: ProjectSnapshot): string {
   const parts: string[] = [
-    `## Contexte projet (session précédente — ${snapshot.createdAt})`,
+    `## Project context (previous session — ${snapshot.createdAt})`,
   ]
 
   if (snapshot.decisions.length > 0) {
-    parts.push('\n### Décisions techniques actées')
+    parts.push('\n### Technical decisions')
     snapshot.decisions.forEach(d => parts.push(`- ${d}`))
   }
 
   if (snapshot.errors.length > 0) {
-    parts.push('\n### Erreurs rencontrées et solutions')
+    parts.push('\n### Errors and solutions')
     snapshot.errors.forEach(e => parts.push(`- ${e}`))
   }
 
   if (snapshot.conventions.length > 0) {
-    parts.push('\n### Conventions détectées')
+    parts.push('\n### Detected conventions')
     snapshot.conventions.forEach(c => parts.push(`- ${c}`))
   }
 
   if (snapshot.keyFiles.length > 0) {
-    parts.push('\n### Fichiers clés du projet')
+    parts.push('\n### Key project files')
     for (const file of snapshot.keyFiles) {
       parts.push(`\n**${file.path}** (${file.role})`)
       file.signatures.forEach(s => parts.push(`  ${s}`))
@@ -224,7 +224,7 @@ function snapshotToText(snapshot: ProjectSnapshot): string {
   }
 
   if (snapshot.summary) {
-    parts.push(`\n### Résumé de session\n${snapshot.summary}`)
+    parts.push(`\n### Session summary\n${snapshot.summary}`)
   }
 
   return parts.join('\n')
@@ -259,9 +259,9 @@ export function saveSession(messages: Message[], projectPath: string): void {
 }
 
 /**
- * Charge le snapshot de la session précédente pour un projet.
+ * Loads the snapshot from the previous session for a project.
  * @param projectPath - Chemin racine du projet
- * @returns Texte compact du snapshot à injecter dans le system prompt, ou null
+ * @returns Compact snapshot text to inject into the system prompt, or null
  */
 export function loadSession(projectPath: string): string | null {
   const projectHash = computeProjectHash(projectPath)
@@ -278,7 +278,7 @@ export function loadSession(projectPath: string): string | null {
 }
 
 /**
- * Classe publique pour l'usage avancé.
+ * Public class for advanced use.
  */
 export class SessionCache {
   save(messages: Message[], projectPath: string): void {

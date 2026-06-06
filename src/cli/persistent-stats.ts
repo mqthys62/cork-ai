@@ -1,6 +1,6 @@
 /**
- * Persistent stats — sauvegarde les économies dans ~/.cork-ai/stats.json.
- * Permet à `cork-ai gain` et `cork-ai report` d'afficher les stats globales.
+ * Persistent stats — saves savings to ~/.cork-ai/stats.json.
+ * Allows `cork-ai gain` and `cork-ai report` to display global stats.
  */
 
 import fs from 'fs'
@@ -100,7 +100,7 @@ function saveStats(stats: GlobalStats): void {
   fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), 'utf-8')
 }
 
-// ─── Write (sessions terminées) ───────────────────────────────────────────────
+// ─── Write (completed sessions) ────────────────────────────────────────────────────────────
 
 export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   const stats = loadStats()
@@ -143,7 +143,7 @@ export function resetGlobalStats(): void {
   fs.writeFileSync(STATS_FILE, JSON.stringify(fresh, null, 2), 'utf-8')
 }
 
-// ─── Live session (agrège tous les hook calls d'une même session) ─────────────
+// ─── Live session (aggregates all hook calls for a session) ──────────────────
 
 export interface LiveSession {
   sessionId: string
@@ -159,7 +159,7 @@ export interface LiveSession {
 }
 
 export const LIVE_SESSION_FILE = path.join(GLOBAL_DIR, 'live-session.json')
-const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000  // 2h d'inactivité = nouvelle session
+const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000  // 2h of inactivity = new session
 
 export function readLiveSession(): LiveSession | null {
   try {
@@ -217,10 +217,10 @@ export function accumulateInSession(event: {
     if (elapsed <= SESSION_TIMEOUT_MS && existing.projectPath === event.projectPath) {
       live = existing
     } else {
-      // Session expirée ou projet différent : flush avant de créer une nouvelle
+      // Expired session or different project: flush before creating a new one
       flushLiveSessionToHistory(existing)
     }
-  } catch { /* pas de session live existante */ }
+  } catch { /* no existing live session */ }
 
   if (live) {
     live.lastActivityAt = new Date().toISOString()
@@ -251,7 +251,7 @@ export function accumulateInSession(event: {
 }
 
 export function clearLiveSession(): void {
-  try { fs.unlinkSync(LIVE_SESSION_FILE) } catch { /* pas de session à effacer */ }
+  try { fs.unlinkSync(LIVE_SESSION_FILE) } catch { /* no session to clear */ }
 }
 
 // ─── Aggregations ─────────────────────────────────────────────────────────────

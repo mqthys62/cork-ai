@@ -1,7 +1,7 @@
 /**
  * Interceptor — middleware transparent sur le SDK Anthropic.
- * wrapClient() retourne un client dont l'interface est identique à l'original.
- * Tous les appels messages.create() sont automatiquement optimisés.
+ * wrapClient() returns a client with an interface identical to the original.
+ * All messages.create() calls are automatically optimized.
  */
 
 import { runPipeline } from './pipeline.js'
@@ -9,7 +9,7 @@ import { StatsTracker } from '../stats/tracker.js'
 import { recordSession } from '../cli/persistent-stats.js'
 import type { CorkAIOptions, FullStats, Message } from '../types/index.js'
 
-// Type minimal compatible avec le SDK Anthropic (évite la dep directe)
+// Minimal type compatible with the Anthropic SDK (avoids a direct dep)
 interface AnthropicCreateParams {
   messages: Message[]
   system?: string
@@ -39,22 +39,22 @@ interface AnthropicClient {
 }
 
 /**
- * Client wrappé — interface identique au SDK Anthropic avec méthodes cork-ai ajoutées.
+ * Wrapped client — identical interface to the Anthropic SDK with cork-ai methods added.
  */
 export interface WrappedClient extends AnthropicClient {
-  /** Retourne les stats de la dernière requête + session */
+  /** Returns stats from the last request + session */
   getStats(): FullStats | null
-  /** Sauvegarde la session courante dans ~/.cork-ai/stats.json et remet à zéro */
+  /** Saves the current session to ~/.cork-ai/stats.json and resets */
   resetStats(): void
-  /** Sauvegarde la session sans la réinitialiser (pour usage en fin de process) */
+  /** Saves the session without resetting it (for end-of-process use) */
   saveSession(): void
 }
 
 /**
- * Wrape un client Anthropic pour optimiser automatiquement chaque requête.
+ * Wraps an Anthropic client to automatically optimize every request.
  * @param client - Instance Anthropic SDK
  * @param options - Options cork-ai
- * @returns Client wrappé avec l'interface Anthropic + .getStats()
+ * @returns Wrapped client with the Anthropic interface + .getStats()
  */
 export function wrapClient<T extends AnthropicClient>(
   client: T,
@@ -72,7 +72,7 @@ export function wrapClient<T extends AnthropicClient>(
       const result = runPipeline(params.messages, options, tracker)
       lastStats = result.stats
 
-      // Substituer les messages compressés
+      // Substitute compressed messages
       const optimizedParams: AnthropicCreateParams = {
         ...params,
         messages: result.messages,

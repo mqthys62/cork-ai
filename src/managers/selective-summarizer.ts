@@ -1,10 +1,10 @@
 /**
- * Selective Summarizer — résumé intelligent préservant les informations critiques.
- * Gain estimé : 20–30% des tokens sur l'historique ancien.
+ * Selective Summarizer — intelligent summarization preserving critical information.
+ * Estimated gain: 20–30% of tokens on old conversation history.
  *
- * Classifie chaque message en deux catégories :
- * - Peut être résumé : explorations, discussions, confirmations
- * - Doit rester verbatim : noms de fichiers, stack traces, décisions, configs
+ * Classifies each message into two categories:
+ * - Can be summarized: explorations, discussions, confirmations
+ * - Must stay verbatim: file names, stack traces, decisions, configs
  */
 
 import { countTokens } from '../core/tokenizer.js'
@@ -17,7 +17,7 @@ import type {
 
 interface SummarizerOptions {
   aggressiveness: number
-  /** Nombre minimum de tokens pour résumer un message */
+  /** Minimum number of tokens to summarize a message */
   minTokensToSummarize: number
 }
 
@@ -26,7 +26,7 @@ const DEFAULT_OPTIONS: SummarizerOptions = {
   minTokensToSummarize: 100,
 }
 
-// Patterns indiquant du contenu résumable (exploration, discussion)
+// Patterns indicating summarizable content (exploration, discussion)
 const SUMMARIZABLE_PATTERNS = [
   /\b(essayons|let's try|voyons|perhaps|maybe|could we|on pourrait)\b/gi,
   /\b(d'accord|ok|bien|parfait|good|great|sounds good|lgtm)\b/gi,
@@ -34,7 +34,7 @@ const SUMMARIZABLE_PATTERNS = [
 ]
 
 /**
- * Extrait le texte d'un message.
+ * Extracts text from a message.
  */
 function extractText(msg: Message): string {
   if (typeof msg.content === 'string') return msg.content
@@ -45,37 +45,37 @@ function extractText(msg: Message): string {
 }
 
 /**
- * Extrait les éléments verbatim d'un texte (chemins, erreurs, décisions).
+ * Extracts verbatim elements from text (paths, errors, decisions).
  */
 function extractVerbatimElements(text: string): string[] {
   const elements: Set<string> = new Set()
 
-  // Chemins de fichiers
+  // File paths
   const filePathPattern = /(\/[\w\-./]+\.\w{1,6}|[\w\-.]+\/[\w\-./]+\.\w{1,6})/g
   let m: RegExpExecArray | null
   while ((m = filePathPattern.exec(text)) !== null) {
     elements.add(m[1])
   }
 
-  // Messages d'erreur
+  // Error messages
   const errorPattern = /(?:Error|Exception|FAIL|error):\s*(.+)/g
   while ((m = errorPattern.exec(text)) !== null) {
     elements.add(m[0].slice(0, 120))
   }
 
-  // Décisions
+  // Decisions
   const decisionPattern = /(?:on garde|c'est décidé|la règle est|validé|decided|final).*$/gim
   while ((m = decisionPattern.exec(text)) !== null) {
     elements.add(m[0].trim().slice(0, 150))
   }
 
-  // Variables de config
+  // Config variables
   const configPattern = /[A-Z_]{3,}=\S+/g
   while ((m = configPattern.exec(text)) !== null) {
     elements.add(m[0])
   }
 
-  // Numéros de version et références précises
+  // Version numbers and precise references
   const versionPattern = /v\d+\.\d+(?:\.\d+)?/g
   while ((m = versionPattern.exec(text)) !== null) {
     elements.add(m[0])
@@ -85,7 +85,7 @@ function extractVerbatimElements(text: string): string[] {
 }
 
 /**
- * Détermine si un message est principalement exploratoire/résumable.
+ * Determines whether a message is primarily exploratory/summarizable.
  */
 function isSummarizableMessage(text: string): boolean {
   const summarizableCount = SUMMARIZABLE_PATTERNS.filter(p => {
@@ -93,25 +93,25 @@ function isSummarizableMessage(text: string): boolean {
     return p.test(text)
   }).length
 
-  // Si plusieurs patterns d'exploration trouvés → résumable
+  // If multiple exploration patterns found → summarizable
   return summarizableCount >= 2
 }
 
 /**
- * Crée un résumé compact d'un message en préservant les éléments verbatim.
+ * Creates a compact summary of a message preserving verbatim elements.
  */
 function createSummary(msg: Message, msgIdx: number, _aggressiveness: number): Message {
   const text = extractText(msg)
 
-  // Extraire les éléments verbatim critiques
+  // Extract critical verbatim elements
   const verbatim = extractVerbatimElements(text)
 
-  // Créer le résumé en prose
+  // Create prose summary
   const words = text.split(/\s+/).filter(w => w.length > 0)
   const summaryWordCount = Math.max(15, Math.floor(words.length * 0.15))
   const proseSummary = words.slice(0, summaryWordCount).join(' ').slice(0, 200)
 
-  let summary = `[msg#${msgIdx + 1} résumé: ${proseSummary}${text.length > 200 ? '...' : ''}]`
+  let summary = `[msg#${msgIdx + 1} summary: ${proseSummary}${text.length > 200 ? '...' : ''}]`
 
   if (verbatim.length > 0) {
     summary += `\n[verbatim: ${verbatim.join(' | ')}]`
@@ -122,7 +122,7 @@ function createSummary(msg: Message, msgIdx: number, _aggressiveness: number): M
 }
 
 /**
- * Résume sélectivement l'historique en préservant les informations critiques.
+ * Selectively summarizes history while preserving critical information.
  */
 export function selectiveSummarize(
   messages: Message[],
@@ -131,7 +131,7 @@ export function selectiveSummarize(
   const opts: SummarizerOptions = { ...DEFAULT_OPTIONS, ...options }
   let savedTokens = 0
 
-  // Garder les N derniers messages intacts (fenêtre récente)
+  // Keep the last N messages intact (recent window)
   const keepRecent = Math.max(3, Math.floor(messages.length * 0.3))
   const summarizeUntil = Math.max(0, messages.length - keepRecent)
 
@@ -141,10 +141,10 @@ export function selectiveSummarize(
     const text = extractText(msg)
     const tokenCount = countTokens(text)
 
-    // Ne résumer que les messages substantiels
+    // Only summarize substantial messages
     if (tokenCount < opts.minTokensToSummarize) return msg
 
-    // Ne résumer que les messages exploratoires
+    // Only summarize exploratory messages
     if (!isSummarizableMessage(text)) return msg
 
     const summarized = createSummary(msg, idx, opts.aggressiveness)
@@ -157,7 +157,7 @@ export function selectiveSummarize(
 }
 
 /**
- * Classe publique pour l'usage avancé.
+ * Public class for advanced use.
  */
 export class SelectiveSummarizer {
   private opts: SummarizerOptions

@@ -1,9 +1,9 @@
 /**
- * Header Stripper — suppression des headers répétitifs dans les messages user.
- * Gain estimé : 5–10% des tokens input.
+ * Header Stripper — removes repetitive headers from user messages.
+ * Estimated gain: 5–10% of input tokens.
  *
- * Claude Code injecte dans chaque message user un header contenant CWD, fichiers
- * ouverts, timestamp, variables d'env. Ce module détecte et déduplique ces blocs.
+ * Claude Code injects a header into each user message containing CWD, open files,
+ * timestamps, env vars. This module detects and deduplicates these blocks.
  */
 
 import { countTokens } from '../core/tokenizer.js'
@@ -13,7 +13,7 @@ const DEFAULT_OPTIONS: HeaderStripperOptions = {
   aggressiveness: 0.6,
 }
 
-// Patterns de détection des headers Claude Code
+// Detection patterns for Claude Code headers
 const HEADER_PATTERNS = [
   /^<environment[\s>]/m,
   /^<files[\s>]/m,
@@ -28,14 +28,14 @@ const HEADER_PATTERNS = [
 ]
 
 /**
- * Détecte si un texte contient un header Claude Code.
+ * Detects whether a text contains a Claude Code header.
  */
 function hasHeader(text: string): boolean {
   return HEADER_PATTERNS.some(p => p.test(text))
 }
 
 /**
- * Extrait les champs clé=valeur d'un header.
+ * Extracts key=value fields from a header.
  */
 function parseHeaderFields(text: string): Map<string, string> {
   const fields = new Map<string, string>()
@@ -60,7 +60,7 @@ function parseHeaderFields(text: string): Map<string, string> {
     fields.set(match[1], match[3].trim().slice(0, 200))
   }
 
-  // Fichiers ouverts
+  // Open files
   const filesMatch = text.match(/(?:open(?:ed)? files?|fichiers? ouverts?):\s*(.+)/im)
   if (filesMatch) fields.set('files', filesMatch[1].trim())
 
@@ -68,7 +68,7 @@ function parseHeaderFields(text: string): Map<string, string> {
 }
 
 /**
- * Calcule le diff entre deux ensembles de champs de header.
+ * Computes the diff between two sets of header fields.
  */
 function computeHeaderDiff(
   prev: Map<string, string>,
@@ -90,15 +90,15 @@ function computeHeaderDiff(
 }
 
 /**
- * Extrait la partie header et la partie contenu réel d'un message.
+ * Extracts the header part and the body part of a message.
  */
 function splitHeaderFromContent(text: string): { headerPart: string; bodyPart: string } {
-  // Stratégie : le header est au début du message avant le premier contenu substantiel
-  // Chercher la fin des blocs de metadata
+  // Strategy: the header is at the beginning of the message before the first substantial content
+  // Find the end of metadata blocks
   const lines = text.split('\n')
   let headerEndLine = 0
 
-  // Détecter les blocs XML de header
+  // Detect XML header blocks
   let inXmlBlock = false
   let xmlBlockDepth = 0
   for (let i = 0; i < lines.length; i++) {
@@ -116,7 +116,7 @@ function splitHeaderFromContent(text: string): { headerPart: string; bodyPart: s
       }
     }
 
-    // Lignes de metadata simples (CWD:, OS:, etc.)
+    // Simple metadata lines (CWD:, OS:, etc.)
     if (!inXmlBlock && /^(CWD|OS|Platform|Date|Working directory):\s/i.test(line)) {
       headerEndLine = i + 1
     }
@@ -133,15 +133,15 @@ function splitHeaderFromContent(text: string): { headerPart: string; bodyPart: s
 }
 
 /**
- * Supprime les headers répétitifs des messages user.
- * Conserve le premier header intégralement, remplace les suivants par un diff.
+ * Removes repetitive headers from user messages.
+ * Keeps the first header in full, replaces subsequent ones with a diff.
  */
 export function stripHeaders(
   messages: Message[],
   options?: Partial<HeaderStripperOptions>,
 ): CompressResult {
   const _opts: HeaderStripperOptions = { ...DEFAULT_OPTIONS, ...options }
-  void _opts // utilisé implicitement pour les options futures
+  void _opts // reserved for future options
   let savedTokens = 0
   let lastHeaderFields: Map<string, string> | null = null
   let firstHeaderSeen = false
@@ -149,7 +149,7 @@ export function stripHeaders(
   const compressed = messages.map(msg => {
     if (msg.role !== 'user') return msg
 
-    // Traiter le contenu textuel
+    // Process text content
     const processText = (text: string): string => {
       if (!hasHeader(text)) return text
 
@@ -159,30 +159,30 @@ export function stripHeaders(
       const currentFields = parseHeaderFields(headerPart)
 
       if (!firstHeaderSeen) {
-        // Premier header : conserver intégralement
+        // First header: keep in full
         firstHeaderSeen = true
         lastHeaderFields = currentFields
         return text
       }
 
-      // Headers suivants : remplacer par un diff
+      // Subsequent headers: replace with a diff
       const originalTokenCount = countTokens(headerPart)
 
       let replacement: string
       if (!lastHeaderFields || lastHeaderFields.size === 0) {
-        replacement = '[env: header présent]'
+        replacement = '[env: header present]'
       } else {
         const { changed, unchanged } = computeHeaderDiff(lastHeaderFields, currentFields)
 
         if (changed.size === 0) {
-          replacement = '[env: identique au message précédent]'
+          replacement = '[env: identical to previous message]'
         } else {
           const changedParts: string[] = []
           for (const [key, value] of changed) {
             changedParts.push(`${key}=${value}`)
           }
           const unchangedSummary = unchanged.length > 0
-            ? `, ${unchanged.length} champ(s) inchangé(s)`
+            ? `, ${unchanged.length} field(s) unchanged`
             : ''
           replacement = `[env: ${changedParts.join(', ')}${unchangedSummary}]`
         }

@@ -1,10 +1,10 @@
 /**
- * Heatmap Manager — scoring de pertinence de l'historique.
- * Gain estimé : 15–25% des tokens input.
+ * Heatmap Manager — relevance scoring of conversation history.
+ * Estimated gain: 15–25% of input tokens.
  *
- * Score chaque message sur 4 dimensions : récence, pertinence lexicale,
- * type de contenu, et références récentes. Les messages sous le seuil
- * sont résumés à une ligne (jamais supprimés).
+ * Scores each message on 4 dimensions: recency, lexical relevance,
+ * content type, and recent references. Messages below the threshold
+ * are summarized to one line (never deleted).
  */
 
 import { countTokens } from '../core/tokenizer.js'
@@ -22,17 +22,17 @@ const DEFAULT_OPTIONS: HeatmapOptions = {
   threshold: 0.3,
 }
 
-// Les messages contenant des blocs de code sont des contrats d'API ou des
-// résultats de lecture — les supprimer fait perdre des informations critiques
-// (signatures, configs, stack traces). Score plancher pour les protéger.
+// Messages containing code blocks are API contracts or
+// read results — removing them loses critical information
+// (signatures, configs, stack traces). Floor score to protect them.
 const CODE_BLOCK_SCORE_FLOOR = 0.30
 
-// Patterns de contenu à haute valeur permanente
+// High permanent value content patterns
 const HIGH_VALUE_PATTERNS = [
-  // Décisions
+  // Decisions
   /\b(j'ai décidé|on va utiliser|la décision|on a choisi|il est décidé|on garde|c'est décidé)\b/i,
   /\b(decided|we'll use|decision|chosen|the rule is|keeping|final choice)\b/i,
-  // Erreurs résolues
+  // Resolved errors
   /\b(le problème était|la solution|fixed by|solved|root cause|was caused by)\b/i,
   /\b(le bug venait de|corrigé en|la cause était)\b/i,
   // Configurations
@@ -48,7 +48,7 @@ const MEDIUM_VALUE_PATTERNS = [
 ]
 
 /**
- * Extrait le contenu textuel d'un message.
+ * Extracts text content from a message.
  */
 function extractText(msg: Message): string {
   if (typeof msg.content === 'string') return msg.content
@@ -59,7 +59,7 @@ function extractText(msg: Message): string {
 }
 
 /**
- * Tokenise un texte en termes significatifs (version légère).
+ * Tokenizes text into significant terms (lightweight version).
  */
 function quickTokenize(text: string): Set<string> {
   const terms = text.toLowerCase().split(/\W+/).filter(t => t.length > 3)
@@ -67,7 +67,7 @@ function quickTokenize(text: string): Set<string> {
 }
 
 /**
- * Score un message sur plusieurs dimensions (0–1 par dimension).
+ * Scores a message on multiple dimensions (0–1 per dimension).
  */
 function scoreMessage(
   msg: Message,
@@ -80,58 +80,58 @@ function scoreMessage(
   const text = extractText(msg)
   const reasons: string[] = []
 
-  // Dimension 1 : Récence (score plus élevé pour les messages récents)
+  // Dimension 1: Recency (higher score for recent messages)
   const recencyScore = msgIdx / Math.max(1, totalMessages - 1)
-  if (recencyScore > 0.7) reasons.push('récent')
+  if (recencyScore > 0.7) reasons.push('recent')
 
-  // Dimension 2 : Pertinence lexicale (overlap avec les N derniers messages)
+  // Dimension 2: Lexical relevance (overlap with the last N messages)
   const msgTerms = quickTokenize(text)
   let overlap = 0
   for (const term of msgTerms) {
     if (recentTerms.has(term)) overlap++
   }
   const relevanceScore = msgTerms.size > 0 ? Math.min(1, overlap / Math.sqrt(msgTerms.size)) : 0
-  if (relevanceScore > 0.3) reasons.push('pertinent lexicalement')
+  if (relevanceScore > 0.3) reasons.push('lexically relevant')
 
-  // Dimension 3 : Type de contenu (bonus permanent pour décisions/configs/erreurs)
+  // Dimension 3: Content type (permanent bonus for decisions/configs/errors)
   let contentScore = 0
   if (HIGH_VALUE_PATTERNS.some(p => p.test(text))) {
     contentScore = 0.8
-    reasons.push('contenu haute valeur')
+    reasons.push('high-value content')
   } else if (MEDIUM_VALUE_PATTERNS.some(p => p.test(text))) {
     contentScore = 0.4
-    reasons.push('contenu moyenne valeur')
+    reasons.push('medium-value content')
   }
 
-  // Dimension 4 : Référencé récemment
+  // Dimension 4: Recently referenced
   const referenceScore = recentlyReferenced.has(msgIdx) ? 0.7 : 0
-  if (referenceScore > 0) reasons.push('référencé récemment')
+  if (referenceScore > 0) reasons.push('recently referenced')
 
-  // Score combiné (pondéré)
+  // Combined score (weighted)
   let score =
     recencyScore * 0.35 +
     relevanceScore * 0.30 +
     contentScore * 0.25 +
     referenceScore * 0.10
 
-  // Plancher pour les messages contenant des blocs de code : les signatures de
-  // fonctions, interfaces et configs sont des contrats critiques pour la qualité
-  // du code produit — on ne les résume jamais, quel que soit leur score de récence.
+  // Floor for messages containing code blocks: function signatures,
+  // interfaces and configs are critical contracts for code quality
+  // — never summarize them regardless of their recency score.
   const hasCodeBlock = /```[\s\S]{10,}```/.test(text)
   if (hasCodeBlock) {
     score = Math.max(score, CODE_BLOCK_SCORE_FLOOR)
-    reasons.push('contient un bloc de code')
+    reasons.push('contains a code block')
   }
 
   return {
     messageIndex: msgIdx,
     score: Math.round(score * 100) / 100,
-    reason: reasons.length > 0 ? reasons.join(', ') : 'faible pertinence',
+    reason: reasons.length > 0 ? reasons.join(', ') : 'low relevance',
   }
 }
 
 /**
- * Construit l'index des termes des N derniers messages.
+ * Builds the term index from the last N messages.
  */
 function buildRecentTerms(messages: Message[], windowSize: number, currentIdx: number): Set<string> {
   const terms = new Set<string>()
@@ -146,7 +146,7 @@ function buildRecentTerms(messages: Message[], windowSize: number, currentIdx: n
 }
 
 /**
- * Détecte les références à des numéros de messages dans le texte.
+ * Detects references to message numbers in the text.
  */
 function detectReferences(text: string): number[] {
   const refs: number[] = []
@@ -160,7 +160,7 @@ function detectReferences(text: string): number[] {
 }
 
 /**
- * Score tous les messages de l'historique.
+ * Scores all messages in the conversation history.
  */
 export function scoreMessages(
   messages: Message[],
@@ -168,7 +168,7 @@ export function scoreMessages(
 ): HeatmapScore[] {
   const opts: HeatmapOptions = { ...DEFAULT_OPTIONS, ...options }
 
-  // Construire l'index des messages récemment référencés
+  // Build the index of recently referenced messages
   const recentlyReferenced = new Set<number>()
   const windowStart = Math.max(0, messages.length - opts.windowSize)
   for (let i = windowStart; i < messages.length; i++) {
@@ -178,7 +178,7 @@ export function scoreMessages(
     }
   }
 
-  // Termes des derniers messages pour la pertinence
+  // Terms from recent messages for relevance scoring
   const recentTerms = buildRecentTerms(messages, opts.windowSize, messages.length - 1)
 
   return messages.map((msg, idx) =>
@@ -187,7 +187,7 @@ export function scoreMessages(
 }
 
 /**
- * Crée un résumé d'une ligne pour un message peu pertinent.
+ * Creates a one-line summary for a low-relevance message.
  */
 function summarizeMessage(msg: Message, msgIdx: number, score: HeatmapScore): Message {
   const text = extractText(msg)
@@ -204,10 +204,10 @@ function summarizeMessage(msg: Message, msgIdx: number, score: HeatmapScore): Me
 }
 
 /**
- * Compresse l'historique en résumant les messages peu pertinents.
- * @param messages - Historique complet
- * @param threshold - Seuil de score (défaut depuis options)
- * @param options - Options du heatmap
+ * Compresses history by summarizing low-relevance messages.
+ * @param messages - Full conversation history
+ * @param threshold - Score threshold (defaults from options)
+ * @param options - Heatmap options
  */
 export function compressWithHeatmap(
   messages: Message[],
@@ -220,7 +220,7 @@ export function compressWithHeatmap(
 
   const scores = scoreMessages(messages, opts)
 
-  // Ne jamais comprimer les N derniers messages (fenêtre récente)
+  // Never compress the last N messages (recent window)
   const keepRecent = opts.windowSize
   const compressUntil = Math.max(0, messages.length - keepRecent)
 

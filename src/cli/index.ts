@@ -202,25 +202,25 @@ function showLastSession(): void {
     return
   }
 
-  // ── Section 1 : session en cours (ou dernière session terminée) ──
+  // ── Section 1: current session (or last completed session) ──
   if (live) {
     const pct = live.originalTokens > 0 ? (live.savedTokens / live.originalTokens) * 100 : 0
-    console.log(`\n${C.bold('cork-ai — Session en cours')}`)
+    console.log(`\n${C.bold('cork-ai — Current Session')}`)
     console.log(divider())
-    console.log(`  ${C.dim('Démarrée')}    ${fmtDate(live.startedAt)}`)
-    if (live.projectPath) console.log(`  ${C.dim('Projet')}      ${C.cyan(path.basename(live.projectPath))}`)
-    console.log(`  ${C.dim('Requêtes')}    ${C.bold(fmt(live.requests))}`)
+    console.log(`  ${C.dim('Started')}    ${fmtDate(live.startedAt)}`)
+    if (live.projectPath) console.log(`  ${C.dim('Project')}      ${C.cyan(path.basename(live.projectPath))}`)
+    console.log(`  ${C.dim('Requests')}    ${C.bold(fmt(live.requests))}`)
     console.log()
     console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(live.originalTokens))}`)
     console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(live.compressedTokens))}`)
-    console.log(`  ${C.dim('Économisés')}  ${C.green(fmt(live.savedTokens))} tokens`)
+    console.log(`  ${C.dim('Saved')}  ${C.green(fmt(live.savedTokens))} tokens`)
     console.log()
-    console.log(`  ${C.bold('Économies')}   ${C.green(bar(pct))}`)
-    console.log(`  ${C.bold('Coût évité')} ${C.green(fmtUsd(live.estimatedCostSaved))} USD`)
+    console.log(`  ${C.bold('Savings')}   ${C.green(bar(pct))}`)
+    console.log(`  ${C.bold('Cost saved')} ${C.green(fmtUsd(live.estimatedCostSaved))} USD`)
     console.log()
 
     if (Object.keys(live.byModule).length > 0) {
-      console.log(`  ${C.dim('Par module:')}`)
+      console.log(`  ${C.dim('By module:')}`)
       const sorted = Object.entries(live.byModule).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a)
       for (const [name, saved] of sorted) {
         const modPct = live.originalTokens > 0 ? (saved / live.originalTokens) * 100 : 0
@@ -229,25 +229,25 @@ function showLastSession(): void {
       console.log()
     }
   } else if (hasCompletedSessions) {
-    // Pas de session live → afficher la dernière session terminée
+    // No live session → show last completed session
     const last = stats!.sessions[stats!.sessions.length - 1]
     const pct = last.originalTokens > 0 ? (last.savedTokens / last.originalTokens) * 100 : 0
-    console.log(`\n${C.bold('cork-ai — Dernière session')}`)
+    console.log(`\n${C.bold('cork-ai — Last Session')}`)
     console.log(divider())
     console.log(`  ${C.dim('Date')}        ${fmtDate(last.startedAt)}`)
     if (last.projectPath) console.log(`  ${C.dim('Projet')}      ${C.cyan(path.basename(last.projectPath))}`)
-    console.log(`  ${C.dim('Requêtes')}    ${fmt(last.requests)}`)
+    console.log(`  ${C.dim('Requests')}    ${fmt(last.requests)}`)
     console.log()
     console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(last.originalTokens))}`)
     console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(last.compressedTokens))}`)
-    console.log(`  ${C.dim('Économisés')}  ${C.green(fmt(last.savedTokens))} tokens`)
+    console.log(`  ${C.dim('Saved')}  ${C.green(fmt(last.savedTokens))} tokens`)
     console.log()
     console.log(`  ${C.bold('Économies')}   ${C.green(bar(pct))}`)
-    console.log(`  ${C.bold('Coût évité')} ${C.green(fmtUsd(last.estimatedCostSaved))} USD`)
+    console.log(`  ${C.bold('Cost saved')} ${C.green(fmtUsd(last.estimatedCostSaved))} USD`)
     console.log()
   }
 
-  // ── Section 2 : totaux globaux (session live incluse si active) ──
+  // ── Section 2: global totals (live session included if active) ──
   if (stats) {
     const liveSaved  = live?.savedTokens ?? 0
     const liveCost   = live?.estimatedCostSaved ?? 0
@@ -259,7 +259,7 @@ function showLastSession(): void {
 
     console.log(divider())
     console.log(
-      `  ${C.dim('Global :')} ${C.green(fmt(totalSaved))} tokens économisés` +
+      `  ${C.dim('Global:')} ${C.green(fmt(totalSaved))} tokens saved` +
       ` — ${C.green(fmtUsd(totalCost))} USD` +
       `  ${C.dim(`(${fmt(totalReqs)} req · ${fmt(sessionCnt)} sessions)`)}`
     )
@@ -271,7 +271,7 @@ function showAllTime(): void {
   const stats = readGlobalStats()
   const live = readLiveSession()
 
-  // Inclure la session live dans les totaux
+  // Include the live session in totals
   const liveSaved  = live?.savedTokens ?? 0
   const liveCost   = live?.estimatedCostSaved ?? 0
   const liveReqs   = live?.requests ?? 0
@@ -321,7 +321,7 @@ function showHistory(): void {
   console.log(`  ${'Date'.padEnd(20)} ${'Project'.padEnd(18)} ${'Saved tokens'.padStart(13)} ${'Savings'.padStart(9)} ${'Cost saved'.padStart(11)}`)
   console.log(divider())
 
-  // Session live en tête si active
+  // Live session first if active
   if (live) {
     const pct = live.originalTokens > 0 ? (live.savedTokens / live.originalTokens) * 100 : 0
     const project = path.basename(live.projectPath).slice(0, 17)
@@ -550,22 +550,22 @@ function saveClaudeSettings(settings: ClaudeSettings): void {
 
 function isCorkHookInstalled(settings: ClaudeSettings): boolean {
   const pre = settings.hooks?.PreToolUse ?? []
-  // Accepte les deux formats : 'cork-ai hook' et '"/full/path/to/cork-ai" hook'
+  // Accepts both formats: 'cork-ai hook' and '"/full/path/to/cork-ai" hook'
   return pre.some(g =>
     g.hooks?.some(h => h.command.includes('cork-ai') && h.command.endsWith('hook'))
   )
 }
 
-// Résout le chemin absolu du binaire cork-ai pour que le hook
-// fonctionne même quand Claude Code n'hérite pas du PATH shell (Mac, Electron).
+// Resolves the absolute path to the cork-ai binary so the hook
+// works even when Claude Code does not inherit the shell PATH (Mac, Electron).
 function resolveHookBinary(): string {
-  // Binaire compilé standalone (bun build --compile) : execPath = le binaire lui-même
+  // Standalone compiled binary (bun build --compile): execPath = the binary itself
   const exec = process.execPath
   if (exec && !/\bnode(\.exe)?\b/i.test(path.basename(exec)) && fs.existsSync(exec)) {
     return exec
   }
 
-  // Emplacements d'installation courants
+  // Common installation locations
   const candidates = [
     path.join(os.homedir(), '.local', 'bin', 'cork-ai'),
     '/usr/local/bin/cork-ai',
@@ -589,8 +589,8 @@ async function hooksInstall(): Promise<void> {
     return
   }
 
-  // Utiliser le chemin absolu du binaire pour que le hook fonctionne
-  // même si ~/.local/bin n'est pas dans le PATH de Claude Code (Mac / Electron)
+  // Use the absolute binary path so the hook works
+  // even if ~/.local/bin is not in Claude Code's PATH (Mac / Electron)
   const binaryPath = resolveHookBinary()
   const hookCmd = binaryPath ? `"${binaryPath}" hook` : CORK_HOOK_FALLBACK
 
@@ -616,8 +616,8 @@ async function hooksInstall(): Promise<void> {
   console.log(`   ${C.dim('Savings:')} 40-90% on code files, 20-50% on text files.`)
   console.log()
 
-  // Télémétrie — demande si jamais configurée
-  // On utilise /dev/tty si disponible pour fonctionner même depuis curl | sh
+  // Telemetry — ask if never configured
+  // Use /dev/tty if available to work even from curl | sh
   const cfg = loadConfig()
   if (cfg.telemetry === undefined) {
     await askTelemetryConsent(cfg)
@@ -630,7 +630,7 @@ async function hooksInstall(): Promise<void> {
 async function askTelemetryConsent(cfg: CorkConfig): Promise<void> {
   const prompt = `   ${C.dim('Help improve cork-ai? Send anonymous compression stats (no file paths, no content).')} [y/N]: `
 
-  // Essai 1 : stdin interactif
+  // Attempt 1: interactive stdin
   if (process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
     const answer = await new Promise<string>(resolve => {
@@ -640,12 +640,12 @@ async function askTelemetryConsent(cfg: CorkConfig): Promise<void> {
     return
   }
 
-  // Essai 2 : /dev/tty (fonctionne quand stdin est un pipe, ex. curl | sh)
+  // Attempt 2: /dev/tty (works when stdin is piped, e.g. curl | sh)
   if (process.platform !== 'win32') {
     try {
       const tty = fs.openSync('/dev/tty', 'r+')
 
-      // Écriture directe du prompt sur le terminal
+      // Write prompt directly to terminal
       fs.writeSync(tty, '\n' + prompt)
       const buf = Buffer.alloc(64)
       const n = fs.readSync(tty, buf, 0, 63, null)
@@ -653,10 +653,10 @@ async function askTelemetryConsent(cfg: CorkConfig): Promise<void> {
       const answer = buf.subarray(0, n).toString().trim().toLowerCase()
       applyTelemetryChoice(cfg, answer)
       return
-    } catch { /* /dev/tty non disponible (CI, conteneur) */ }
+    } catch { /* /dev/tty unavailable (CI, container) */ }
   }
 
-  // Pas d'interactivité possible : télémétrie désactivée par défaut, info affichée
+  // No interactivity: telemetry disabled by default
   saveConfig({ ...cfg, telemetry: false })
   console.log(`   ${C.dim('Telemetry off by default. Enable later: cork-ai telemetry on')}`)
 }
@@ -698,7 +698,7 @@ function hooksStatus(): void {
   console.log(`  cork-ai hook: ${installed ? C.green('● installed') : C.yellow('○ not installed')}`)
   console.log(`  Settings file: ${C.dim(CLAUDE_SETTINGS)}`)
   if (installed) {
-    // Afficher la commande installée
+    // Show installed command
     const pre = settings.hooks?.PreToolUse ?? []
     for (const g of pre) {
       const h = g.hooks?.find(h => h.command.includes('cork-ai') && h.command.endsWith('hook'))
@@ -864,7 +864,7 @@ async function runHook(): Promise<void> {
   const saved = originalTokens - compressedTokens
   const savingsPct = Math.round((saved / originalTokens) * 1000) / 10
 
-  // Accumuler dans la session live (une session = 2h d'activité sur le même projet)
+  // Accumulate in the live session (a session = 2h of activity on the same project)
   try {
     accumulateInSession({
       projectPath: (event.cwd as string) || process.cwd(),

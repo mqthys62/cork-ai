@@ -1,12 +1,12 @@
 /**
- * Tool Result Compressor — compression des blocs tool_result dans l'historique.
- * Gain estimé : 30–50% des tokens input sur les sessions longues.
+ * Tool Result Compressor — compresses tool_result blocks in conversation history.
+ * Estimated gain: 30–50% of input tokens on long sessions.
  *
- * Stratégie par type :
- * - Code : extraire imports + signatures, supprimer les corps de fonctions
- * - Bash : garder 10 premières + 5 dernières lignes + lignes d'erreur
- * - JSON : structure de premier niveau uniquement
- * - Texte : N premières lignes selon aggressivité
+ * Strategy by type:
+ * - Code: extract imports + signatures, drop function bodies
+ * - Bash: keep first 10 + last 5 lines + error lines
+ * - JSON: top-level structure only
+ * - Text: first N lines based on aggressiveness
  */
 
 import { randomBytes } from 'crypto'
@@ -28,35 +28,35 @@ const DEFAULT_OPTIONS: ToolResultOptions = {
   cacheEnabled: true,
 }
 
-// Cache side-channel pour restore()
+// Side-channel cache for restore()
 const contentCache = new Map<string, CachedContent>()
 
 function generateRefId(): string {
   return randomBytes(4).toString('hex')
 }
 
-// ─── Détection du type de contenu ────────────────────────────────────────────
+// ─── Content type detection ─────────────────────────────────────────────────────────────
 
 function detectContentType(content: string, toolName?: string): 'code' | 'bash' | 'json' | 'text' {
-  // Si le nom de l'outil indique le type
+  // If the tool name indicates the type
   if (toolName) {
     const lower = toolName.toLowerCase()
     if (lower.includes('bash') || lower.includes('execute') || lower.includes('run')) {
       return 'bash'
     }
     if (lower.includes('read') || lower.includes('write') || lower.includes('file')) {
-      // Vérifier si le contenu ressemble à du code via l'extension dans le tool_use parent
-      // On tente la détection par contenu
+      // Check if content looks like code via extension in parent tool_use
+      // Fall back to content-based detection
     }
   }
 
-  // Essai de détection JSON
+  // Try JSON detection
   const trimmed = content.trimStart()
   if ((trimmed.startsWith('{') || trimmed.startsWith('[')) && isValidJson(content)) {
     return 'json'
   }
 
-  // Détection de code (présence de patterns syntaxiques)
+  // Code detection (syntactic patterns)
   const codePatterns = [
     /^(import|export|from|require|function|class|const|let|var|def |fn |pub |use |package )/m,
     /^(interface|type |enum |async |await |return |if |for |while )/m,
@@ -66,7 +66,7 @@ function detectContentType(content: string, toolName?: string): 'code' | 'bash' 
     return 'code'
   }
 
-  // Détection bash (présence de sorties typiques de terminal)
+  // Bash detection (typical terminal output patterns)
   const bashPatterns = [
     /^\$\s+/m,
     /^(>>>|\.\.\.)\s/m,
@@ -95,7 +95,7 @@ function compressCodeContent(content: string, opts: ToolResultOptions): string {
   const lines = content.split('\n')
   const kept: string[] = []
 
-  // Patterns de signatures à conserver
+  // Signature patterns to keep
   const signaturePatterns = [
     /^(import|export|from|require)\s/,
     /^(export\s+)?(async\s+)?function\s+\w+/,
@@ -109,7 +109,7 @@ function compressCodeContent(content: string, opts: ToolResultOptions): string {
     /^#\s/,  // commentaires Markdown-style dans du code Python
     /^\/\*\*/, // JSDoc ouvert
     /^\s+\*/, // JSDoc lignes
-    /^\s+\*\//, // JSDoc fermé
+    /^\s+\*\//, // closing JSDoc
   ]
 
   let inDocComment = false
@@ -119,7 +119,7 @@ function compressCodeContent(content: string, opts: ToolResultOptions): string {
   for (const line of lines) {
     const trimmed = line.trimStart()
 
-    // Conserver les commentaires JSDoc (limités)
+    // Keep JSDoc comments (limited)
     if (trimmed.startsWith('/**')) { inDocComment = true; docCommentCount++ }
     if (inDocComment && docCommentCount <= maxDocComments) {
       kept.push(line)
@@ -131,14 +131,14 @@ function compressCodeContent(content: string, opts: ToolResultOptions): string {
       continue
     }
 
-    // Conserver les signatures
+    // Keep signatures
     if (signaturePatterns.some(p => p.test(line))) {
       kept.push(line)
     }
   }
 
   if (kept.length === 0) {
-    // Fallback : garder les N premières lignes
+    // Fallback: keep the first N lines
     return lines.slice(0, opts.maxCodeLines).join('\n')
   }
 
@@ -153,7 +153,7 @@ function compressBashContent(content: string, _opts: ToolResultOptions): string 
   const headCount = 10
   const tailCount = 5
 
-  // Lignes contenant des erreurs
+  // Lines containing errors
   const errorPattern = /\b(error|Error|ERROR|fail|FAIL|exception|Exception|fatal|FATAL|warning|Warning)\b/
   const errorLines = lines
     .map((line: string, idx: number) => ({ line, idx }))
@@ -169,13 +169,13 @@ function compressBashContent(content: string, _opts: ToolResultOptions): string 
 
   const parts: string[] = [...head]
   if (omitted > 0) {
-    parts.push(`[... ${omitted} lignes omises ...]`)
+    parts.push(`[... ${omitted} lines omitted ...]`)
   }
 
-  // Remonter les lignes d'erreur si elles sont dans la partie omise
+  // Surface error lines if they are in the omitted section
   const omittedErrorLines = errorLines.filter(({ idx }: { idx: number }) => idx >= headCount && idx < lines.length - tailCount)
   if (omittedErrorLines.length > 0) {
-    parts.push(`[Lignes importantes dans la partie omise :]`)
+    parts.push(`[Key lines in omitted section:]`)
     for (const { line } of omittedErrorLines.slice(0, 5)) {
       parts.push(`  ${line}`)
     }
@@ -202,7 +202,7 @@ function compressJsonContent(content: string): string {
     for (const key of keys.slice(0, 10)) {
       summary.push(`${key}: ${summarizeJsonValue(obj[key])}`)
     }
-    if (keys.length > 10) summary.push(`... +${keys.length - 10} clés`)
+    if (keys.length > 10) summary.push(`... +${keys.length - 10} keys`)
     return `{\n  ${summary.join(',\n  ')}\n}`
   } catch {
     return content
@@ -221,7 +221,7 @@ function summarizeJsonValue(val: unknown): string {
   return String(val)
 }
 
-// ─── Compression de texte générique ──────────────────────────────────────────
+// ─── Generic text compression ───────────────────────────────────────────────────────────
 
 function compressTextContent(content: string, opts: ToolResultOptions): string {
   const lines = content.split('\n')
@@ -232,7 +232,7 @@ function compressTextContent(content: string, opts: ToolResultOptions): string {
   return kept.join('\n')
 }
 
-// ─── Compresseur principal ────────────────────────────────────────────────────
+// ─── Main compressor ────────────────────────────────────────────────────────────────────────────────
 
 function compressToolResultContent(
   content: string,
@@ -241,7 +241,7 @@ function compressToolResultContent(
 ): { compressed: string; contentType: CachedContent['contentType'] } {
   const contentType = detectContentType(content, toolName)
 
-  // Seuil minimal : ne compresser que si le contenu est substantiel
+  // Minimal threshold: only compress if content is substantial
   const MIN_CHARS = 300
   if (content.length < MIN_CHARS) {
     return { compressed: content, contentType }
@@ -266,7 +266,7 @@ function compressToolResultContent(
 }
 
 /**
- * Extrait le contenu textuel d'un bloc tool_result.
+ * Extracts text content from a tool_result block.
  */
 function extractToolResultText(block: ToolResultBlock): string {
   if (typeof block.content === 'string') return block.content
@@ -280,10 +280,10 @@ function extractToolResultText(block: ToolResultBlock): string {
 }
 
 /**
- * Compresse tous les blocs tool_result dans les messages fournis.
- * @param messages - Historique de conversation
- * @param options - Options de compression
- * @returns Messages compressés + tokens économisés
+ * Compresses all tool_result blocks in the provided messages.
+ * @param messages - Conversation history
+ * @param options - Compression options
+ * @returns Compressed messages + tokens saved
  */
 export function compressToolResults(
   messages: Message[],
@@ -304,7 +304,7 @@ export function compressToolResults(
 
       const originalTokenCount = countTokens(originalText)
 
-      // Trouver le nom de l'outil depuis le contexte (on cherche le tool_use correspondant)
+      // Find tool name from context (looking for the corresponding tool_use)
       const { compressed: compressedText, contentType } = compressToolResultContent(
         originalText,
         undefined,
@@ -314,12 +314,12 @@ export function compressToolResults(
       const compressedTokenCount = countTokens(compressedText)
       const gain = originalTokenCount - compressedTokenCount
 
-      // Ne remplacer que si le gain est significatif (>20%)
+      // Only replace if the gain is significant (>10%)
       if (gain <= 0 || gain / originalTokenCount < 0.1) return block
 
       savedTokens += gain
 
-      // Stocker dans le cache si activé
+      // Store in cache if enabled
       let refId = ''
       if (opts.cacheEnabled) {
         refId = generateRefId()
@@ -333,7 +333,7 @@ export function compressToolResults(
       }
 
       const refPart = refId ? ` | refId: ${refId}` : ''
-      const header = `[cork-ai: ${contentType} compressé — ${originalTokenCount} → ${compressedTokenCount} tokens${refPart}]\n`
+      const header = `[cork-ai: ${contentType} compressed — ${originalTokenCount} → ${compressedTokenCount} tokens${refPart}]\n`
 
       const newBlock: ToolResultBlock = {
         ...block,
@@ -349,9 +349,9 @@ export function compressToolResults(
 }
 
 /**
- * Restaure le contenu original d'un bloc compressé via son refId.
- * @param refId - Identifiant retourné lors de la compression
- * @returns Contenu original ou null si non trouvé
+ * Restores the original content of a compressed block via its refId.
+ * @param refId - Identifier returned during compression
+ * @returns Original content or null if not found
  */
 export function restore(refId: string): string | null {
   const cached = contentCache.get(refId)
@@ -359,7 +359,7 @@ export function restore(refId: string): string | null {
 }
 
 /**
- * Vide le cache side-channel (libère la mémoire).
+ * Clears the side-channel cache (frees memory).
  */
 export function clearCache(): void {
   contentCache.clear()

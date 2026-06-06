@@ -1,10 +1,10 @@
 /**
- * Assistant Code Deduplicator — suppression des doublons de code dans l'historique.
- * Gain estimé : 10–20% des tokens input.
+ * Assistant Code Deduplicator — removes code duplicates from conversation history.
+ * Estimated gain: 10–20% of input tokens.
  *
- * Deux stratégies :
- * 1. Code écrit dans un fichier via Write/create_file → remplacé par une référence au fichier
- * 2. Blocs de code identiques dans la conversation → les occurrences suivantes sont remplacées
+ * Two strategies:
+ * 1. Code written to a file via Write/create_file → replaced with a file reference
+ * 2. Identical code blocks in the conversation → subsequent occurrences are replaced
  */
 
 import { createHash } from 'crypto'
@@ -22,11 +22,11 @@ const DEFAULT_OPTIONS: CodeDedupOptions = {
   aggressiveness: 0.6,
 }
 
-// Noms d'outils qui écrivent du code dans des fichiers
+// Names of tools that write code to files
 const WRITE_TOOL_NAMES = new Set([
   'Write', 'write', 'create_file', 'write_file',
   'str_replace_editor', 'text_editor', 'edit_file',
-  'bash', 'Bash', // parfois utilisé pour écrire via echo/cat
+  'bash', 'Bash', // sometimes used to write via echo/cat
 ])
 
 interface FileWrite {
@@ -37,7 +37,7 @@ interface FileWrite {
 }
 
 /**
- * Normalise le code pour le hash (trim, normalisation des fins de lignes).
+ * Normalizes code for hashing (trim, line ending normalization).
  */
 function normalizeCode(code: string): string {
   return code
@@ -47,15 +47,15 @@ function normalizeCode(code: string): string {
 }
 
 /**
- * Calcule le hash SHA1 court (8 chars) du code normalisé.
+ * Computes a short SHA1 hash (8 chars) of the normalized code.
  */
 function hashCode(code: string): string {
   return createHash('sha1').update(normalizeCode(code)).digest('hex').slice(0, 8)
 }
 
 /**
- * Extrait les blocs de code d'un texte markdown.
- * Retourne un tableau de { code, lang, startIndex, endIndex }.
+ * Extracts code blocks from a markdown text.
+ * Returns an array of { code, lang, startIndex, endIndex }.
  */
 function extractCodeBlocks(text: string): Array<{ code: string; lang: string; start: number; end: number }> {
   const blocks: Array<{ code: string; lang: string; start: number; end: number }> = []
@@ -73,12 +73,12 @@ function extractCodeBlocks(text: string): Array<{ code: string; lang: string; st
 }
 
 /**
- * Extrait le chemin de fichier et le contenu depuis un tool_use de type Write.
+ * Extracts the file path and content from a Write-type tool_use block.
  */
 function extractWriteToolInfo(block: ToolUseBlock): { filePath: string; content: string } | null {
   const input = block.input
 
-  // Différents formats selon l'outil
+  // Different formats depending on the tool
   const filePath = (
     (typeof input['path'] === 'string' && input['path']) ||
     (typeof input['file_path'] === 'string' && input['file_path']) ||
@@ -98,19 +98,19 @@ function extractWriteToolInfo(block: ToolUseBlock): { filePath: string; content:
 }
 
 /**
- * Déduplique le code dans les messages assistant.
- * @param messages - Historique de conversation
- * @param options - Options de compression
+ * Deduplicates code in assistant messages.
+ * @param messages - Conversation history
+ * @param options - Compression options
  */
 export function deduplicateCode(
   messages: Message[],
   options?: Partial<CodeDedupOptions>,
 ): CompressResult {
   const _opts: CodeDedupOptions = { ...DEFAULT_OPTIONS, ...options }
-  void _opts // utilisé implicitement pour les options futures
+  void _opts // reserved for future options
   let savedTokens = 0
 
-  // Phase 1 : construire la map hash → fichier depuis les tool_use Write
+  // Phase 1: build hash → file map from Write tool_use blocks
   const fileWrites = new Map<string, FileWrite>()
 
   messages.forEach((msg, msgIdx) => {
@@ -130,10 +130,10 @@ export function deduplicateCode(
     })
   })
 
-  // Phase 2 : index des blocs de code déjà vus dans la conversation
+  // Phase 2: index of code blocks already seen in the conversation
   const seenCodeBlocks = new Map<string, { messageIndex: number; blockRef: string }>()
 
-  // Phase 3 : remplacer les doublons dans les messages assistant
+  // Phase 3: replace duplicates in assistant messages
   const compressed = messages.map((msg, msgIdx) => {
     if (msg.role !== 'assistant') return msg
 
@@ -141,7 +141,7 @@ export function deduplicateCode(
       const codeBlocks = extractCodeBlocks(text)
       if (codeBlocks.length === 0) return text
 
-      // Travailler en sens inverse pour ne pas décaler les indices
+      // Process in reverse order to avoid index shifting
       let result = text
       const sortedBlocks = [...codeBlocks].sort((a, b) => b.start - a.start)
 
@@ -149,25 +149,25 @@ export function deduplicateCode(
         const hash = hashCode(block.code)
         const originalTokens = countTokens(result.slice(block.start, block.end))
 
-        // Cas 1 : le code correspond à un fichier écrit
+        // Case 1: code matches a written file
         const fileWrite = fileWrites.get(hash)
         if (fileWrite && fileWrite.messageIndex <= msgIdx) {
-          const replacement = `[code écrit dans \`${fileWrite.filePath}\` — omis pour économiser les tokens]`
+          const replacement = `[code written to \`${fileWrite.filePath}\` — omitted to save tokens]`
           savedTokens += Math.max(0, originalTokens - countTokens(replacement))
           result = result.slice(0, block.start) + replacement + result.slice(block.end)
           continue
         }
 
-        // Cas 2 : le code a déjà été vu dans la conversation
+        // Case 2: code was already seen in the conversation
         const seen = seenCodeBlocks.get(hash)
         if (seen && seen.messageIndex < msgIdx) {
-          const replacement = `[code identique à ${seen.blockRef} — omis pour économiser les tokens]`
+          const replacement = `[duplicate code from ${seen.blockRef} — omitted to save tokens]`
           savedTokens += Math.max(0, originalTokens - countTokens(replacement))
           result = result.slice(0, block.start) + replacement + result.slice(block.end)
           continue
         }
 
-        // Première occurrence : l'enregistrer
+        // First occurrence: register it
         if (!seenCodeBlocks.has(hash)) {
           seenCodeBlocks.set(hash, {
             messageIndex: msgIdx,

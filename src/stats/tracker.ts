@@ -1,6 +1,6 @@
 /**
- * Stats Tracker — suivi des économies par module et par session.
- * Nécessaire pour démontrer la valeur de la lib et guider la compression adaptative.
+ * Stats Tracker — tracks savings per module and per session.
+ * Required to demonstrate library value and guide adaptive compression.
  */
 
 import type {
@@ -29,7 +29,7 @@ export class StatsTracker {
   }
 
   /**
-   * Enregistre les tokens économisés par un module pour la requête courante.
+   * Records tokens saved by a module for the current request.
    */
   recordModule(name: string, savedTokens: number): void {
     const existing = this.moduleAccumulators.get(name)
@@ -42,7 +42,7 @@ export class StatsTracker {
   }
 
   /**
-   * Calcule les stats de la requête courante et met à jour la session.
+   * Computes stats for the current request and updates the session.
    */
   getRequestStats(originalTokens: number, compressedTokens: number): RequestStats {
     const savedTokens = Math.max(0, originalTokens - compressedTokens)
@@ -66,7 +66,7 @@ export class StatsTracker {
   }
 
   /**
-   * Retourne les stats cumulées de la session courante.
+   * Returns cumulative stats for the current session.
    */
   getSessionStats(): SessionStats {
     return {
@@ -78,7 +78,7 @@ export class StatsTracker {
   }
 
   /**
-   * Retourne les stats complètes (requête + session + par module).
+   * Returns full stats (request + session + per module).
    */
   getFullStats(originalTokens: number, compressedTokens: number): FullStats {
     const request = this.getRequestStats(originalTokens, compressedTokens)
@@ -91,7 +91,7 @@ export class StatsTracker {
   }
 
   /**
-   * Remet la session à zéro (à appeler en début de nouvelle session).
+   * Resets the session (call at the start of a new session).
    */
   reset(): void {
     this.sessionTotalSaved = 0
@@ -101,7 +101,7 @@ export class StatsTracker {
     this.moduleAccumulators.clear()
   }
 
-  /** Retourne la configuration de pricing courante. */
+  /** Returns the current pricing configuration. */
   getPricing(): PricingConfig {
     return { ...this.pricing }
   }

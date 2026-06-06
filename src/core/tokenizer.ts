@@ -1,7 +1,7 @@
 /**
  * Tokenizer — comptage de tokens cl100k_base.
  * Utilise tiktoken si disponible, sinon fallback pur JS (chars/4).
- * Gain estimé : fondation pour tous les modules de compression.
+ * Estimated gain: foundation for all compression modules.
  */
 
 import type { Message } from '../types/index.js'
@@ -42,12 +42,12 @@ function tryLoadTiktokenSync(): boolean {
 }
 
 /**
- * Fallback pur JS : approximation basée sur la longueur en caractères.
- * Précision ~±15% par rapport à cl100k_base.
+ * Pure JS fallback: approximation based on character length.
+ * Accuracy ~±15% relative to cl100k_base.
  */
 function countTokensFallback(text: string): number {
   if (!text) return 0
-  // Approximation : ~4 chars par token pour l'anglais/code, ~3 pour le français
+  // Approximation: ~4 chars per token for English/code, ~3 for CJK/French
   // On utilise 3.5 comme moyenne
   return Math.ceil(text.length / 3.5)
 }
@@ -98,14 +98,14 @@ export function countMessageTokens(messages: Message[]): number {
 }
 
 /**
- * Vérifie si tiktoken est disponible dans l'environnement.
+ * Checks whether tiktoken is available in the environment.
  */
 export async function isTiktokenAvailable(): Promise<boolean> {
   return loadTiktoken()
 }
 
 /**
- * Singleton du tokenizer — réutilise l'encodeur initialisé.
+ * Tokenizer singleton — reuses the initialized encoder.
  */
 export const TokenizerSingleton = {
   countTokens,

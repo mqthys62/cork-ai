@@ -1,9 +1,9 @@
 /**
- * Semantic Deduplicator — détection de doublons conceptuels via TF-IDF + Jaccard.
- * Gain estimé : 10–15% des tokens input.
+ * Semantic Deduplicator — detects conceptual duplicates via TF-IDF + Jaccard.
+ * Estimated gain: 10–15% of input tokens.
  *
- * Aucune dépendance ML. Entièrement pur JS. Latence < 1ms par chunk.
- * Ne touche jamais à la première occurrence d'un concept.
+ * No ML dependencies. Pure JS. Latency < 1ms per chunk.
+ * Never touches the first occurrence of a concept.
  */
 
 import { countTokens } from '../core/tokenizer.js'
@@ -43,11 +43,11 @@ function tokenize(text: string): string[] {
 }
 
 /**
- * Construit un Set de termes (fingerprint TF-IDF simplifié).
+ * Builds a term set (simplified TF-IDF fingerprint).
  */
 function buildTermSet(text: string): Set<string> {
   const terms = tokenize(text)
-  // Bigrammes pour mieux capturer le contexte
+  // Bigrams for better context capture
   const termSet = new Set<string>(terms)
   for (let i = 0; i < terms.length - 1; i++) {
     termSet.add(`${terms[i]}_${terms[i + 1]}`)
@@ -56,7 +56,7 @@ function buildTermSet(text: string): Set<string> {
 }
 
 /**
- * Calcule la similarité de Jaccard entre deux ensembles de termes.
+ * Computes Jaccard similarity between two term sets.
  */
 function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   if (a.size === 0 && b.size === 0) return 1
@@ -70,7 +70,7 @@ function jaccardSimilarity(a: Set<string>, b: Set<string>): number {
   return intersection / union
 }
 
-// ─── Extraction de chunks sémantiques ────────────────────────────────────────
+// ─── Semantic chunk extraction ────────────────────────────────────────────────────
 
 interface SemanticChunk {
   text: string
@@ -79,12 +79,12 @@ interface SemanticChunk {
 }
 
 /**
- * Extrait les chunks sémantiques d'un texte (blocs de code, paragraphes, définitions).
+ * Extracts semantic chunks from a text (code blocks, paragraphs, definitions).
  */
 function extractChunks(text: string): SemanticChunk[] {
   const chunks: SemanticChunk[] = []
 
-  // Blocs de code
+  // Code blocks
   const codePattern = /```[\s\S]*?```/g
   let match: RegExpExecArray | null
   while ((match = codePattern.exec(text)) !== null) {
@@ -94,7 +94,7 @@ function extractChunks(text: string): SemanticChunk[] {
     }
   }
 
-  // Paragraphes (hors blocs de code)
+  // Paragraphs (excluding code blocks)
   const textWithoutCode = text.replace(/```[\s\S]*?```/g, '')
   const paragraphs = textWithoutCode.split(/\n\n+/).map(p => p.trim()).filter(p => p.length > 80)
   for (const para of paragraphs) {
@@ -104,7 +104,7 @@ function extractChunks(text: string): SemanticChunk[] {
   return chunks
 }
 
-// ─── Index sémantique ─────────────────────────────────────────────────────────
+// ─── Semantic index ──────────────────────────────────────────────────────────────────────────────────
 
 interface IndexedChunk {
   termSet: Set<string>
@@ -113,7 +113,7 @@ interface IndexedChunk {
 }
 
 /**
- * Déduplique les chunks sémantiquement similaires dans les messages.
+ * Deduplicates semantically similar chunks across messages.
  */
 export function deduplicateSemantic(
   messages: Message[],
@@ -130,7 +130,7 @@ export function deduplicateSemantic(
     let result = text
 
     for (const chunk of chunks) {
-      // Chercher un chunk similaire dans l'index
+      // Look for a similar chunk in the index
       let bestSimilarity = 0
       let bestMatch: IndexedChunk | null = null
 
@@ -144,22 +144,22 @@ export function deduplicateSemantic(
       }
 
       if (bestSimilarity >= opts.similarityThreshold && bestMatch) {
-        // Remplacer par une référence
-        const replacement = `[↑ concept déjà établi au ${bestMatch.chunkRef} — omis]`
+        // Replace with a reference
+        const replacement = `[↑ concept already established at ${bestMatch.chunkRef} — omitted]`
         const originalTokens = countTokens(chunk.text)
         const replacementTokens = countTokens(replacement)
         if (originalTokens > replacementTokens + 5) {
           savedTokens += originalTokens - replacementTokens
-          // Remplacer uniquement la première occurrence exacte dans result
+          // Replace only the first exact occurrence in result
           const escapedChunk = chunk.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
           try {
             result = result.replace(new RegExp(escapedChunk, ''), replacement)
           } catch {
-            // Si le regex échoue (caractères spéciaux complexes), ignorer ce chunk
+            // If regex fails (complex special characters), skip this chunk
           }
         }
       } else {
-        // Première occurrence : indexer
+        // First occurrence: index it
         index.push({
           termSet: chunk.termSet,
           messageIndex,

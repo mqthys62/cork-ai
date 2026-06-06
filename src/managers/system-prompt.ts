@@ -1,13 +1,13 @@
 /**
- * Dynamic System Prompt — injection sélective des sections du system prompt.
- * Gain estimé : 10–20% des tokens input sur les gros system prompts.
+ * Dynamic System Prompt — selective injection of system prompt sections.
+ * Estimated gain: 10–20% of input tokens on large system prompts.
  *
- * Les sections sont taguées dans le system prompt :
+ * Sections are tagged in the system prompt:
  *   <!-- @cork-ai section: python -->
  *   ... instructions Python ...
  *   <!-- @cork-ai end -->
  *
- * Seules les sections pertinentes pour le contexte actif sont injectées.
+ * Only sections relevant to the active context are injected.
  */
 
 import { createHash } from 'crypto'
@@ -26,7 +26,7 @@ interface ParsedSystemPrompt {
   sections: SectionDefinition[]
 }
 
-// Triggers par défaut par type de section
+// Default triggers per section type
 const DEFAULT_TRIGGERS: Record<string, string[]> = {
   python: ['python', '.py', 'pip', 'django', 'flask', 'fastapi', 'pytest', 'pandas', 'numpy'],
   javascript: ['javascript', '.js', '.jsx', 'node', 'npm', 'webpack', 'eslint'],
@@ -40,12 +40,12 @@ const DEFAULT_TRIGGERS: Record<string, string[]> = {
 }
 
 /**
- * Parse un system prompt segmenté en sections.
+ * Parses a segmented system prompt into sections.
  */
 function parseSystemPrompt(systemPrompt: string): ParsedSystemPrompt {
   const sections: SectionDefinition[] = []
 
-  // Trouver toutes les sections taguées
+  // Find all tagged sections
   const openPattern = /<!--\s*@cork-ai\s+section:\s*(\S+)(?:\s+triggers:\s*([^>]*))?\s*-->([\s\S]*?)<!--\s*@cork-ai\s+end\s*-->/g
   let match: RegExpExecArray | null
 
@@ -56,7 +56,7 @@ function parseSystemPrompt(systemPrompt: string): ParsedSystemPrompt {
     const triggersRaw = match[2] ? match[2].trim() : ''
     const content = match[3].trim()
 
-    // Parser les triggers : liste séparée par virgules ou espaces
+    // Parse triggers: comma- or space-separated list
     let triggers: string[] = triggersRaw
       ? triggersRaw.split(/[,\s]+/).map(t => t.trim()).filter(Boolean)
       : (DEFAULT_TRIGGERS[name] ?? [name])
@@ -72,9 +72,9 @@ function parseSystemPrompt(systemPrompt: string): ParsedSystemPrompt {
     sections.push({ name, content, triggers, isCore: false })
   }
 
-  // Le core est tout ce qui n'est pas dans une section taguée
+  // Core is everything not in a tagged section
   let core = systemPrompt
-  // Supprimer les sections en sens inverse
+  // Remove sections in reverse order
   for (const pos of [...sectionPositions].reverse()) {
     core = core.slice(0, pos.start) + core.slice(pos.end)
   }
@@ -84,7 +84,7 @@ function parseSystemPrompt(systemPrompt: string): ParsedSystemPrompt {
 }
 
 /**
- * Extrait le texte des N derniers messages pour détecter le contexte actif.
+ * Extracts text from the last N messages to detect the active context.
  */
 function extractRecentContext(messages: Message[], windowSize = 5): string {
   const recent = messages.slice(-windowSize)
@@ -100,7 +100,7 @@ function extractRecentContext(messages: Message[], windowSize = 5): string {
 }
 
 /**
- * Détermine quelles sections activer en fonction du contexte récent.
+ * Determines which sections to activate based on recent context.
  */
 function selectActiveSections(
   sections: SectionDefinition[],
@@ -115,14 +115,14 @@ function selectActiveSections(
 }
 
 /**
- * Calcule un fingerprint du system prompt pour éviter les recalculs.
+ * Computes a fingerprint of the system prompt to avoid recomputation.
  */
 function fingerprintPrompt(prompt: string): string {
   return createHash('sha1').update(prompt).digest('hex').slice(0, 12)
 }
 
 /**
- * Gestionnaire de system prompt dynamique.
+ * Dynamic system prompt manager.
  */
 export class DynamicSystemPrompt {
   private parsed: ParsedSystemPrompt | null = null
@@ -131,21 +131,21 @@ export class DynamicSystemPrompt {
   private lastResult = ''
 
   /**
-   * Construit le system prompt adapté au contexte récent.
-   * @param systemPrompt - System prompt brut avec les sections taguées
-   * @param recentMessages - Messages récents pour détecter le contexte
-   * @returns System prompt optimisé pour le contexte actif
+   * Builds the system prompt adapted to the recent context.
+   * @param systemPrompt - Raw system prompt with tagged sections
+   * @param recentMessages - Recent messages to detect the context
+   * @returns System prompt optimized for the active context
    */
   build(systemPrompt: string, recentMessages: Message[] = []): string {
     const fp = fingerprintPrompt(systemPrompt)
     const context = extractRecentContext(recentMessages)
 
-    // Cache : ne recalculer que si quelque chose a changé
+    // Cache: only recompute if something changed
     if (fp === this.lastFingerprint && context === this.lastContext) {
       return this.lastResult
     }
 
-    // Parser si c'est un nouveau system prompt
+    // Parse if it's a new system prompt
     if (fp !== this.lastFingerprint) {
       this.parsed = parseSystemPrompt(systemPrompt)
       this.lastFingerprint = fp
@@ -153,17 +153,17 @@ export class DynamicSystemPrompt {
 
     if (!this.parsed) return systemPrompt
 
-    // Si aucune section n'est définie, retourner tel quel
+    // If no sections are defined, return as-is
     if (this.parsed.sections.length === 0) {
       this.lastResult = systemPrompt
       this.lastContext = context
       return systemPrompt
     }
 
-    // Sélectionner les sections actives
+    // Select active sections
     const activeSections = selectActiveSections(this.parsed.sections, context)
 
-    // Assembler le prompt final
+    // Assemble the final prompt
     const parts = [this.parsed.core]
     for (const section of activeSections) {
       parts.push(`\n<!-- Section: ${section.name} -->\n${section.content}`)
@@ -175,7 +175,7 @@ export class DynamicSystemPrompt {
   }
 
   /**
-   * Retourne les tokens économisés pour un appel donné.
+   * Returns the tokens saved for a given call.
    */
   getSavings(systemPrompt: string, recentMessages: Message[]): number {
     const original = countTokens(systemPrompt)

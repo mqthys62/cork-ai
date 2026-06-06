@@ -1,7 +1,7 @@
 /**
- * Pipeline — orchestrateur principal de cork-ai.
- * Compose les modules selon les options et le budget disponible.
- * Les modules ne se connaissent pas entre eux — tout passe par le pipeline.
+ * Pipeline — main orchestrator for cork-ai.
+ * Composes modules according to options and available budget.
+ * Modules have no knowledge of each other — everything goes through the pipeline.
  */
 
 import { compressWithBudget } from '../managers/budget.js'
@@ -19,7 +19,7 @@ export interface PipelineResult extends CompressResult {
 }
 
 /**
- * Logger interne silencieux par défaut.
+ * Internal logger, silent by default.
  */
 function createLogger(debug = false) {
   return {
@@ -29,11 +29,11 @@ function createLogger(debug = false) {
 }
 
 /**
- * Exécute le pipeline de compression sur un ensemble de messages.
- * @param messages - Historique de conversation à compresser
- * @param options - Options globales
- * @param tracker - StatsTracker partagé (optionnel, crée un nouveau si absent)
- * @returns Messages compressés + stats complètes
+ * Runs the compression pipeline on a set of messages.
+ * @param messages - Conversation history to compress
+ * @param options - Global options
+ * @param tracker - Shared StatsTracker (optional, creates a new one if absent)
+ * @returns Compressed messages + full stats
  */
 export function runPipeline(
   messages: Message[],
@@ -43,12 +43,12 @@ export function runPipeline(
   const logger = createLogger(options.debug)
   const stats = tracker ?? new StatsTracker(options.pricing)
 
-  logger.log(`Démarrage pipeline sur ${messages.length} messages`)
+  logger.log(`Starting pipeline on ${messages.length} messages`)
 
   const originalTokens = countMessageTokens(messages)
-  logger.log(`Tokens initiaux : ${originalTokens}`)
+  logger.log(`Initial tokens: ${originalTokens}`)
 
-  // Compression via le Budget Manager (orchestre tous les modules)
+  // Compress via Budget Manager (orchestrates all modules)
   const result = compressWithBudget(messages, {
     ...options,
     budget: {
@@ -58,22 +58,22 @@ export function runPipeline(
     },
   })
 
-  // Enregistrer les stats par module
+  // Record stats per module
   for (const [name, saved] of Object.entries(result.byModule)) {
     stats.recordModule(name, saved)
   }
 
   const compressedTokens = countMessageTokens(result.messages)
-  logger.log(`Tokens après compression : ${compressedTokens} (économisé : ${originalTokens - compressedTokens})`)
+  logger.log(`Tokens after compression: ${compressedTokens} (saved: ${originalTokens - compressedTokens})`)
 
   const fullStats = stats.getFullStats(originalTokens, compressedTokens)
 
-  // Appeler le callback onStats si configuré
+  // Call onStats callback if configured
   if (options.onStats) {
     try {
       options.onStats(fullStats)
     } catch (e) {
-      logger.warn('Erreur dans le callback onStats :', e)
+      logger.warn('Error in onStats callback:', e)
     }
   }
 

@@ -1,9 +1,9 @@
 /**
- * Types partagés pour cork-ai.
- * Toutes les interfaces publiques et internes passent par ce module.
+ * Shared types for cork-ai.
+ * All public and internal interfaces go through this module.
  */
 
-// ─── Types de messages (compatibles Anthropic SDK) ───────────────────────────
+// ─── Message types (Anthropic SDK-compatible) ────────────────────────────────────
 
 export type MessageRole = 'user' | 'assistant'
 
@@ -35,11 +35,11 @@ export interface Message {
 // ─── Stats ───────────────────────────────────────────────────────────────────
 
 export interface ModuleStats {
-  /** Nom du module */
+  /** Module name */
   name: string
-  /** Tokens économisés par ce module */
+  /** Tokens saved by this module */
   saved: number
-  /** Nombre de fois que le module a été exécuté */
+  /** Number of times the module has run */
   runs: number
 }
 
@@ -48,14 +48,14 @@ export interface RequestStats {
   compressedTokens: number
   savedTokens: number
   savingsPercent: number
-  /** Coût économisé estimé en USD */
+  /** Estimated cost saved in USD */
   estimatedCostSaved: number
 }
 
 export interface SessionStats {
   totalSaved: number
   totalProcessed: number
-  /** Coût économisé cumulé en USD */
+  /** Cumulative cost saved in USD */
   estimatedCostSaved: number
   requestCount: number
 }
@@ -69,20 +69,20 @@ export interface FullStats {
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 export interface PricingConfig {
-  /** USD par million de tokens en input */
+  /** USD per million input tokens */
   input: number
-  /** USD par million de tokens en output */
+  /** USD per million output tokens */
   output: number
 }
 
 export interface ToolResultOptions {
-  /** 0.0 = conservateur, 1.0 = agressif */
+  /** 0.0 = conservative, 1.0 = aggressive */
   aggressiveness: number
-  /** Nombre max de lignes à conserver pour un fichier de code */
+  /** Max lines to keep for a code file */
   maxCodeLines: number
-  /** Nombre max de lignes à conserver pour une sortie bash */
+  /** Max lines to keep for bash output */
   maxBashLines: number
-  /** Activer le cache side-channel pour restore() */
+  /** Enable side-channel cache for restore() */
   cacheEnabled: boolean
 }
 
@@ -95,38 +95,38 @@ export interface HeaderStripperOptions {
 }
 
 export interface HeatmapOptions {
-  /** Fenêtre de messages récents pour le calcul de pertinence */
+  /** Window of recent messages for relevance scoring */
   windowSize: number
-  /** Seuil de score en dessous duquel un message est résumé (0–1) */
+  /** Score threshold below which a message is summarized (0–1) */
   threshold: number
 }
 
 export interface SemanticDedupOptions {
-  /** Seuil de similarité Jaccard (défaut 0.82) */
+  /** Jaccard similarity threshold (default 0.82) */
   similarityThreshold: number
 }
 
 export interface BudgetConfig {
-  /** Nombre max de tokens dans le contexte */
+  /** Max tokens in context */
   maxTokens: number
-  /** Si true : throw si le contexte dépasse maxTokens même après compression */
+  /** If true: throw if context exceeds maxTokens even after compression */
   hardLimit: boolean
 }
 
 export interface CorkAIOptions {
-  /** Niveau d'aggressivité global (0.0–1.0, défaut 0.6) */
+  /** Global aggressiveness level (0.0–1.0, default 0.6) */
   aggressiveness?: number
-  /** Budget tokens max du contexte */
+  /** Max token budget for context */
   maxContextTokens?: number
-  /** Configuration du budget */
+  /** Budget configuration */
   budget?: Partial<BudgetConfig>
-  /** Pricing pour l'estimation des coûts */
+  /** Pricing for cost estimation */
   pricing?: Partial<PricingConfig>
-  /** Activer les logs de debug */
+  /** Enable debug logs */
   debug?: boolean
-  /** Callback appelé après chaque compression */
+  /** Callback invoked after each compression */
   onStats?: (stats: FullStats) => void
-  /** Modules à désactiver explicitement */
+  /** Modules to explicitly disable */
   disabledModules?: ModuleName[]
 }
 
@@ -140,13 +140,13 @@ export type ModuleName =
   | 'systemPrompt'
   | 'sessionCache'
 
-// ─── Résultats de compression ─────────────────────────────────────────────────
+// ─── Compression results ──────────────────────────────────────────────────────
 
 export interface CompressResult {
   messages: Message[]
-  /** Tokens économisés par ce module */
+  /** Tokens saved by this module */
   savedTokens: number
-  /** Détails optionnels */
+  /** Optional details */
   details?: string
 }
 
