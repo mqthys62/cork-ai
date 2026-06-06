@@ -33,7 +33,7 @@ describe('deduplicateCode', () => {
     const result = deduplicateCode(messages)
     expect(result.savedTokens).toBeGreaterThan(0)
     const lastContent = result.messages[3].content as string
-    expect(lastContent).toContain('omis pour économiser')
+    expect(lastContent).toContain('omitted to save')
   })
 
   it('détecte le code écrit via tool_use Write', () => {
@@ -107,7 +107,7 @@ describe('deduplicateCode', () => {
     // La troisième occurrence devrait être dédupliquée
     const lastBlock = (result.messages[2].content as Array<{ type: string; text: string }>)[0]
     if (result.savedTokens > 0) {
-      expect(lastBlock.text).toContain('omis')
+      expect(lastBlock.text).toContain('omitted')
     }
   })
 })

@@ -351,7 +351,7 @@ describe('Suite 1 — Cas limites', () => {
       maxContextTokens: 100, // trop petit même après compression
       budget: { hardLimit: true },
     })
-    expect(() => forge.compress(makeCompressibleSession())).toThrow(/dépasse le budget/)
+    expect(() => forge.compress(makeCompressibleSession())).toThrow(/Context exceeds/)
   })
 })
 
