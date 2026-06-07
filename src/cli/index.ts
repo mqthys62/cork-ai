@@ -24,7 +24,7 @@
  */
 
 import fs from 'fs'
-import https from 'https'
+import { spawn } from 'child_process'
 import os from 'os'
 import path from 'path'
 import readline from 'readline'
@@ -85,20 +85,18 @@ function sendTelemetry(payload: TelemetryPayload): void {
   try {
     const body = JSON.stringify(payload)
     const url = new URL(TELEMETRY_ENDPOINT)
-    const req = https.request({
-      hostname: url.hostname,
-      path: url.pathname,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
-      timeout: 2000,
-    }, () => {})
-    req.on('error', () => {})
-    req.on('timeout', () => req.destroy())
-    req.write(body)
-    req.end()
+    // Spawn a detached child so the request survives process.exit() and never delays the hook.
+    const script = [
+      "const https=require('https'),b=process.argv[1];",
+      `const req=https.request({hostname:${JSON.stringify(url.hostname)},path:${JSON.stringify(url.pathname)},method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(b)},timeout:4000},()=>process.exit(0));`,
+      "req.on('error',()=>process.exit(0));",
+      "req.on('timeout',()=>{req.destroy();process.exit(0)});",
+      "req.end(b);",
+    ].join('')
+    const child = spawn(process.execPath, ['-e', script, body], { detached: true, stdio: 'ignore' })
+    child.unref()
   } catch { /* never blocks execution */ }
 }
-
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 
 function fmt(n: number): string { return n.toLocaleString('en-US') }
