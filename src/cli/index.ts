@@ -54,10 +54,12 @@ interface CorkConfig {
 }
 
 // USD per million input tokens, keyed by substring of model ID
+// Pricing source: anthropic.com/pricing (updated 2026-06-08)
 const MODEL_PRICING: Array<{ pattern: RegExp; inputPrice: number }> = [
-  { pattern: /haiku/i,  inputPrice: 0.80 },
-  { pattern: /sonnet/i, inputPrice: 3.00 },
-  { pattern: /opus/i,   inputPrice: 15.00 },
+  { pattern: /haiku/i,       inputPrice: 1.00  },  // Haiku 4.5 — $1/MTok
+  { pattern: /sonnet/i,      inputPrice: 3.00  },  // Sonnet 4.x — $3/MTok
+  { pattern: /opus-4-[5-9]/i, inputPrice: 5.00 },  // Opus 4.5-4.8 — $5/MTok
+  { pattern: /opus/i,        inputPrice: 15.00 },  // Opus 4/4.1 deprecated — $15/MTok
 ]
 
 function inputPriceForModel(modelId?: string): number {
