@@ -49,7 +49,23 @@ const TELEMETRY_ENDPOINT = 'https://corktelemetry.essenly.fr/telemetry-server.ph
 // ─── Config (~/.cork-ai/config.json) ─────────────────────────────────────────
 
 interface CorkConfig {
-  telemetry?: boolean  // undefined = never asked, true = opted in, false = opted out
+  telemetry?: boolean   // undefined = never asked, true = opted in, false = opted out
+  detectedModel?: string  // last model seen in a hook event — used for cost estimates
+}
+
+// USD per million input tokens, keyed by substring of model ID
+const MODEL_PRICING: Array<{ pattern: RegExp; inputPrice: number }> = [
+  { pattern: /haiku/i,  inputPrice: 0.80 },
+  { pattern: /sonnet/i, inputPrice: 3.00 },
+  { pattern: /opus/i,   inputPrice: 15.00 },
+]
+
+function inputPriceForModel(modelId?: string): number {
+  if (modelId) {
+    const match = MODEL_PRICING.find(m => m.pattern.test(modelId))
+    if (match) return match.inputPrice
+  }
+  return 3.00  // fallback: Sonnet pricing
 }
 
 function loadConfig(): CorkConfig {
@@ -864,12 +880,17 @@ async function runHook(): Promise<void> {
 
   // Accumulate in the live session (a session = 2h of activity on the same project)
   try {
+    const detectedModel = (event.model as string) || undefined
+    if (detectedModel) {
+      const cfg = loadConfig()
+      if (cfg.detectedModel !== detectedModel) saveConfig({ ...cfg, detectedModel })
+    }
     accumulateInSession({
       projectPath: (event.cwd as string) || process.cwd(),
       originalTokens,
       compressedTokens,
       savedTokens: saved,
-      estimatedCostSaved: (saved / 1_000_000) * 3.0,
+      estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(event.model as string),
       byModule: { hookReadCompressor: saved },
     })
   } catch { /* non-critical */ }
@@ -1044,11 +1065,14 @@ function telemetryOff(): void {
 function telemetryStatus(): void {
   const enabled = isTelemetryEnabled()
   const cfg = loadConfig()
+  const price = inputPriceForModel(cfg.detectedModel)
   console.log()
   console.log(`  Telemetry: ${enabled ? C.green('● enabled') : C.yellow('○ disabled')}`)
   if (cfg.telemetry === undefined) console.log(`  ${C.dim('(never configured — run cork-ai telemetry on to enable)')}`)
   if (process.env.DO_NOT_TRACK === '1') console.log(`  ${C.dim('(overridden by DO_NOT_TRACK=1)')}`)
   if (process.env.CORK_AI_TELEMETRY === '0') console.log(`  ${C.dim('(overridden by CORK_AI_TELEMETRY=0)')}`)
+  console.log(`  Model:     ${C.cyan(cfg.detectedModel ?? C.dim('not yet detected — will update on next Read'))}`)
+  console.log(`  Pricing:   ${C.cyan(`$${price.toFixed(2)}/M input tokens`)}${cfg.detectedModel ? '' : C.dim(' (Sonnet fallback)')}`)
   console.log()
 }
 
