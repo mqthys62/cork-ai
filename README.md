@@ -159,6 +159,27 @@ cork-ai gain --all        # all-time totals
 cork-ai gain --history    # all recorded sessions
 ```
 
+### `cork-ai models`
+
+Per-model usage and cost breakdown. The hook detects the active Claude model
+from the session transcript on every compressed Read, so savings are priced at
+the actual model rate ($1/MTok Haiku up to $10/MTok Fable 5) instead of a flat
+Sonnet fallback:
+
+```
+cork-ai — Model Usage & Costs
+──────────────────────────────────────────
+  Active model  claude-fable-5  ($10.00/M input tokens)
+
+  claude-fable-5    $10.00/MTok
+    ████████████░░░  78.3%  312 requests
+    Saved 2.1M tokens → $21.40 USD   Last used Jul 2, 06:56 PM
+
+  claude-sonnet-5   $3.00/MTok
+    ███░░░░░░░░░░░░  21.7%  86 requests
+    Saved 480k tokens → $1.44 USD    Last used Jun 28, 11:02 AM
+```
+
 ### `cork-ai report`
 
 Enterprise-grade analytics:
@@ -168,6 +189,7 @@ cork-ai report --daily      # daily savings trend
 cork-ai report --weekly     # weekly breakdown
 cork-ai report --monthly    # monthly breakdown
 cork-ai report --projects   # per-project breakdown, sorted by savings
+cork-ai report --models     # per-model usage & cost breakdown
 cork-ai report --forecast   # annual projection + ROI vs. setup time
 cork-ai report --json       # machine-readable output for dashboards / CI
 ```

@@ -5,7 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.0] - 2026-07-02
+
+### Fixed
+
+- **La détection du modèle ne fonctionnait jamais** — le hook lisait `event.model`, un champ que Claude Code n'envoie pas dans le payload PreToolUse. Tous les coûts étaient donc calculés au tarif fallback Sonnet ($3/MTok). Le hook lit maintenant le modèle réel depuis le transcript de session (`transcript_path` → dernier message assistant du thread principal), donc une session Fable 5 est valorisée à $10/MTok, Haiku à $1/MTok, etc.
+- **Pricing incomplet** — ajout de Fable 5 / Mythos 5 ($10/MTok) à la table de prix (mise à jour 2026-07-02).
+- Le pied de page de `report --forecast` affichait un prix Sonnet codé en dur ; il reflète désormais le modèle détecté.
+
+### Added
+
+- **Stats par modèle** — chaque compression est désormais attribuée au modèle actif : requêtes, tokens économisés, coût économisé (au tarif du modèle au moment de l'usage) et date de dernière utilisation, agrégés par session et en cumul global (`byModel` dans `stats.json` / `live-session.json`).
+- **`cork-ai models`** (alias `gain --models`, `report --models`) — répartition par modèle : fréquence d'utilisation (part des requêtes avec barre), tokens/coûts économisés par modèle, prix par MTok, dernière utilisation. Inclus dans `report` complet et dans l'export `report --json` (clé `models`).
+- `cork-ai gain` affiche le(s) modèle(s) de la session en cours.
 
 ## [0.2.0] - 2026-06-01
 
@@ -145,6 +157,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark in `benchmarks/cost-comparison.ts`
 - CI/CD GitHub Actions (Node 18/20/22 × Ubuntu/Windows/macOS)
 
-[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mqthys62/cork-ai/compare/v0.2.3...v0.3.0
 [0.2.0]: https://github.com/mqthys62/cork-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mqthys62/cork-ai/releases/tag/v0.1.0

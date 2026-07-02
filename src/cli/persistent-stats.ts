@@ -10,6 +10,14 @@ import path from 'path'
 const GLOBAL_DIR = path.join(os.homedir(), '.cork-ai')
 const STATS_FILE = path.join(GLOBAL_DIR, 'stats.json')
 
+export interface ModelUsage {
+  requests: number
+  originalTokens: number
+  savedTokens: number
+  costSaved: number
+  lastUsedAt: string
+}
+
 export interface GlobalStats {
   version: string
   createdAt: string
@@ -20,6 +28,7 @@ export interface GlobalStats {
     totalCompressedTokens: number
     totalSavedTokens: number
     estimatedCostSaved: number
+    byModel?: Record<string, ModelUsage>
   }
   sessions: SessionRecord[]
 }
@@ -36,6 +45,7 @@ export interface SessionRecord {
   savingsPercent: number
   estimatedCostSaved: number
   byModule: Record<string, number>
+  byModel?: Record<string, ModelUsage>
 }
 
 export interface ProjectStats {
@@ -57,6 +67,16 @@ export interface PeriodBucket {
   totalSavedTokens: number
   totalCostSaved: number
   avgSavingsPercent: number
+}
+
+export interface ModelStats {
+  model: string
+  requests: number
+  requestShare: number       // 0-100, share of all requests
+  originalTokens: number
+  savedTokens: number
+  costSaved: number
+  lastUsedAt: string
 }
 
 export interface ForecastStats {
@@ -102,6 +122,26 @@ function saveStats(stats: GlobalStats): void {
 
 // ─── Write (completed sessions) ────────────────────────────────────────────────────────────
 
+function mergeByModel(
+  target: Record<string, ModelUsage> | undefined,
+  source: Record<string, ModelUsage> | undefined,
+): Record<string, ModelUsage> {
+  const merged: Record<string, ModelUsage> = { ...(target ?? {}) }
+  for (const [model, usage] of Object.entries(source ?? {})) {
+    const existing = merged[model]
+    if (existing) {
+      existing.requests += usage.requests
+      existing.originalTokens += usage.originalTokens
+      existing.savedTokens += usage.savedTokens
+      existing.costSaved += usage.costSaved
+      if (usage.lastUsedAt > existing.lastUsedAt) existing.lastUsedAt = usage.lastUsedAt
+    } else {
+      merged[model] = { ...usage }
+    }
+  }
+  return merged
+}
+
 export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   const stats = loadStats()
   const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -117,6 +157,7 @@ export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   stats.allTime.totalCompressedTokens += session.compressedTokens
   stats.allTime.totalSavedTokens += session.savedTokens
   stats.allTime.estimatedCostSaved += session.estimatedCostSaved
+  stats.allTime.byModel = mergeByModel(stats.allTime.byModel, session.byModel)
 
   saveStats(stats)
 }
@@ -137,6 +178,7 @@ export function resetGlobalStats(): void {
       totalCompressedTokens: 0,
       totalSavedTokens: 0,
       estimatedCostSaved: 0,
+      byModel: {},
     },
     sessions: [],
   }
@@ -156,6 +198,7 @@ export interface LiveSession {
   savedTokens: number
   estimatedCostSaved: number
   byModule: Record<string, number>
+  byModel?: Record<string, ModelUsage>
 }
 
 export const LIVE_SESSION_FILE = path.join(GLOBAL_DIR, 'live-session.json')
@@ -188,6 +231,7 @@ function flushLiveSessionToHistory(live: LiveSession): void {
     savingsPercent,
     estimatedCostSaved: live.estimatedCostSaved,
     byModule: live.byModule,
+    byModel: live.byModel,
   })
   if (stats.sessions.length > 500) stats.sessions = stats.sessions.slice(-500)
 
@@ -196,6 +240,7 @@ function flushLiveSessionToHistory(live: LiveSession): void {
   stats.allTime.totalCompressedTokens += live.compressedTokens
   stats.allTime.totalSavedTokens += live.savedTokens
   stats.allTime.estimatedCostSaved += live.estimatedCostSaved
+  stats.allTime.byModel = mergeByModel(stats.allTime.byModel, live.byModel)
 
   saveStats(stats)
 }
@@ -207,8 +252,22 @@ export function accumulateInSession(event: {
   savedTokens: number
   estimatedCostSaved: number
   byModule: Record<string, number>
+  model?: string
 }): void {
   ensureDir()
+
+  const now = new Date().toISOString()
+  const eventByModel: Record<string, ModelUsage> | undefined = event.model
+    ? {
+        [event.model]: {
+          requests: 1,
+          originalTokens: event.originalTokens,
+          savedTokens: event.savedTokens,
+          costSaved: event.estimatedCostSaved,
+          lastUsedAt: now,
+        },
+      }
+    : undefined
 
   let live: LiveSession | null = null
   try {
@@ -223,7 +282,7 @@ export function accumulateInSession(event: {
   } catch { /* no existing live session */ }
 
   if (live) {
-    live.lastActivityAt = new Date().toISOString()
+    live.lastActivityAt = now
     live.requests++
     live.originalTokens += event.originalTokens
     live.compressedTokens += event.compressedTokens
@@ -232,18 +291,20 @@ export function accumulateInSession(event: {
     for (const [mod, saved] of Object.entries(event.byModule)) {
       live.byModule[mod] = (live.byModule[mod] ?? 0) + saved
     }
+    live.byModel = mergeByModel(live.byModel, eventByModel)
   } else {
     live = {
       sessionId: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       projectPath: event.projectPath,
-      startedAt: new Date().toISOString(),
-      lastActivityAt: new Date().toISOString(),
+      startedAt: now,
+      lastActivityAt: now,
       requests: 1,
       originalTokens: event.originalTokens,
       compressedTokens: event.compressedTokens,
       savedTokens: event.savedTokens,
       estimatedCostSaved: event.estimatedCostSaved,
       byModule: { ...event.byModule },
+      byModel: eventByModel,
     }
   }
 
@@ -290,6 +351,27 @@ export function getStatsByProject(stats: GlobalStats): ProjectStats[] {
   }
 
   return Array.from(map.values()).sort((a, b) => b.totalSavedTokens - a.totalSavedTokens)
+}
+
+export function getStatsByModel(stats: GlobalStats | null, live?: LiveSession | null): ModelStats[] {
+  const merged = mergeByModel(
+    mergeByModel(undefined, stats?.allTime.byModel),
+    live?.byModel,
+  )
+  const totalRequests = Object.values(merged).reduce((s, u) => s + u.requests, 0)
+  if (totalRequests === 0) return []
+
+  return Object.entries(merged)
+    .map(([model, u]) => ({
+      model,
+      requests: u.requests,
+      requestShare: (u.requests / totalRequests) * 100,
+      originalTokens: u.originalTokens,
+      savedTokens: u.savedTokens,
+      costSaved: u.costSaved,
+      lastUsedAt: u.lastUsedAt,
+    }))
+    .sort((a, b) => b.requests - a.requests)
 }
 
 function isoWeek(date: Date): string {

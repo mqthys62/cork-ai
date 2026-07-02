@@ -7,6 +7,7 @@
  *   cork-ai gain                  Show current session + all-time savings
  *   cork-ai gain --all            Show all-time totals
  *   cork-ai gain --history        Show all recorded sessions
+ *   cork-ai models                Per-model usage, frequency & cost breakdown
  *   cork-ai report                Full enterprise report (trends + projects + forecast)
  *   cork-ai report --daily        Daily breakdown (last 30 days)
  *   cork-ai report --weekly       Weekly breakdown (last 12 weeks)
@@ -36,6 +37,7 @@ import {
   clearLiveSession,
   getStatsByProject,
   getStatsByPeriod,
+  getStatsByModel,
   getForecast,
   STATS_FILE,
 } from './persistent-stats.js'
@@ -53,13 +55,15 @@ interface CorkConfig {
   detectedModel?: string  // last model seen in a hook event — used for cost estimates
 }
 
-// USD per million input tokens, keyed by substring of model ID
-// Pricing source: anthropic.com/pricing (updated 2026-06-08)
+// USD per million input tokens, keyed by substring of model ID.
+// First matching pattern wins — keep specific patterns before generic ones.
+// Pricing source: anthropic.com/pricing (updated 2026-07-02)
 const MODEL_PRICING: Array<{ pattern: RegExp; inputPrice: number }> = [
-  { pattern: /haiku/i,       inputPrice: 1.00  },  // Haiku 4.5 — $1/MTok
-  { pattern: /sonnet/i,      inputPrice: 3.00  },  // Sonnet 4.x — $3/MTok
-  { pattern: /opus-4-[5-9]/i, inputPrice: 5.00 },  // Opus 4.5-4.8 — $5/MTok
-  { pattern: /opus/i,        inputPrice: 15.00 },  // Opus 4/4.1 deprecated — $15/MTok
+  { pattern: /fable|mythos/i, inputPrice: 10.00 },  // Fable 5 / Mythos 5 — $10/MTok
+  { pattern: /haiku/i,        inputPrice: 1.00  },  // Haiku 4.5 — $1/MTok
+  { pattern: /sonnet/i,       inputPrice: 3.00  },  // Sonnet 4.x / 5 — $3/MTok
+  { pattern: /opus-4-[5-9]/i, inputPrice: 5.00  },  // Opus 4.5-4.8 — $5/MTok
+  { pattern: /opus/i,         inputPrice: 15.00 },  // Opus 4/4.1 deprecated — $15/MTok
 ]
 
 function inputPriceForModel(modelId?: string): number {
@@ -68,6 +72,41 @@ function inputPriceForModel(modelId?: string): number {
     if (match) return match.inputPrice
   }
   return 3.00  // fallback: Sonnet pricing
+}
+
+// The PreToolUse hook payload has no `model` field — Claude Code only sends
+// session_id, transcript_path, cwd, tool_name, tool_input. The active model
+// lives in the transcript: each assistant turn carries `message.model`.
+// Read the tail of the transcript and take the most recent main-thread one.
+function detectModelFromTranscript(transcriptPath?: string): string | undefined {
+  if (!transcriptPath) return undefined
+  try {
+    const stat = fs.statSync(transcriptPath)
+    const TAIL_BYTES = 256 * 1024
+    const start = Math.max(0, stat.size - TAIL_BYTES)
+    const fd = fs.openSync(transcriptPath, 'r')
+    const buf = Buffer.alloc(stat.size - start)
+    fs.readSync(fd, buf, 0, buf.length, start)
+    fs.closeSync(fd)
+
+    const lines = buf.toString('utf-8').split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (!line.includes('"assistant"')) continue
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string
+          isSidechain?: boolean
+          message?: { model?: string }
+        }
+        if (entry.type !== 'assistant' || entry.isSidechain) continue
+        const model = entry.message?.model
+        // Skip synthetic entries like "<synthetic>"
+        if (typeof model === 'string' && /^claude/i.test(model)) return model
+      } catch { /* partial line at the tail cut — skip */ }
+    }
+  } catch { /* transcript unreadable — fall back to config */ }
+  return undefined
 }
 
 function loadConfig(): CorkConfig {
@@ -174,6 +213,7 @@ ${C.bold('Stats:')}
   cork-ai gain              Current session + all-time savings
   cork-ai gain --all        All-time totals only
   cork-ai gain --history    All recorded sessions
+  cork-ai models            Per-model usage, frequency & cost breakdown
 
 ${C.bold('Enterprise report:')}
   cork-ai report            Full report (trends + projects + forecast)
@@ -181,6 +221,7 @@ ${C.bold('Enterprise report:')}
   cork-ai report --weekly   Weekly breakdown (last 12 weeks)
   cork-ai report --monthly  Monthly breakdown (last 12 months)
   cork-ai report --projects Per-project breakdown
+  cork-ai report --models   Per-model breakdown
   cork-ai report --forecast Annual cost projection
   cork-ai report --json     Export full data as JSON
 
@@ -225,6 +266,10 @@ function showLastSession(): void {
     console.log(divider())
     console.log(`  ${C.dim('Started')}    ${fmtDate(live.startedAt)}`)
     if (live.projectPath) console.log(`  ${C.dim('Project')}      ${C.cyan(path.basename(live.projectPath))}`)
+    const liveModels = Object.keys(live.byModel ?? {})
+    if (liveModels.length > 0) {
+      console.log(`  ${C.dim('Model')}        ${C.cyan(liveModels.join(', '))}`)
+    }
     console.log(`  ${C.dim('Requests')}    ${C.bold(fmt(live.requests))}`)
     console.log()
     console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(live.originalTokens))}`)
@@ -251,7 +296,7 @@ function showLastSession(): void {
     console.log(`\n${C.bold('cork-ai — Last Session')}`)
     console.log(divider())
     console.log(`  ${C.dim('Date')}        ${fmtDate(last.startedAt)}`)
-    if (last.projectPath) console.log(`  ${C.dim('Projet')}      ${C.cyan(path.basename(last.projectPath))}`)
+    if (last.projectPath) console.log(`  ${C.dim('Project')}     ${C.cyan(path.basename(last.projectPath))}`)
     console.log(`  ${C.dim('Requests')}    ${fmt(last.requests)}`)
     console.log()
     console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(last.originalTokens))}`)
@@ -505,7 +550,53 @@ function reportForecast(): void {
   }
 
   console.log(divider())
-  console.log(`  ${C.dim('Pricing: Claude Sonnet 4 — $3/1M input tokens (update via wrapClient options)')}`)
+  const cfgModel = loadConfig().detectedModel
+  const priceNote = cfgModel
+    ? `Pricing: ${cfgModel} — $${inputPriceForModel(cfgModel).toFixed(2)}/1M input tokens (auto-detected)`
+    : 'Pricing: $3/1M input tokens (Sonnet fallback — no model detected yet)'
+  console.log(`  ${C.dim(priceNote)}`)
+  console.log()
+}
+
+function showModels(): void {
+  const stats = readGlobalStats()
+  const live = readLiveSession()
+  const models = getStatsByModel(stats, live)
+  const cfg = loadConfig()
+
+  console.log(`\n${C.bold('cork-ai — Model Usage & Costs')}`)
+  console.log(divider())
+
+  if (cfg.detectedModel) {
+    console.log(`  ${C.dim('Active model')}  ${C.cyan(cfg.detectedModel)}  ${C.dim(`($${inputPriceForModel(cfg.detectedModel).toFixed(2)}/M input tokens)`)}`)
+    console.log()
+  }
+
+  if (models.length === 0) {
+    console.log(`  ${C.yellow('No per-model data yet.')}`)
+    console.log(`  ${C.dim('Model usage is recorded on each compressed Read once the hook is installed.')}`)
+    console.log(`  ${C.dim('Older sessions (recorded before per-model tracking) are not included.')}`)
+    console.log(divider())
+    console.log()
+    return
+  }
+
+  const totalRequests = models.reduce((s, m) => s + m.requests, 0)
+  const totalSaved = models.reduce((s, m) => s + m.savedTokens, 0)
+  const totalCost = models.reduce((s, m) => s + m.costSaved, 0)
+  const nameWidth = Math.max(...models.map(m => m.model.length), 12) + 2
+
+  for (const m of models) {
+    const price = inputPriceForModel(m.model)
+    console.log(`  ${C.bold(m.model.padEnd(nameWidth))} ${C.dim(`$${price.toFixed(2)}/MTok`)}`)
+    console.log(`    ${C.green(miniBar(m.requestShare))} ${fmtPct(m.requestShare).padStart(6)}  ${C.cyan(fmt(m.requests))} request${m.requests !== 1 ? 's' : ''}`)
+    console.log(`    ${C.dim('Saved')} ${C.green(fmtTokens(m.savedTokens))} tokens ${C.dim('→')} ${C.green(fmtUsd(m.costSaved))} USD   ${C.dim('Last used')} ${fmtDate(m.lastUsedAt)}`)
+    console.log()
+  }
+
+  console.log(divider())
+  console.log(`  ${C.bold('Total')}  ${fmt(totalRequests)} requests across ${models.length} model${models.length !== 1 ? 's' : ''} — ${C.green(fmtTokens(totalSaved))} tokens, ${C.green(fmtUsdLong(totalCost))} USD saved`)
+  console.log(`  ${C.dim('Costs are computed at each model\'s input price at the time of use.')}`)
   console.log()
 }
 
@@ -519,6 +610,7 @@ function reportFull(): void {
 
   reportPeriod('month')
   reportProjects()
+  showModels()
   reportForecast()
 }
 
@@ -531,8 +623,9 @@ function reportJson(): void {
   const weekly = getStatsByPeriod(stats, 'week', 12)
   const monthly = getStatsByPeriod(stats, 'month', 12)
   const forecast = getForecast(stats)
+  const models = getStatsByModel(stats, readLiveSession())
 
-  console.log(JSON.stringify({ summary: stats.allTime, projects, trends: { daily, weekly, monthly }, forecast, sessions: stats.sessions }, null, 2))
+  console.log(JSON.stringify({ summary: stats.allTime, models, projects, trends: { daily, weekly, monthly }, forecast, sessions: stats.sessions }, null, 2))
 }
 
 // ─── hooks install / remove / status ─────────────────────────────────────────
@@ -882,18 +975,22 @@ async function runHook(): Promise<void> {
 
   // Accumulate in the live session (a session = 2h of activity on the same project)
   try {
-    const detectedModel = (event.model as string) || undefined
-    if (detectedModel) {
-      const cfg = loadConfig()
-      if (cfg.detectedModel !== detectedModel) saveConfig({ ...cfg, detectedModel })
+    const cfg = loadConfig()
+    const detectedModel =
+      detectModelFromTranscript(event.transcript_path as string | undefined)
+      || (event.model as string)  // future-proofing: if Claude Code ever adds it
+      || cfg.detectedModel
+    if (detectedModel && cfg.detectedModel !== detectedModel) {
+      saveConfig({ ...cfg, detectedModel })
     }
     accumulateInSession({
       projectPath: (event.cwd as string) || process.cwd(),
       originalTokens,
       compressedTokens,
       savedTokens: saved,
-      estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(event.model as string),
+      estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(detectedModel),
       byModule: { hookReadCompressor: saved },
+      model: detectedModel,
     })
   } catch { /* non-critical */ }
 
@@ -1117,12 +1214,16 @@ function resetStats(): void {
   } else if (cmd === 'gain') {
     if (sub === '--all') showAllTime()
     else if (sub === '--history') showHistory()
+    else if (sub === '--models') showModels()
     else showLastSession()
+  } else if (cmd === 'models') {
+    showModels()
   } else if (cmd === 'report') {
     if (sub === '--daily') reportPeriod('day')
     else if (sub === '--weekly') reportPeriod('week')
     else if (sub === '--monthly') reportPeriod('month')
     else if (sub === '--projects') reportProjects()
+    else if (sub === '--models') showModels()
     else if (sub === '--forecast') reportForecast()
     else if (sub === '--json') reportJson()
     else reportFull()
