@@ -6,6 +6,7 @@
 
 import { compressWithBudget } from '../managers/budget.js'
 import { countMessageTokens } from './tokenizer.js'
+import { validateToolPairing } from './validate.js'
 import { StatsTracker } from '../stats/tracker.js'
 import type {
   CorkAIOptions,
@@ -49,7 +50,7 @@ export function runPipeline(
   logger.log(`Initial tokens: ${originalTokens}`)
 
   // Compress via Budget Manager (orchestrates all modules)
-  const result = compressWithBudget(messages, {
+  let result = compressWithBudget(messages, {
     ...options,
     budget: {
       maxTokens: options.maxContextTokens ?? 150_000,
@@ -57,6 +58,14 @@ export function runPipeline(
       ...options.budget,
     },
   })
+
+  // Structural fail-safe: the API rejects requests whose tool_use/tool_result
+  // pairing was broken by a rewrite. If compression violated the invariant
+  // (and the input didn't), discard the compressed output entirely.
+  if (!validateToolPairing(result.messages) && validateToolPairing(messages)) {
+    logger.warn('Compression broke tool_use/tool_result pairing — falling back to original messages')
+    result = { messages, savedTokens: 0, byModule: {} }
+  }
 
   // Record stats per module
   for (const [name, saved] of Object.entries(result.byModule)) {

@@ -40,11 +40,21 @@ import {
   getStatsByModel,
   getForecast,
   STATS_FILE,
+  LIVE_DIR,
 } from './persistent-stats.js'
+import { inputPriceForModel } from '../pricing/index.js'
+import {
+  CALIBRATION_FILE,
+  countTokensRaw,
+  estimateTokensFast,
+  modelFamily,
+  saveCalibrationFactor,
+} from '../core/tokenizer.js'
 
-const VERSION = '0.2.0'
+const VERSION = '0.4.0'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
-const CONFIG_FILE = path.join(os.homedir(), '.cork-ai', 'config.json')
+const CORK_HOME = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
+const CONFIG_FILE = path.join(CORK_HOME, 'config.json')
 
 const TELEMETRY_ENDPOINT = 'https://corktelemetry.essenly.fr/telemetry-server.php'
 
@@ -55,24 +65,8 @@ interface CorkConfig {
   detectedModel?: string  // last model seen in a hook event — used for cost estimates
 }
 
-// USD per million input tokens, keyed by substring of model ID.
-// First matching pattern wins — keep specific patterns before generic ones.
-// Pricing source: anthropic.com/pricing (updated 2026-07-02)
-const MODEL_PRICING: Array<{ pattern: RegExp; inputPrice: number }> = [
-  { pattern: /fable|mythos/i, inputPrice: 10.00 },  // Fable 5 / Mythos 5 — $10/MTok
-  { pattern: /haiku/i,        inputPrice: 1.00  },  // Haiku 4.5 — $1/MTok
-  { pattern: /sonnet/i,       inputPrice: 3.00  },  // Sonnet 4.x / 5 — $3/MTok
-  { pattern: /opus-4-[5-9]/i, inputPrice: 5.00  },  // Opus 4.5-4.8 — $5/MTok
-  { pattern: /opus/i,         inputPrice: 15.00 },  // Opus 4/4.1 deprecated — $15/MTok
-]
-
-function inputPriceForModel(modelId?: string): number {
-  if (modelId) {
-    const match = MODEL_PRICING.find(m => m.pattern.test(modelId))
-    if (match) return match.inputPrice
-  }
-  return 3.00  // fallback: Sonnet pricing
-}
+// Pricing lives in src/pricing (single source of truth, shared with the
+// library) — per-model, four billing tiers, date-dependent introductory rates.
 
 // The PreToolUse hook payload has no `model` field — Claude Code only sends
 // session_id, transcript_path, cwd, tool_name, tool_input. The active model
@@ -106,6 +100,49 @@ function detectModelFromTranscript(transcriptPath?: string): string | undefined 
       } catch { /* partial line at the tail cut — skip */ }
     }
   } catch { /* transcript unreadable — fall back to config */ }
+  return undefined
+}
+
+// Extracts the last REAL user prompt from the transcript (skipping user-role
+// entries that only carry tool_result blocks — those are agentic plumbing).
+// Used to avoid compressing a file the user explicitly asked about.
+function lastUserPromptFromTranscript(transcriptPath?: string): string | undefined {
+  if (!transcriptPath) return undefined
+  try {
+    const stat = fs.statSync(transcriptPath)
+    const TAIL_BYTES = 256 * 1024
+    const start = Math.max(0, stat.size - TAIL_BYTES)
+    const fd = fs.openSync(transcriptPath, 'r')
+    const buf = Buffer.alloc(stat.size - start)
+    fs.readSync(fd, buf, 0, buf.length, start)
+    fs.closeSync(fd)
+
+    const lines = buf.toString('utf-8').split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (!line.includes('"user"')) continue
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string
+          isSidechain?: boolean
+          message?: { role?: string; content?: unknown }
+        }
+        if (entry.type !== 'user' || entry.isSidechain) continue
+        const content = entry.message?.content
+        let text = ''
+        if (typeof content === 'string') {
+          text = content
+        } else if (Array.isArray(content)) {
+          text = content
+            .filter((b): b is { type: string; text: string } =>
+              typeof b === 'object' && b !== null && (b as { type?: string }).type === 'text')
+            .map(b => b.text)
+            .join('\n')
+        }
+        if (text.trim().length > 0) return text
+      } catch { /* partial line at the tail cut — skip */ }
+    }
+  } catch { /* transcript unreadable */ }
   return undefined
 }
 
@@ -230,6 +267,10 @@ ${C.bold('Claude Code integration:')}
   cork-ai hooks remove      Remove cork-ai hooks
   cork-ai hooks status      Show hook configuration
 
+${C.bold('Precision:')}
+  cork-ai calibrate [model] Measure real token factors via the count_tokens API
+                            (needs ANTHROPIC_API_KEY — makes every count model-exact)
+
 ${C.bold('Other:')}
   cork-ai reset             Reset all stats
   cork-ai telemetry on      Enable anonymous usage stats (opt-in)
@@ -278,6 +319,12 @@ function showLastSession(): void {
     console.log()
     console.log(`  ${C.bold('Savings')}   ${C.green(bar(pct))}`)
     console.log(`  ${C.bold('Cost saved')} ${C.green(fmtUsd(live.estimatedCostSaved))} USD`)
+    if (live.reReads) {
+      console.log(`  ${C.yellow('Re-reads')}   ${live.reReads} file${live.reReads > 1 ? 's' : ''} re-read after compression (${fmtTokens(live.reReadTokensServed ?? 0)} tokens served raw — cost deducted)`)
+    }
+    if (live.editFailuresAfterCompression) {
+      console.log(`  ${C.yellow('Edit fails')} ${live.editFailuresAfterCompression} edit${live.editFailuresAfterCompression > 1 ? 's' : ''} failed on compressed-only files (auto-whitelisted)`)
+    }
     console.log()
 
     if (Object.keys(live.byModule).length > 0) {
@@ -365,6 +412,40 @@ function showAllTime(): void {
   console.log(`  ${C.bold('Overall savings')}   ${C.green(bar(pct))}`)
   console.log(`  ${C.bold('Total cost saved')}  ${C.green(fmtUsdLong(totalCost))} USD`)
   console.log(`  ${C.bold('Avg / session')}     ${C.green(fmt(Math.round(avgPerSession)))} tokens`)
+
+  // Ground truth from wrapClient sessions (response.usage), when available
+  const measured = stats?.allTime.measured
+  if (measured && measured.requests > 0) {
+    console.log()
+    console.log(`  ${C.bold('Measured (API ground truth)')}  ${C.dim(`${fmt(measured.requests)} requests`)}`)
+    console.log(`  ${C.dim('Input / output')}     ${fmt(measured.inputTokens)} / ${fmt(measured.outputTokens)} tokens`)
+    console.log(`  ${C.dim('Cache read / write')} ${fmt(measured.cacheReadInputTokens)} / ${fmt(measured.cacheCreationInputTokens)} tokens`)
+    console.log(`  ${C.dim('Real cost')}          ${fmtUsdLong(measured.costUSD)} USD`)
+    const promptTotal = measured.inputTokens + measured.cacheReadInputTokens + measured.cacheCreationInputTokens
+    if (promptTotal > 0) {
+      const cacheHit = (measured.cacheReadInputTokens / promptTotal) * 100
+      console.log(`  ${C.dim('Cache hit rate')}     ${fmtPct(cacheHit)}`)
+    }
+
+    // Estimate accuracy: locally-estimated sent tokens vs real prompt tokens,
+    // over sessions that carry both numbers (wrapClient sessions).
+    const withBoth = (stats?.sessions ?? []).filter(s => s.measured && s.measured.requests > 0)
+    if (withBoth.length > 0) {
+      const estSent = withBoth.reduce((s, r) => s + r.compressedTokens, 0)
+      const realPrompt = withBoth.reduce(
+        (s, r) => s + r.measured!.inputTokens + r.measured!.cacheReadInputTokens + r.measured!.cacheCreationInputTokens, 0)
+      if (realPrompt > 0 && estSent > 0) {
+        const acc = (estSent / realPrompt) * 100
+        console.log(`  ${C.dim('Estimate accuracy')}  ${fmtPct(acc)} ${C.dim('of real prompt tokens — improve with cork-ai calibrate')}`)
+      }
+    }
+  }
+  if (stats?.allTime.reReads) {
+    console.log(`  ${C.yellow('Re-reads')}           ${fmt(stats.allTime.reReads)} (${fmtTokens(stats.allTime.reReadTokensServed ?? 0)} tokens served raw — cost deducted)`)
+  }
+  if (stats?.allTime.editFailuresAfterCompression) {
+    console.log(`  ${C.yellow('Edit failures')}      ${fmt(stats.allTime.editFailuresAfterCompression)} on compressed-only files (auto-whitelisted)`)
+  }
   console.log(divider())
   console.log()
 }
@@ -645,6 +726,7 @@ interface HookGroup {
 }
 
 const CORK_HOOK_MATCHER = 'Read'
+const CORK_POST_HOOK_MATCHER = 'Edit|MultiEdit'
 const CORK_HOOK_FALLBACK = 'cork-ai hook'
 
 function loadClaudeSettings(): ClaudeSettings {
@@ -688,34 +770,52 @@ function resolveHookBinary(): string {
   return ''  // fallback : on utilisera CORK_HOOK_FALLBACK
 }
 
+function isCorkCmd(command: string): boolean {
+  return command.includes('cork-ai') && command.endsWith('hook')
+}
+
+/** Adds the cork-ai command to a hook event group if absent. Returns true if added. */
+function ensureHookGroup(
+  settings: ClaudeSettings,
+  eventName: 'PreToolUse' | 'PostToolUse',
+  matcher: string,
+  hookCmd: string,
+): boolean {
+  settings.hooks ??= {}
+  settings.hooks[eventName] ??= []
+  const groups = settings.hooks[eventName] as HookGroup[]
+  if (groups.some(g => g.hooks?.some(h => isCorkCmd(h.command)))) return false
+  const existingGroup = groups.find(g => g.matcher === matcher)
+  if (existingGroup) {
+    existingGroup.hooks.push({ type: 'command', command: hookCmd })
+  } else {
+    groups.push({ matcher, hooks: [{ type: 'command', command: hookCmd }] })
+  }
+  return true
+}
+
 async function hooksInstall(): Promise<void> {
   const settings = loadClaudeSettings()
-  settings.hooks ??= {}
-  settings.hooks.PreToolUse ??= []
-
-  if (isCorkHookInstalled(settings)) {
-    console.log(`\n${C.green('✔')}  cork-ai hook already installed in ${C.cyan(CLAUDE_SETTINGS)}\n`)
-    return
-  }
 
   // Use the absolute binary path so the hook works
   // even if ~/.local/bin is not in Claude Code's PATH (Mac / Electron)
   const binaryPath = resolveHookBinary()
   const hookCmd = binaryPath ? `"${binaryPath}" hook` : CORK_HOOK_FALLBACK
 
-  const existingGroup = settings.hooks.PreToolUse.find(g => g.matcher === CORK_HOOK_MATCHER)
-  if (existingGroup) {
-    existingGroup.hooks.push({ type: 'command', command: hookCmd })
-  } else {
-    settings.hooks.PreToolUse.push({
-      matcher: CORK_HOOK_MATCHER,
-      hooks: [{ type: 'command', command: hookCmd }],
-    })
+  const addedPre = ensureHookGroup(settings, 'PreToolUse', CORK_HOOK_MATCHER, hookCmd)
+  // PostToolUse on Edit detects edits that fail on files only seen compressed
+  // (also upgrades pre-0.4.0 installs that only had the PreToolUse hook)
+  const addedPost = ensureHookGroup(settings, 'PostToolUse', CORK_POST_HOOK_MATCHER, hookCmd)
+
+  if (!addedPre && !addedPost) {
+    console.log(`\n${C.green('✔')}  cork-ai hooks already installed in ${C.cyan(CLAUDE_SETTINGS)}\n`)
+    return
   }
 
   saveClaudeSettings(settings)
-  console.log(`\n${C.green('✔')}  cork-ai hook installed.`)
-  console.log(`   Added PreToolUse hook for Read tool → ${C.cyan(CLAUDE_SETTINGS)}`)
+  console.log(`\n${C.green('✔')}  cork-ai hooks installed.`)
+  if (addedPre) console.log(`   Added PreToolUse hook for Read tool → ${C.cyan(CLAUDE_SETTINGS)}`)
+  if (addedPost) console.log(`   Added PostToolUse hook for Edit tool (compression-harm detection) → ${C.cyan(CLAUDE_SETTINGS)}`)
   if (binaryPath) {
     console.log(`   Binary: ${C.dim(binaryPath)}`)
   }
@@ -787,12 +887,14 @@ function hooksRemove(): void {
     console.log(`\n${C.yellow('cork-ai hook not found in settings.')}\n`); return
   }
 
-  const pre = settings.hooks?.PreToolUse ?? []
-  for (const group of pre) {
-    group.hooks = group.hooks.filter(h => !(h.command.includes('cork-ai') && h.command.endsWith('hook')))
-  }
-  if (settings.hooks) {
-    settings.hooks.PreToolUse = pre.filter(g => g.hooks.length > 0)
+  for (const eventName of ['PreToolUse', 'PostToolUse'] as const) {
+    const groups = settings.hooks?.[eventName] ?? []
+    for (const group of groups) {
+      group.hooks = group.hooks.filter(h => !isCorkCmd(h.command))
+    }
+    if (settings.hooks) {
+      settings.hooks[eventName] = groups.filter(g => g.hooks.length > 0)
+    }
   }
 
   saveClaudeSettings(settings)
@@ -807,11 +909,12 @@ function hooksStatus(): void {
   console.log(`  cork-ai hook: ${installed ? C.green('● installed') : C.yellow('○ not installed')}`)
   console.log(`  Settings file: ${C.dim(CLAUDE_SETTINGS)}`)
   if (installed) {
-    // Show installed command
-    const pre = settings.hooks?.PreToolUse ?? []
-    for (const g of pre) {
-      const h = g.hooks?.find(h => h.command.includes('cork-ai') && h.command.endsWith('hook'))
-      if (h) console.log(`  Command: ${C.dim(h.command)}`)
+    for (const eventName of ['PreToolUse', 'PostToolUse'] as const) {
+      const groups = settings.hooks?.[eventName] ?? []
+      for (const g of groups) {
+        const h = g.hooks?.find(h => isCorkCmd(h.command))
+        if (h) console.log(`  ${eventName} (${g.matcher ?? '*'}): ${C.dim(h.command)}`)
+      }
     }
   } else {
     console.log(`\n  Run ${C.cyan('cork-ai hooks install')} to enable Claude Code integration.`)
@@ -821,8 +924,36 @@ function hooksStatus(): void {
 
 // ─── hook (PreToolUse handler called by Claude Code) ─────────────────────────
 
+// Shared calibrated estimator (chars-based fast path, same unit as the
+// library's tiktoken path thanks to ~/.cork-ai/calibration.json).
 function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 3.5)
+  return estimateTokensFast(text)
+}
+
+// ─── Per-session read tracking (re-read = compression harmed the model) ──────
+
+interface SessionReads {
+  files: Record<string, number>  // filePath → times served compressed
+}
+
+function readsFileFor(sessionId: string): string {
+  const safe = sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)
+  return path.join(LIVE_DIR, `reads-${safe}.json`)
+}
+
+function loadSessionReads(sessionId: string): SessionReads {
+  try {
+    return JSON.parse(fs.readFileSync(readsFileFor(sessionId), 'utf-8')) as SessionReads
+  } catch {
+    return { files: {} }
+  }
+}
+
+function saveSessionReads(sessionId: string, reads: SessionReads): void {
+  try {
+    fs.mkdirSync(LIVE_DIR, { recursive: true })
+    fs.writeFileSync(readsFileFor(sessionId), JSON.stringify(reads), 'utf-8')
+  } catch { /* non-critical */ }
 }
 
 const CODE_EXTS = new Set([
@@ -892,8 +1023,9 @@ function extractCodeSignatures(content: string, filePath: string): string {
   const header = `// ${path.basename(filePath)} — ${total} lines → signatures extracted`
   const savedTokens = estimateTokens(content) - estimateTokens(kept.join('\n'))
   const pct = Math.round((savedTokens / estimateTokens(content)) * 100)
+  const hint = '// Need the full content? Re-read this exact file (served raw on re-read) or pass an explicit offset/limit.'
 
-  return `${header} (${pct}% compression)\n\n${kept.join('\n')}`
+  return `${header} (${pct}% compression)\n${hint}\n\n${kept.join('\n')}`
 }
 
 function compressJson(content: string): string {
@@ -929,6 +1061,49 @@ function compressContent(content: string, filePath: string): { result: string; c
   return { result: compressText(content), compressType: 'text' }
 }
 
+// PostToolUse on Edit: an Edit that fails on a file we only ever served
+// compressed means the model's old_string came from signatures, not the real
+// file — direct compression harm. Count it and auto-whitelist the file.
+// Failure detection is best-effort (matches Claude Code's known Edit errors);
+// if the payload shape differs, this is a silent no-op.
+const EDIT_FAILURE_MARKERS =
+  /String to replace not found|matches of the string to replace|has not been read yet|"is_error"\s*:\s*true/i
+
+function handlePostToolUseEdit(event: Record<string, unknown>): void {
+  const toolName = (event.tool_name as string) ?? ''
+  if (toolName !== 'Edit' && toolName !== 'MultiEdit') return
+  const toolInput = (event.tool_input as Record<string, unknown>) ?? {}
+  const filePath = toolInput.file_path as string
+  const sessionId = (event.session_id as string) || ''
+  if (!filePath || !sessionId) return
+
+  const reads = loadSessionReads(sessionId)
+  if (!reads.files[filePath]) return  // file was never served compressed — not our fault
+
+  let respText = ''
+  try { respText = JSON.stringify(event.tool_response ?? '') } catch { return }
+  if (!EDIT_FAILURE_MARKERS.test(respText)) return
+
+  // Whitelist: the next Read of this file is served raw so the retry can work
+  // from the real content.
+  reads.files[filePath] += 1
+  saveSessionReads(sessionId, reads)
+
+  try {
+    accumulateInSession({
+      projectPath: (event.cwd as string) || process.cwd(),
+      originalTokens: 0,
+      compressedTokens: 0,
+      savedTokens: 0,
+      estimatedCostSaved: 0,
+      byModule: {},
+      model: loadConfig().detectedModel,
+      sessionId,
+      editFailure: true,
+    })
+  } catch { /* non-critical */ }
+}
+
 async function runHook(): Promise<void> {
   let input = ''
   for await (const chunk of process.stdin) input += chunk
@@ -941,21 +1116,69 @@ async function runHook(): Promise<void> {
   const toolInput = (event.tool_input as Record<string, unknown>) ?? {}
   const hookEvent = (event.hook_event_name as string) ?? ''
 
+  if (hookEvent === 'PostToolUse') {
+    handlePostToolUseEdit(event)
+    process.exit(0)
+  }
+
   if (hookEvent !== 'PreToolUse' || toolName !== 'Read') process.exit(0)
 
   const filePath = toolInput.file_path as string
   if (!filePath) process.exit(0)
 
+  // Explicit offset/limit = the model is targeting a precise zone (often to
+  // recover content hidden by a previous compression). Never compress those.
+  if (toolInput.offset !== undefined || toolInput.limit !== undefined) process.exit(0)
+
+  // Never compress the file the user is explicitly asking about — the model
+  // almost certainly needs its real content, and a compressed view forces a
+  // re-read round-trip that costs more than the compression saves.
+  const userPrompt = lastUserPromptFromTranscript(event.transcript_path as string | undefined)
+  if (userPrompt && userPrompt.toLowerCase().includes(path.basename(filePath).toLowerCase())) {
+    process.exit(0)
+  }
+
   let content: string
   try { content = fs.readFileSync(filePath, 'utf-8') } catch { process.exit(0) }
 
-  const offset = (toolInput.offset as number) ?? 0
-  const limit = (toolInput.limit as number) ?? 2000
   const lines = content.split('\n')
-  const slice = lines.slice(offset, offset + limit).join('\n')
+  const slice = lines.slice(0, 2000).join('\n')
 
   const ext = path.extname(filePath).toLowerCase() || 'none'
   const originalTokens = estimateTokens(slice)
+
+  const sessionId = (event.session_id as string) || ''
+  const reads = sessionId ? loadSessionReads(sessionId) : null
+
+  // Re-read of a file we already compressed this session: the compressed view
+  // wasn't enough for the model. Serve it raw, auto-whitelist it for the rest
+  // of the session, and account the induced cost against our savings.
+  if (reads && reads.files[filePath]) {
+    reads.files[filePath] += 1
+    saveSessionReads(sessionId, reads)
+    try {
+      const cfg = loadConfig()
+      const detectedModel =
+        detectModelFromTranscript(event.transcript_path as string | undefined)
+        || (event.model as string)
+        || cfg.detectedModel
+      accumulateInSession({
+        projectPath: (event.cwd as string) || process.cwd(),
+        originalTokens: 0,
+        compressedTokens: 0,
+        savedTokens: 0,
+        // The second read only exists because the first one was compressed —
+        // its full raw cost is induced by us. Deduct it.
+        estimatedCostSaved: -(originalTokens / 1_000_000) * inputPriceForModel(detectedModel),
+        byModule: {},
+        model: detectedModel,
+        sessionId,
+        reRead: true,
+        reReadTokensServed: originalTokens,
+      })
+    } catch { /* non-critical */ }
+    process.exit(0)  // passthrough: Claude gets the raw file
+  }
 
   if (originalTokens < 400) {
     if (isTelemetryEnabled()) sendTelemetry({ v: VERSION, os: process.platform, arch: process.arch, savings_pct: 0, file_ext: ext, compress_type: 'text', skipped: true })
@@ -973,7 +1196,14 @@ async function runHook(): Promise<void> {
   const saved = originalTokens - compressedTokens
   const savingsPct = Math.round((saved / originalTokens) * 1000) / 10
 
-  // Accumulate in the live session (a session = 2h of activity on the same project)
+  // Remember we served this file compressed — a re-read in the same session
+  // will be served raw (auto-whitelist) and counted as compression harm.
+  if (reads && sessionId) {
+    reads.files[filePath] = 1
+    saveSessionReads(sessionId, reads)
+  }
+
+  // Accumulate in the live session (keyed by Claude Code session_id)
   try {
     const cfg = loadConfig()
     const detectedModel =
@@ -991,6 +1221,7 @@ async function runHook(): Promise<void> {
       estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(detectedModel),
       byModule: { hookReadCompressor: saved },
       model: detectedModel,
+      sessionId: sessionId || undefined,
     })
   } catch { /* non-critical */ }
 
@@ -1010,6 +1241,132 @@ async function runHook(): Promise<void> {
     decision: 'block',
     reason: compressed,
   }))
+}
+
+// ─── calibrate (measure real token factors via count_tokens API) ─────────────
+
+// Representative samples: TS code, English prose, French prose (accents matter —
+// Claude tokenizers split accented text differently than cl100k_base).
+const CALIBRATION_SAMPLES: Array<{ name: string; text: string }> = [
+  {
+    name: 'code',
+    text: [
+      "import fs from 'fs'",
+      "import path from 'path'",
+      '',
+      'export interface CompressionResult {',
+      '  messages: Message[]',
+      '  savedTokens: number',
+      '  byModule: Record<string, number>',
+      '}',
+      '',
+      'export function compressToolResults(messages: Message[], options: ToolResultOptions): CompressionResult {',
+      '  const results: Message[] = []',
+      '  let savedTokens = 0',
+      '  for (const msg of messages) {',
+      "    if (typeof msg.content === 'string') { results.push(msg); continue }",
+      '    const blocks = msg.content.map(block => {',
+      "      if (block.type !== 'tool_result') return block",
+      '      const compressed = truncateContent(block.content, options.maxCodeLines)',
+      '      savedTokens += estimateSavings(block.content, compressed)',
+      '      return { ...block, content: compressed }',
+      '    })',
+      '    results.push({ ...msg, content: blocks })',
+      '  }',
+      '  return { messages: results, savedTokens, byModule: { toolResultCompressor: savedTokens } }',
+      '}',
+    ].join('\n').repeat(3),
+  },
+  {
+    name: 'english',
+    text: (
+      'Token counting accuracy matters because every downstream number inherits its error: ' +
+      'savings percentages, cost estimates, budget thresholds and compression decisions. ' +
+      'A tokenizer that undercounts by fifteen percent makes the library claim savings it ' +
+      'never delivered, and a budget manager working from wrong counts compresses either ' +
+      'too early or too late. Measuring against the real endpoint removes the guesswork. '
+    ).repeat(4),
+  },
+  {
+    name: 'french',
+    text: (
+      'La précision du comptage des tokens est essentielle : chaque chiffre en aval hérite de ' +
+      "son erreur — pourcentages d'économies, estimations de coûts, seuils de budget et " +
+      'décisions de compression. Un tokenizer qui sous-compte de quinze pour cent fait ' +
+      "prétendre à la bibliothèque des économies qu'elle n'a jamais réalisées. Mesurer contre " +
+      "le véritable endpoint élimine les approximations et garantit des rapports fiables. "
+    ).repeat(4),
+  },
+]
+
+async function countTokensViaApi(apiKey: string, model: string, text: string): Promise<number> {
+  const res = await fetch('https://api.anthropic.com/v1/messages/count_tokens', {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: text }] }),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    throw new Error(`count_tokens HTTP ${res.status}: ${body.slice(0, 200)}`)
+  }
+  const data = await res.json() as { input_tokens: number }
+  return data.input_tokens
+}
+
+async function runCalibrate(modelArg?: string): Promise<void> {
+  const apiKey = process.env.ANTHROPIC_API_KEY
+  if (!apiKey) {
+    console.error(`\n${C.yellow('ANTHROPIC_API_KEY is not set.')}`)
+    console.error(`Calibration measures real Claude token counts via POST /v1/messages/count_tokens (free).`)
+    console.error(`Export your API key and retry: ${C.cyan('export ANTHROPIC_API_KEY=sk-ant-...')}\n`)
+    process.exit(1)
+  }
+
+  const model = modelArg || loadConfig().detectedModel
+  if (!model) {
+    console.error(`\n${C.yellow('No model detected yet.')}`)
+    console.error(`Pass one explicitly: ${C.cyan('cork-ai calibrate claude-sonnet-5')}\n`)
+    process.exit(1)
+  }
+
+  console.log(`\n${C.bold('cork-ai calibrate')} — measuring real token factors for ${C.cyan(model)}`)
+  console.log(divider())
+
+  let realTotal = 0
+  let tiktokenTotal = 0
+  let charsTotal = 0
+  let tiktokenOk = true
+
+  for (const sample of CALIBRATION_SAMPLES) {
+    const real = await countTokensViaApi(apiKey, model, sample.text)
+    const tk = countTokensRaw(sample.text)
+    realTotal += real
+    charsTotal += sample.text.length
+    if (tk === null) tiktokenOk = false
+    else tiktokenTotal += tk
+    console.log(`  ${sample.name.padEnd(9)} real: ${String(real).padStart(6)}  tiktoken: ${tk === null ? '  n/a' : String(tk).padStart(6)}  chars: ${String(sample.text.length).padStart(7)}`)
+  }
+
+  // count_tokens includes a few tokens of message envelope per call — negligible
+  // against multi-KB samples (<1%).
+  const tiktokenFactor = tiktokenOk && tiktokenTotal > 0
+    ? Math.round((realTotal / tiktokenTotal) * 1000) / 1000
+    : 1.0
+  const charsPerToken = Math.round((charsTotal / realTotal) * 100) / 100
+
+  const factor = { tiktokenFactor, charsPerToken }
+  saveCalibrationFactor(model, factor)
+  saveCalibrationFactor(modelFamily(model), factor)
+
+  console.log(divider())
+  console.log(`  ${C.bold('tiktoken factor')}   ${C.green(String(tiktokenFactor))}  ${C.dim('(real / cl100k_base)')}`)
+  console.log(`  ${C.bold('chars per token')}   ${C.green(String(charsPerToken))}  ${C.dim('(fast path, hook)')}`)
+  console.log(`  Saved to ${C.cyan(CALIBRATION_FILE)} under "${model}" and "${modelFamily(model)}".`)
+  console.log(`  ${C.dim('All future counts (library + hook) use these factors for this model.')}\n`)
 }
 
 // ─── Init command ─────────────────────────────────────────────────────────────
@@ -1199,6 +1556,11 @@ function resetStats(): void {
     showVersion()
   } else if (cmd === 'hook') {
     await runHook().catch(() => process.exit(0))
+  } else if (cmd === 'calibrate') {
+    await runCalibrate(sub).catch(err => {
+      console.error(`\n${C.yellow('Calibration failed:')} ${err instanceof Error ? err.message : String(err)}\n`)
+      process.exit(1)
+    })
   } else if (cmd === 'init') {
     runInit()
   } else if (cmd === 'hooks') {

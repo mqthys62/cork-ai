@@ -8,6 +8,7 @@
  */
 
 import { countTokens } from '../core/tokenizer.js'
+import { hasToolBlocks } from '../core/validate.js'
 import type {
   CompressResult,
   ContentBlock,
@@ -137,6 +138,10 @@ export function selectiveSummarize(
 
   const compressed = messages.map((msg, idx) => {
     if (idx >= summarizeUntil) return msg
+
+    // Never replace messages carrying tool_use/tool_result blocks with a
+    // text summary — it orphans the paired block (API 400).
+    if (hasToolBlocks(msg)) return msg
 
     const text = extractText(msg)
     const tokenCount = countTokens(text)

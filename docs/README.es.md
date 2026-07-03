@@ -110,6 +110,25 @@ cork-ai hooks status    # comprobar si está activo
 cork-ai hooks remove    # desactivar
 ```
 
+El hook comprime las lecturas de archivos grandes a firmas — pero nunca a costa del modelo. Cuatro salvaguardas garantizan que la compresión ayude en vez de perjudicar:
+
+- **Las lecturas con `offset`/`limit` explícitos nunca se comprimen** — el modelo apunta a una zona precisa.
+- **Las relecturas se sirven sin comprimir** — si Claude relee un archivo que solo vio comprimido, recibe el contenido completo (lista blanca automática para la sesión), y el coste inducido se *descuenta* del ahorro mostrado.
+- **El archivo del que habla el usuario nunca se comprime** — si tu último mensaje menciona `interceptor.ts`, su lectura pasa intacta.
+- **Los Edit fallidos se detectan** — un hook `PostToolUse` identifica los `Edit` que fallan en archivos vistos solo comprimidos (el `old_string` venía de las firmas), añade el archivo a la lista blanca y reporta el daño en `cork-ai gain`.
+
+### `cork-ai calibrate`
+
+Los recuentos de tokens y las estimaciones de coste valen lo que vale el tokenizer detrás. `calibrate` mide los factores de tokens **reales** de Claude para tu modelo mediante el endpoint gratuito `count_tokens` (muestras de código + inglés + francés) y los guarda en `~/.cork-ai/calibration.json` — todos los recuentos (librería + hook) pasan a ser exactos para ese modelo:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+cork-ai calibrate                    # usa el modelo autodetectado
+cork-ai calibrate claude-sonnet-5    # o uno específico
+```
+
+¿Sin clave de API a mano? `wrapClient` también **calibra pasivamente**: en cada respuesta compara su estimación local con los tokens de prompt realmente facturados por la API y corrige el estimador automáticamente.
+
 ### `cork-ai init`
 
 Si tienes código que llama a la API de Anthropic directamente:
@@ -175,6 +194,25 @@ rtk init -g
 # cork-ai — compresión de la herramienta Read + historial
 curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 ```
+
+---
+
+## cork-ai vs las funciones nativas de Anthropic
+
+La API de Anthropic ya incluye gestión de contexto del lado del servidor. cork-ai está diseñado para complementarla, no para competir con ella — cuándo usar qué:
+
+| Necesidad | Usar | Por qué |
+|---|---|---|
+| Conversaciones largas cerca del límite de contexto | **Compaction nativa** (beta `compact-2026-01-12`) | Resumen del lado del servidor, consciente del modelo — mejor calidad que cualquier heurística del cliente |
+| Limpiar resultados de herramientas antiguos en bucles agénticos | **Context editing nativo** (`clear_tool_uses_20250919`) | Poda del lado del servidor, sin lógica en el cliente |
+| El historial reenviado cuesta tarifa completa en cada turno | **Prompt caching** (`cache_control`) | Las lecturas de caché cuestan 0,1× — la mayor palanca de coste |
+| Reducir el contenido **antes de que entre en el contexto** (lecturas de archivos, salidas de herramientas) | **cork-ai** | La API solo puede gestionar tokens ya enviados — cork-ai evita que se envíen |
+| Medir lo que la compresión ahorra de verdad | **cork-ai** | Contabilidad con datos reales de `response.usage`, por modelo, por sesión |
+
+Dos reglas que cork-ai sigue para mantenerse compatible con el prompt caching:
+
+1. **Estabilidad del prefijo** (por defecto en `wrapClient`): las decisiones de compresión sobre mensajes antiguos se congelan byte a byte entre peticiones. Reescribir el prefijo en cada turno invalidaría el prompt cache y costaría hasta 8× más que no comprimir nada.
+2. **Contabilidad consciente del caché**: el ahorro sobre contenido ya congelado se valora a la tarifa cache-read (0,1×), no a la tarifa de input — sin cifras infladas.
 
 ---
 

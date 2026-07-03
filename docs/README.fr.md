@@ -110,6 +110,25 @@ cork-ai hooks status    # vérifier si actif
 cork-ai hooks remove    # désactiver
 ```
 
+Le hook compresse les grosses lectures de fichiers en signatures — mais jamais au détriment du modèle. Quatre garde-fous garantissent que la compression aide au lieu de nuire :
+
+- **Les Read avec `offset`/`limit` explicites ne sont jamais compressés** — le modèle cible une zone précise.
+- **Les relectures sont servies brutes** — si Claude relit un fichier qu'il n'a vu que compressé, il reçoit le contenu complet (whitelist automatique pour la session), et le coût induit est *déduit* des économies affichées.
+- **Le fichier dont l'utilisateur parle n'est jamais compressé** — si ton dernier message mentionne `interceptor.ts`, sa lecture passe telle quelle.
+- **Les Edit échoués sont détectés** — un hook `PostToolUse` repère les `Edit` qui échouent sur des fichiers vus uniquement compressés (le `old_string` venait des signatures), whitelist le fichier et remonte la nuisance dans `cork-ai gain`.
+
+### `cork-ai calibrate`
+
+Les comptages de tokens et les estimations de coût valent ce que vaut le tokenizer derrière. `calibrate` mesure les **vrais** facteurs de tokens Claude pour ton modèle via l'endpoint gratuit `count_tokens` (échantillons code + anglais + français) et les stocke dans `~/.cork-ai/calibration.json` — tous les comptages (bibliothèque + hook) deviennent exacts pour ce modèle :
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+cork-ai calibrate                    # utilise le modèle auto-détecté
+cork-ai calibrate claude-sonnet-5    # ou un modèle précis
+```
+
+Pas de clé API sous la main ? `wrapClient` **calibre aussi passivement** : à chaque réponse, il compare son estimation locale aux tokens de prompt réellement facturés par l'API et corrige l'estimateur automatiquement.
+
 ### `cork-ai init`
 
 Si tu as du code qui appelle l'API Anthropic directement :
@@ -202,6 +221,25 @@ rtk init -g
 # cork-ai — compression de l'outil Read + historique de conversation
 curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
 ```
+
+---
+
+## cork-ai vs les fonctionnalités natives d'Anthropic
+
+L'API Anthropic embarque désormais de la gestion de contexte côté serveur. cork-ai est conçu pour la compléter, pas la concurrencer — quand utiliser quoi :
+
+| Besoin | Utiliser | Pourquoi |
+|---|---|---|
+| Conversations longues proches de la limite de contexte | **Compaction native** (bêta `compact-2026-01-12`) | Résumé côté serveur, conscient du modèle — meilleure qualité que toute heuristique côté client |
+| Purger les vieux résultats d'outils dans les boucles agentiques | **Context editing natif** (`clear_tool_uses_20250919`) | Élagage côté serveur, aucune logique client |
+| L'historique re-envoyé coûte plein tarif à chaque tour | **Prompt caching** (`cache_control`) | Les lectures de cache coûtent 0,1× — le plus gros levier de coût |
+| Réduire le contenu **avant qu'il n'entre dans le contexte** (lectures de fichiers, sorties d'outils) | **cork-ai** | L'API ne peut gérer que les tokens déjà envoyés — cork-ai les empêche de partir |
+| Mesurer ce que la compression économise vraiment | **cork-ai** | Comptabilité vérité-terrain depuis `response.usage`, par modèle, par session |
+
+Deux règles que cork-ai suit pour rester compatible avec le prompt caching :
+
+1. **Stabilité du préfixe** (défaut dans `wrapClient`) : les décisions de compression sur les anciens messages sont gelées byte-identiques entre les requêtes. Réécrire le préfixe à chaque tour invaliderait le prompt cache et coûterait jusqu'à 8× plus cher que ne rien compresser.
+2. **Comptabilité cache-aware** : les économies sur le contenu déjà gelé sont valorisées au tarif cache-read (0,1×), pas au tarif input — pas de chiffres gonflés.
 
 ---
 

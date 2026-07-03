@@ -1,9 +1,16 @@
+import os from 'os'
+import path from 'path'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    env: {
+      // Isolate all persistent state (stats.json, live sessions, calibration)
+      // from the user's real ~/.cork-ai — tests write here instead.
+      CORK_AI_HOME: path.join(os.tmpdir(), 'cork-ai-test-home'),
+    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],

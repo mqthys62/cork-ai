@@ -1,14 +1,22 @@
 /**
  * Persistent stats — saves savings to ~/.cork-ai/stats.json.
  * Allows `cork-ai gain` and `cork-ai report` to display global stats.
+ *
+ * Two kinds of numbers, never mixed:
+ *   - estimated*: computed from local token counts before sending
+ *   - measured:   ground truth from the API's response.usage (wrapClient path)
  */
 
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import type { MeasuredUsageStats } from '../types/index.js'
 
-const GLOBAL_DIR = path.join(os.homedir(), '.cork-ai')
+// CORK_AI_HOME overrides the data directory (tests isolate through it —
+// without it, every `npm test` run would clobber the user's real stats).
+const GLOBAL_DIR = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 const STATS_FILE = path.join(GLOBAL_DIR, 'stats.json')
+const LIVE_DIR = path.join(GLOBAL_DIR, 'live')
 
 export interface ModelUsage {
   requests: number
@@ -29,6 +37,14 @@ export interface GlobalStats {
     totalSavedTokens: number
     estimatedCostSaved: number
     byModel?: Record<string, ModelUsage>
+    /** Ground truth accumulated from wrapClient sessions (response.usage) */
+    measured?: MeasuredUsageStats
+    /** Re-reads of files already compressed by the hook (compression harm signal) */
+    reReads?: number
+    /** Raw tokens served on those re-reads (induced cost, already deducted from savings) */
+    reReadTokensServed?: number
+    /** Edits that failed on a file only seen compressed (old_string missing from signatures) */
+    editFailuresAfterCompression?: number
   }
   sessions: SessionRecord[]
 }
@@ -46,6 +62,10 @@ export interface SessionRecord {
   estimatedCostSaved: number
   byModule: Record<string, number>
   byModel?: Record<string, ModelUsage>
+  measured?: MeasuredUsageStats
+  reReads?: number
+  reReadTokensServed?: number
+  editFailuresAfterCompression?: number
 }
 
 export interface ProjectStats {
@@ -142,6 +162,40 @@ function mergeByModel(
   return merged
 }
 
+function mergeMeasured(
+  target: MeasuredUsageStats | undefined,
+  source: MeasuredUsageStats | undefined,
+): MeasuredUsageStats | undefined {
+  if (!source) return target
+  if (!target) return { ...source }
+  return {
+    requests: target.requests + source.requests,
+    inputTokens: target.inputTokens + source.inputTokens,
+    outputTokens: target.outputTokens + source.outputTokens,
+    cacheCreationInputTokens: target.cacheCreationInputTokens + source.cacheCreationInputTokens,
+    cacheReadInputTokens: target.cacheReadInputTokens + source.cacheReadInputTokens,
+    costUSD: target.costUSD + source.costUSD,
+  }
+}
+
+function applySessionToAllTime(stats: GlobalStats, session: SessionRecord): void {
+  stats.allTime.totalRequests += session.requests
+  stats.allTime.totalOriginalTokens += session.originalTokens
+  stats.allTime.totalCompressedTokens += session.compressedTokens
+  stats.allTime.totalSavedTokens += session.savedTokens
+  stats.allTime.estimatedCostSaved += session.estimatedCostSaved
+  stats.allTime.byModel = mergeByModel(stats.allTime.byModel, session.byModel)
+  stats.allTime.measured = mergeMeasured(stats.allTime.measured, session.measured)
+  if (session.reReads) stats.allTime.reReads = (stats.allTime.reReads ?? 0) + session.reReads
+  if (session.reReadTokensServed) {
+    stats.allTime.reReadTokensServed = (stats.allTime.reReadTokensServed ?? 0) + session.reReadTokensServed
+  }
+  if (session.editFailuresAfterCompression) {
+    stats.allTime.editFailuresAfterCompression =
+      (stats.allTime.editFailuresAfterCompression ?? 0) + session.editFailuresAfterCompression
+  }
+}
+
 export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
   const stats = loadStats()
   const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
@@ -152,13 +206,7 @@ export function recordSession(session: Omit<SessionRecord, 'sessionId'>): void {
     stats.sessions = stats.sessions.slice(-500)
   }
 
-  stats.allTime.totalRequests += session.requests
-  stats.allTime.totalOriginalTokens += session.originalTokens
-  stats.allTime.totalCompressedTokens += session.compressedTokens
-  stats.allTime.totalSavedTokens += session.savedTokens
-  stats.allTime.estimatedCostSaved += session.estimatedCostSaved
-  stats.allTime.byModel = mergeByModel(stats.allTime.byModel, session.byModel)
-
+  applySessionToAllTime(stats, record)
   saveStats(stats)
 }
 
@@ -185,7 +233,7 @@ export function resetGlobalStats(): void {
   fs.writeFileSync(STATS_FILE, JSON.stringify(fresh, null, 2), 'utf-8')
 }
 
-// ─── Live session (aggregates all hook calls for a session) ──────────────────
+// ─── Live sessions (one file per Claude Code session_id) ─────────────────────
 
 export interface LiveSession {
   sessionId: string
@@ -199,19 +247,70 @@ export interface LiveSession {
   estimatedCostSaved: number
   byModule: Record<string, number>
   byModel?: Record<string, ModelUsage>
+  reReads?: number
+  reReadTokensServed?: number
+  editFailuresAfterCompression?: number
 }
 
+/** Legacy single-file location (pre-session_id versions) — still flushed/read. */
 export const LIVE_SESSION_FILE = path.join(GLOBAL_DIR, 'live-session.json')
-const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000  // 2h of inactivity = new session
+const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000  // 2h of inactivity = session over
 
-export function readLiveSession(): LiveSession | null {
+function liveFileFor(sessionId: string): string {
+  // session_id is a UUID from Claude Code — sanitize defensively anyway
+  const safe = sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)
+  return path.join(LIVE_DIR, `${safe}.json`)
+}
+
+function isExpired(live: LiveSession): boolean {
+  return Date.now() - new Date(live.lastActivityAt).getTime() > SESSION_TIMEOUT_MS
+}
+
+function readLiveFile(file: string): LiveSession | null {
   try {
-    const data = JSON.parse(fs.readFileSync(LIVE_SESSION_FILE, 'utf-8')) as LiveSession
-    const elapsed = Date.now() - new Date(data.lastActivityAt).getTime()
-    return elapsed <= SESSION_TIMEOUT_MS ? data : null
+    return JSON.parse(fs.readFileSync(file, 'utf-8')) as LiveSession
   } catch {
     return null
   }
+}
+
+/** All live session files (legacy single file included), expired or not. */
+function listLiveFiles(): string[] {
+  const files: string[] = []
+  try {
+    for (const entry of fs.readdirSync(LIVE_DIR)) {
+      if (entry.endsWith('.json')) files.push(path.join(LIVE_DIR, entry))
+    }
+  } catch { /* no live dir yet */ }
+  if (fs.existsSync(LIVE_SESSION_FILE)) files.push(LIVE_SESSION_FILE)
+  return files
+}
+
+/** Flushes every expired live session into history and deletes its file. */
+function flushExpiredLiveSessions(): void {
+  for (const file of listLiveFiles()) {
+    const live = readLiveFile(file)
+    if (!live) { try { fs.unlinkSync(file) } catch { /* already gone */ } ; continue }
+    if (isExpired(live)) {
+      flushLiveSessionToHistory(live)
+      try { fs.unlinkSync(file) } catch { /* already gone */ }
+    }
+  }
+}
+
+/** All currently-active live sessions, most recent activity first. */
+export function readActiveLiveSessions(): LiveSession[] {
+  const actives: LiveSession[] = []
+  for (const file of listLiveFiles()) {
+    const live = readLiveFile(file)
+    if (live && !isExpired(live)) actives.push(live)
+  }
+  return actives.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt))
+}
+
+/** Most recently active live session (display convenience), or null. */
+export function readLiveSession(): LiveSession | null {
+  return readActiveLiveSessions()[0] ?? null
 }
 
 function flushLiveSessionToHistory(live: LiveSession): void {
@@ -219,7 +318,7 @@ function flushLiveSessionToHistory(live: LiveSession): void {
   const savingsPercent = live.originalTokens > 0
     ? (live.savedTokens / live.originalTokens) * 100 : 0
 
-  stats.sessions.push({
+  const record: SessionRecord = {
     sessionId: live.sessionId,
     projectPath: live.projectPath,
     startedAt: live.startedAt,
@@ -232,20 +331,18 @@ function flushLiveSessionToHistory(live: LiveSession): void {
     estimatedCostSaved: live.estimatedCostSaved,
     byModule: live.byModule,
     byModel: live.byModel,
-  })
+    reReads: live.reReads,
+    reReadTokensServed: live.reReadTokensServed,
+    editFailuresAfterCompression: live.editFailuresAfterCompression,
+  }
+  stats.sessions.push(record)
   if (stats.sessions.length > 500) stats.sessions = stats.sessions.slice(-500)
 
-  stats.allTime.totalRequests += live.requests
-  stats.allTime.totalOriginalTokens += live.originalTokens
-  stats.allTime.totalCompressedTokens += live.compressedTokens
-  stats.allTime.totalSavedTokens += live.savedTokens
-  stats.allTime.estimatedCostSaved += live.estimatedCostSaved
-  stats.allTime.byModel = mergeByModel(stats.allTime.byModel, live.byModel)
-
+  applySessionToAllTime(stats, record)
   saveStats(stats)
 }
 
-export function accumulateInSession(event: {
+export interface SessionEvent {
   projectPath: string
   originalTokens: number
   compressedTokens: number
@@ -253,8 +350,22 @@ export function accumulateInSession(event: {
   estimatedCostSaved: number
   byModule: Record<string, number>
   model?: string
-}): void {
+  /** Claude Code session_id — one live file per session, no cross-flushing */
+  sessionId?: string
+  /** This event is a re-read of an already-compressed file (served raw) */
+  reRead?: boolean
+  /** Raw tokens served on the re-read (induced cost) */
+  reReadTokensServed?: number
+  /** This event is an Edit failure on a file only seen compressed */
+  editFailure?: boolean
+}
+
+export function accumulateInSession(event: SessionEvent): void {
   ensureDir()
+  fs.mkdirSync(LIVE_DIR, { recursive: true })
+
+  // Opportunistic cleanup: flush sessions that ended (no hook fires at session end)
+  flushExpiredLiveSessions()
 
   const now = new Date().toISOString()
   const eventByModel: Record<string, ModelUsage> | undefined = event.model
@@ -269,17 +380,15 @@ export function accumulateInSession(event: {
       }
     : undefined
 
-  let live: LiveSession | null = null
-  try {
-    const existing = JSON.parse(fs.readFileSync(LIVE_SESSION_FILE, 'utf-8')) as LiveSession
-    const elapsed = Date.now() - new Date(existing.lastActivityAt).getTime()
-    if (elapsed <= SESSION_TIMEOUT_MS && existing.projectPath === event.projectPath) {
-      live = existing
-    } else {
-      // Expired session or different project: flush before creating a new one
-      flushLiveSessionToHistory(existing)
-    }
-  } catch { /* no existing live session */ }
+  const file = event.sessionId ? liveFileFor(event.sessionId) : LIVE_SESSION_FILE
+  let live = readLiveFile(file)
+
+  // Same file but expired (long-idle session) or, on the legacy single-file
+  // path, a different project: flush and start fresh.
+  if (live && (isExpired(live) || (!event.sessionId && live.projectPath !== event.projectPath))) {
+    flushLiveSessionToHistory(live)
+    live = null
+  }
 
   if (live) {
     live.lastActivityAt = now
@@ -292,9 +401,16 @@ export function accumulateInSession(event: {
       live.byModule[mod] = (live.byModule[mod] ?? 0) + saved
     }
     live.byModel = mergeByModel(live.byModel, eventByModel)
+    if (event.reRead) {
+      live.reReads = (live.reReads ?? 0) + 1
+      live.reReadTokensServed = (live.reReadTokensServed ?? 0) + (event.reReadTokensServed ?? 0)
+    }
+    if (event.editFailure) {
+      live.editFailuresAfterCompression = (live.editFailuresAfterCompression ?? 0) + 1
+    }
   } else {
     live = {
-      sessionId: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      sessionId: event.sessionId ?? `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       projectPath: event.projectPath,
       startedAt: now,
       lastActivityAt: now,
@@ -305,14 +421,20 @@ export function accumulateInSession(event: {
       estimatedCostSaved: event.estimatedCostSaved,
       byModule: { ...event.byModule },
       byModel: eventByModel,
+      ...(event.reRead
+        ? { reReads: 1, reReadTokensServed: event.reReadTokensServed ?? 0 }
+        : {}),
+      ...(event.editFailure ? { editFailuresAfterCompression: 1 } : {}),
     }
   }
 
-  fs.writeFileSync(LIVE_SESSION_FILE, JSON.stringify(live, null, 2), 'utf-8')
+  fs.writeFileSync(file, JSON.stringify(live, null, 2), 'utf-8')
 }
 
 export function clearLiveSession(): void {
-  try { fs.unlinkSync(LIVE_SESSION_FILE) } catch { /* no session to clear */ }
+  for (const file of listLiveFiles()) {
+    try { fs.unlinkSync(file) } catch { /* no session to clear */ }
+  }
 }
 
 // ─── Aggregations ─────────────────────────────────────────────────────────────
@@ -334,7 +456,7 @@ export function getStatsByProject(stats: GlobalStats): ProjectStats[] {
         totalOriginalTokens: s.originalTokens,
         totalSavedTokens: s.savedTokens,
         totalCostSaved: s.estimatedCostSaved,
-        avgSavingsPercent: s.savingsPercent,
+        avgSavingsPercent: 0, // computed below, token-weighted
         lastSessionAt: s.startedAt,
       })
     } else {
@@ -343,11 +465,16 @@ export function getStatsByProject(stats: GlobalStats): ProjectStats[] {
       existing.totalOriginalTokens += s.originalTokens
       existing.totalSavedTokens += s.savedTokens
       existing.totalCostSaved += s.estimatedCostSaved
-      existing.avgSavingsPercent =
-        (existing.avgSavingsPercent * (existing.sessionCount - 1) + s.savingsPercent) /
-        existing.sessionCount
       if (s.startedAt > existing.lastSessionAt) existing.lastSessionAt = s.startedAt
     }
+  }
+
+  // Token-weighted savings: Σsaved / Σoriginal — a 200-token session must not
+  // weigh as much as a 2M-token one (the old per-session arithmetic mean did).
+  for (const p of map.values()) {
+    p.avgSavingsPercent = p.totalOriginalTokens > 0
+      ? (p.totalSavedTokens / p.totalOriginalTokens) * 100
+      : 0
   }
 
   return Array.from(map.values()).sort((a, b) => b.totalSavedTokens - a.totalSavedTokens)
@@ -414,17 +541,20 @@ export function getStatsByPeriod(
         totalOriginalTokens: s.originalTokens,
         totalSavedTokens: s.savedTokens,
         totalCostSaved: s.estimatedCostSaved,
-        avgSavingsPercent: s.savingsPercent,
+        avgSavingsPercent: 0, // computed below, token-weighted
       })
     } else {
       existing.sessionCount++
       existing.totalOriginalTokens += s.originalTokens
       existing.totalSavedTokens += s.savedTokens
       existing.totalCostSaved += s.estimatedCostSaved
-      existing.avgSavingsPercent =
-        (existing.avgSavingsPercent * (existing.sessionCount - 1) + s.savingsPercent) /
-        existing.sessionCount
     }
+  }
+
+  for (const b of map.values()) {
+    b.avgSavingsPercent = b.totalOriginalTokens > 0
+      ? (b.totalSavedTokens / b.totalOriginalTokens) * 100
+      : 0
   }
 
   return Array.from(map.values()).sort((a, b) => a.label.localeCompare(b.label))
@@ -446,7 +576,15 @@ export function getForecast(stats: GlobalStats): ForecastStats {
   // Use last 30 days of data for forecast
   const cutoff = new Date()
   cutoff.setDate(cutoff.getDate() - 30)
-  const recent = stats.sessions.filter(s => new Date(s.startedAt) >= cutoff)
+  let recent = stats.sessions.filter(s => new Date(s.startedAt) >= cutoff)
+
+  // The current day is incomplete — including it deflates the daily average
+  // (e.g. at 9am today only counts a third of a day's savings but a full day
+  // in the span). Exclude it whenever older data exists.
+  const today = new Date().toISOString().slice(0, 10)
+  const beforeToday = recent.filter(s => s.startedAt.slice(0, 10) < today)
+  if (beforeToday.length > 0) recent = beforeToday
+
   const sample = recent.length > 0 ? recent : stats.sessions
 
   const totalSaved = sample.reduce((s, r) => s + r.savedTokens, 0)
@@ -470,4 +608,4 @@ export function getForecast(stats: GlobalStats): ForecastStats {
   }
 }
 
-export { GLOBAL_DIR, STATS_FILE }
+export { GLOBAL_DIR, STATS_FILE, LIVE_DIR }

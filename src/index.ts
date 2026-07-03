@@ -86,8 +86,26 @@ export { BudgetManager, compressWithBudget } from './managers/budget.js'
 export { SelectiveSummarizer, selectiveSummarize } from './managers/selective-summarizer.js'
 export { SessionCache, saveSession, loadSession } from './managers/session-cache.js'
 export { StatsTracker } from './stats/tracker.js'
-export { countTokens, countMessageTokens, isTiktokenAvailable } from './core/tokenizer.js'
+export {
+  countTokens,
+  countMessageTokens,
+  countRequestTokens,
+  estimateTokensFast,
+  isTiktokenAvailable,
+  setActiveModel,
+  modelFamily,
+} from './core/tokenizer.js'
 export { runPipeline } from './core/pipeline.js'
+export { validateToolPairing } from './core/validate.js'
+export { ConversationCompressor, ConversationRegistry } from './core/prefix-stable.js'
+export {
+  resolvePricing,
+  inputPriceForModel,
+  costOfTokens,
+  costOfUsage,
+  PRICING_UPDATED_AT,
+} from './pricing/index.js'
+export type { ModelPricing, ApiUsage, BillingTier } from './pricing/index.js'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -101,6 +119,9 @@ export type {
   CorkAIOptions,
   PricingConfig,
   BudgetConfig,
+  SoftThrottleOptions,
+  RateLimitStatus,
+  MeasuredUsageStats,
   FullStats,
   RequestStats,
   SessionStats,

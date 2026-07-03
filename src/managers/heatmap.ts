@@ -8,6 +8,7 @@
  */
 
 import { countTokens } from '../core/tokenizer.js'
+import { hasToolBlocks } from '../core/validate.js'
 import type {
   CompressResult,
   ContentBlock,
@@ -226,6 +227,10 @@ export function compressWithHeatmap(
 
   const compressed = messages.map((msg, idx) => {
     if (idx >= compressUntil) return msg
+    // Never summarize messages carrying tool_use/tool_result blocks:
+    // replacing them with a text block orphans the paired block in the
+    // adjacent message and the API rejects the request (400).
+    if (hasToolBlocks(msg)) return msg
     const score = scores[idx]
     if (score.score >= effectiveThreshold) return msg
 

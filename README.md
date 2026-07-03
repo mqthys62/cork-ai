@@ -110,6 +110,25 @@ cork-ai hooks status    # check if active
 cork-ai hooks remove    # disable
 ```
 
+The hook compresses large file reads to signatures — but never at the model's expense. Four guardrails make sure compression helps instead of hurting:
+
+- **Explicit `offset`/`limit` reads are never compressed** — the model is targeting a precise zone.
+- **Re-reads are served raw** — if Claude re-reads a file it only saw compressed, it gets the full content (auto-whitelisted for the session), and the induced cost is *deducted* from the reported savings.
+- **The file the user is asking about is never compressed** — if your last message mentions `interceptor.ts`, its Read passes through untouched.
+- **Failed edits are detected** — a `PostToolUse` hook spots `Edit` calls that fail on files only seen compressed (the `old_string` came from signatures), whitelists the file, and reports the harm in `cork-ai gain`.
+
+### `cork-ai calibrate`
+
+Token counts and cost estimates are only as good as the tokenizer behind them. `calibrate` measures the **real** Claude token factors for your model via the free `count_tokens` API endpoint (code + English + French samples) and stores them in `~/.cork-ai/calibration.json` — every count in the library and the hook becomes model-exact:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+cork-ai calibrate                    # uses the auto-detected model
+cork-ai calibrate claude-sonnet-5    # or a specific one
+```
+
+Not using the API key path? `wrapClient` also **calibrates passively**: on every response it compares its local estimate to the real prompt tokens billed by the API and corrects the estimator automatically.
+
 ### `cork-ai init`
 
 If you have code that calls the Anthropic API directly, run this in your project:
@@ -227,6 +246,25 @@ curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/insta
 
 ---
 
+## cork-ai vs Anthropic's native context features
+
+The Anthropic API now ships server-side context management. cork-ai is designed to complement it, not compete with it — here is when to use what:
+
+| Need | Use | Why |
+|---|---|---|
+| Long conversations approaching the context window | **Native compaction** (`compact-2026-01-12` beta) | Server-side, model-aware summarization — better quality than any client-side heuristic |
+| Clearing stale tool results in agent loops | **Native context editing** (`clear_tool_uses_20250919`) | Server-side pruning, no client logic |
+| Re-sent history costing full price every turn | **Prompt caching** (`cache_control`) | Cache reads cost 0.1× — the single biggest cost lever |
+| Shrinking content **before it ever enters the context** (file reads, tool outputs) | **cork-ai** | The API can only manage tokens you already sent — cork-ai stops them from being sent at all |
+| Measuring what compression actually saves | **cork-ai** | Ground-truth accounting from `response.usage`, per model, per session |
+
+Two rules cork-ai follows to stay compatible with prompt caching:
+
+1. **Prefix stability** (default in `wrapClient`): compression decisions on old messages are frozen byte-identical across requests. Rewriting the prefix on every turn would invalidate the prompt cache and cost up to 8× more than not compressing at all.
+2. **Cache-aware accounting**: savings on already-frozen content are valued at the cache-read rate (0.1×), not the full input rate — no inflated numbers.
+
+---
+
 ## Library API (for developers building AI apps)
 
 If you're building your own application that calls the Anthropic API, you can use cork-ai as a library to compress your conversation history automatically.
@@ -261,6 +299,25 @@ const response = await client.messages.create({
   model: 'claude-sonnet-4-6',
   max_tokens: 4096,
   messages: conversationHistory,
+})
+
+// Ground truth from the API, not estimates:
+client.getMeasuredUsage()     // real input/output/cache tokens + real cost (USD)
+client.getRateLimitStatus()   // parsed anthropic-ratelimit-* headers
+```
+
+Options worth knowing:
+
+```typescript
+wrapClient(new Anthropic(), {
+  // Prefix-stable compression (default: true). Freezes compression decisions
+  // on old messages so the Anthropic prompt cache prefix stays byte-identical
+  // across requests. Disable only if you don't use prompt caching.
+  prefixStable: true,
+
+  // Delay (never degrade) requests when rate-limit quota runs low,
+  // instead of eating a 429.
+  softThrottle: { enabled: true, thresholdPct: 0.1, maxDelayMs: 5_000 },
 })
 ```
 

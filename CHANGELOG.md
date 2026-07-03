@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-03
+
+### Fixed
+
+- **La compression cassait le prompt cache Anthropic** — la pipeline re-scorait et réécrivait les anciens messages à chaque requête (seuils adaptatifs, fenêtres relatives). Le prompt caching étant un match de préfixe byte-exact, chaque requête payait l'historique à plein tarif (1×) au lieu du tarif cache-read (0,1×) — jusqu'à 8× plus cher que sans compression. `wrapClient` utilise désormais une **compression prefix-stable** (défaut ON, option `prefixStable: false`) : les messages qui sortent de la fenêtre récente reçoivent leur forme finale une seule fois, gelée byte-identique ensuite. Seule exception documentée : un franchissement de niveau de budget (none→L1→L2→all) recompresse le préfixe une fois (3 invalidations max par conversation).
+- **La heatmap pouvait produire des requêtes API invalides (400)** — un message assistant composé uniquement de blocs `tool_use` (texte vide → score ≈ recency) était résumé en bloc texte, orphelinant le `tool_result` du message suivant. La heatmap et le selective-summarizer ne touchent plus jamais aux messages porteurs de blocs `tool_use`/`tool_result`, et la pipeline valide l'appariement en sortie avec fallback sur les messages originaux.
+- **Deux tables de pricing divergentes** — le tracker utilisait $3/$15 « Sonnet 4 » codé en dur (obsolète) pendant que le CLI avait sa propre table. Le pricing vit désormais dans `src/pricing` (source unique) : les 4 paliers de facturation (input, output, cache-write 5 min/1 h, cache-read) par modèle, tarif de lancement Sonnet 5 dépendant de la date ($2/$10 jusqu'au 2026-08-31), et un test garde-fou qui échoue si la table a plus de 6 mois.
+- **Deux unités de comptage incompatibles additionnées dans stats.json** — le hook comptait en `chars/3.5` et la lib en tiktoken `cl100k_base` (le tokenizer d'OpenAI, qui sous-compte Claude de ~15-20 %). Les deux chemins partagent désormais le même module calibré par modèle.
+- **Le hook piégeait le modèle sans issue** — un fichier compressé en « signatures extracted » n'offrait aucun moyen de récupérer le contenu brut (le re-read repassait dans le hook). Désormais : un Read avec `offset`/`limit` explicite n'est jamais compressé ; un re-read du même fichier dans la même session est servi brut (auto-whitelist) et compté comme nuisance, son coût induit **déduit** des économies affichées.
+- **Deux sessions Claude Code simultanées se flushaient mutuellement** — le fichier live unique est remplacé par un fichier par `session_id` (`~/.cork-ai/live/`), plus de mini-sessions parasites.
+- **Moyennes de pourcentages non pondérées** — `report --projects`/`--daily` moyennaient des % par session (une session de 200 tokens pesait autant qu'une de 2M). Les moyennes sont désormais pondérées par tokens (Σsaved/Σoriginal).
+- La version du CLI affichait 0.2.0 alors que le paquet était en 0.3.0.
+- **`npm test` écrasait les vraies stats utilisateur** — les tests écrivaient dans le vrai `~/.cork-ai/` (dont `resetGlobalStats()` qui vidait `stats.json` à chaque run). Tout l'état persistant respecte désormais `CORK_AI_HOME`, et vitest isole les tests dans un répertoire temporaire.
+
+### Added
+
+- **Couche de mesure (vérité terrain)** — `wrapClient` enregistre `response.usage` après chaque requête : tokens input/output/cache-read/cache-write réels et **coût réel** calculé sur les 4 paliers au tarif du modèle de la réponse. Exposé via `client.getMeasuredUsage()`, persisté dans `stats.json` (`allTime.measured`), affiché par `cork-ai gain --all` (dont le taux de cache hit réel).
+- **`cork-ai calibrate [model]`** — mesure les facteurs de comptage réels via `POST /v1/messages/count_tokens` (gratuit, exact, par modèle) sur des échantillons code/anglais/français, et les persiste dans `~/.cork-ai/calibration.json`. Tous les comptages (lib + hook) deviennent exacts pour le modèle calibré.
+- **Comptabilité cache-aware** — les économies sur le contenu déjà gelé sont valorisées au tarif cache-read (0,1×), pas au tarif input : fini les chiffres gonflés.
+- **Calibration passive** — `wrapClient` compare à chaque réponse son estimation locale (`countRequestTokens`) au prompt réellement facturé (`input + cache_read + cache_creation`) et corrige automatiquement les facteurs de comptage par famille de modèle (dès 3 observations, sans clé API ni action manuelle ; `cork-ai calibrate` reste prioritaire car exact).
+- **Le hook ne compresse jamais le fichier dont l'utilisateur parle** — si le dernier vrai message user du transcript mentionne le nom du fichier lu, la lecture passe telle quelle (le modèle a presque toujours besoin du contenu réel).
+- **Détection des Edit échoués après compression** — nouveau hook `PostToolUse` sur `Edit`/`MultiEdit` : un Edit qui échoue sur un fichier vu uniquement compressé (le `old_string` venait des signatures) est compté (`editFailuresAfterCompression`), le fichier est auto-whitelisté pour la session, et la métrique apparaît dans `cork-ai gain`. `hooks install` upgrade automatiquement les installations existantes.
+- **Headers rate-limit** — l'interceptor lit `anthropic-ratelimit-*` via `withResponse()` et les expose par `client.getRateLimitStatus()`.
+- **Soft-throttle opt-in** (`softThrottle: { enabled: true }`) — retarde (jamais ne dégrade) les requêtes quand le quota restant passe sous un seuil, au lieu d'encaisser un 429.
+- **Détection de régression de cache** — en mode debug, warn si `cache_read_input_tokens` s'effondre entre deux requêtes (signe qu'un réécriture du préfixe casse le cache).
+- `countRequestTokens()` — comptage incluant system prompt et définitions de tools (souvent 5-15K tokens ignorés jusqu'ici).
+- Cache mémoïsé des comptes par message (la pipeline ré-encodait tout l'historique à chaque requête — O(n²) sur une session).
+- `validateToolPairing()` exporté, nouveaux types publics (`RateLimitStatus`, `MeasuredUsageStats`, `SoftThrottleOptions`, `ModelPricing`), et section README « cork-ai vs Anthropic's native context features ».
+- Le forecast (`report --forecast`) exclut le jour courant incomplet du calcul de moyenne quotidienne.
+- README (EN/FR/ES) : section « cork-ai vs les fonctionnalités natives d'Anthropic », garde-fous du hook, `cork-ai calibrate`, options `prefixStable`/`softThrottle` et méthodes de mesure documentées.
+
 ## [0.3.0] - 2026-07-02
 
 ### Fixed
