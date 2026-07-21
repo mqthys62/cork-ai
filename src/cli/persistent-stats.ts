@@ -279,7 +279,9 @@ function listLiveFiles(): string[] {
   const files: string[] = []
   try {
     for (const entry of fs.readdirSync(LIVE_DIR)) {
-      if (entry.endsWith('.json')) files.push(path.join(LIVE_DIR, entry))
+      // "reads-<sessionId>.json" tracks re-reads (see index.ts SessionReads) —
+      // a different shape, not a LiveSession; skip it here.
+      if (entry.endsWith('.json') && !entry.startsWith('reads-')) files.push(path.join(LIVE_DIR, entry))
     }
   } catch { /* no live dir yet */ }
   if (fs.existsSync(LIVE_SESSION_FILE)) files.push(LIVE_SESSION_FILE)
