@@ -60,7 +60,12 @@ const RULES: PricingRule[] = [
     periods: [{ until: '2026-08-31', pricing: mk(2.0, 10.0) }],
   },
   { pattern: /sonnet/i, base: mk(3.0, 15.0) },
+  // Opus 5 and later ("claude-opus-5", "claude-opus-6", …). Must come before
+  // the opus-4 rule: "opus-[5-9]" cannot match "opus-4-5" (the char after the
+  // first hyphen is "4"), so the two rules are disjoint.
+  { pattern: /opus-[5-9]/i, base: mk(5.0, 25.0) },
   { pattern: /opus-4-[5-9]/i, base: mk(5.0, 25.0) },
+  // Legacy Opus (3, 4.0, 4.1) — the only models still on $15/$75.
   { pattern: /opus/i, base: mk(15.0, 75.0) },
 ]
 

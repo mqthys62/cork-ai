@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-08-16
+
+### Fixed
+
+- **Opus 5 facturé au tarif legacy $15/$75 — économies surestimées ×3** — les règles de pricing sont évaluées dans l'ordre et `claude-opus-5` ne matchait pas `/opus-4-[5-9]/`, retombant sur la règle générique `/opus/` réservée aux Opus 3 / 4.0 / 4.1. Tout gain affiché sur une session Opus 5 valait donc $15/M au lieu de $5/M (600k tokens annoncés à $9.00 au lieu de $3.00). Nouvelle règle `/opus-[5-9]/` placée avant, disjointe de la règle Opus 4.x, plus deux tests de non-régression — la table ne couvrait que `opus-4-8` et `opus-4-1`, d'où le passage inaperçu. Les stats déjà écrites dans `stats.json` restent gonflées : le correctif ne rétroagit pas.
+- **`hooks install` ne réparait pas les installations en `cork-ai hook` nu** — la forme sans chemin absolu (antérieure à `resolveHookBinary()`) dépend du PATH hérité par le sous-process de hook de Claude Code, ce qui n'est pas garanti : dans certains contextes de lancement le hook échouait silencieusement (`cork-ai: not found`, erreur non bloquante). `ensureHookGroup()` migre désormais ces entrées vers le chemin absolu résolu au lieu de les considérer comme déjà installées.
+- La version affichée par le CLI était restée à 0.4.0 alors que le paquet était en 0.4.1.
+
+## [0.4.1] - 2026-07-21
+
+### Fixed
+
+- **`cork-ai gain` crashait sur des fichiers de suivi de re-read périmés** — `listLiveFiles()` ramassait tous les `*.json` de `~/.cork-ai/live/`, y compris les `reads-<sessionId>.json` (suivi des re-reads par session, structure entièrement différente). Parsé comme une `LiveSession`, un fichier oublié n'avait ni `startedAt` ni `requests` et faisait planter `gain` sur `undefined.toLocaleString()` au lieu d'être ignoré comme expiré.
+
 ## [0.4.0] - 2026-07-03
 
 ### Fixed
@@ -188,7 +202,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark in `benchmarks/cost-comparison.ts`
 - CI/CD GitHub Actions (Node 18/20/22 × Ubuntu/Windows/macOS)
 
-[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/mqthys62/cork-ai/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/mqthys62/cork-ai/compare/v0.4.0...v0.4.1
+[0.4.0]: https://github.com/mqthys62/cork-ai/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/mqthys62/cork-ai/compare/v0.2.3...v0.3.0
 [0.2.0]: https://github.com/mqthys62/cork-ai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/mqthys62/cork-ai/releases/tag/v0.1.0

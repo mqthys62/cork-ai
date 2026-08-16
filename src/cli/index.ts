@@ -51,7 +51,7 @@ import {
   saveCalibrationFactor,
 } from '../core/tokenizer.js'
 
-const VERSION = '0.4.0'
+const VERSION = '0.4.2'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
 const CORK_HOME = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 const CONFIG_FILE = path.join(CORK_HOME, 'config.json')
@@ -774,7 +774,7 @@ function isCorkCmd(command: string): boolean {
   return command.includes('cork-ai') && command.endsWith('hook')
 }
 
-/** Adds the cork-ai command to a hook event group if absent. Returns true if added. */
+/** Adds the cork-ai command to a hook event group if absent. Returns true if added or upgraded. */
 function ensureHookGroup(
   settings: ClaudeSettings,
   eventName: 'PreToolUse' | 'PostToolUse',
@@ -784,7 +784,23 @@ function ensureHookGroup(
   settings.hooks ??= {}
   settings.hooks[eventName] ??= []
   const groups = settings.hooks[eventName] as HookGroup[]
-  if (groups.some(g => g.hooks?.some(h => isCorkCmd(h.command)))) return false
+
+  for (const g of groups) {
+    const existing = g.hooks?.find(h => isCorkCmd(h.command))
+    if (existing) {
+      // Migrate a bare "cork-ai hook" fallback (pre-dates resolveHookBinary())
+      // to a resolved absolute path. The bare form depends on Claude Code's
+      // hook subprocess inheriting a shell PATH that includes the binary,
+      // which isn't guaranteed — it fails as a silent, non-blocking hook
+      // error ("cork-ai: not found") in some launch contexts.
+      if (existing.command === CORK_HOOK_FALLBACK && hookCmd !== CORK_HOOK_FALLBACK) {
+        existing.command = hookCmd
+        return true
+      }
+      return false
+    }
+  }
+
   const existingGroup = groups.find(g => g.matcher === matcher)
   if (existingGroup) {
     existingGroup.hooks.push({ type: 'command', command: hookCmd })

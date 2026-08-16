@@ -31,6 +31,18 @@ describe('resolvePricing', () => {
     expect(p.output).toBe(25)
   })
 
+  it('résout Opus 5 à $5/$25 (et pas au tarif legacy $15/$75)', () => {
+    const p = resolvePricing('claude-opus-5')
+    expect(p.input).toBe(5)
+    expect(p.output).toBe(25)
+  })
+
+  it('résout Opus 4.5 à $5/$25 (la règle opus-5 ne le capture pas)', () => {
+    const p = resolvePricing('claude-opus-4-5')
+    expect(p.input).toBe(5)
+    expect(p.output).toBe(25)
+  })
+
   it('résout Opus legacy (4.1) à $15/$75', () => {
     const p = resolvePricing('claude-opus-4-1')
     expect(p.input).toBe(15)
