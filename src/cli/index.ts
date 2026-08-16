@@ -42,9 +42,12 @@ import {
   STATS_FILE,
   LIVE_DIR,
   type SessionRecord,
+  type ModelUsage,
 } from './persistent-stats.js'
-import { inputPriceForModel } from '../pricing/index.js'
-import { scanAllTranscripts } from './transcript-usage.js'
+import { inputPriceForModel, costOfAvoidedTokens } from '../pricing/index.js'
+import { scanAllTranscripts, sessionAmplification } from './transcript-usage.js'
+import { eligibility, type CompressionKind } from './file-eligibility.js'
+import { isSkipped, markSkipped, skippedCount } from './skip-list.js'
 import {
   CALIBRATION_FILE,
   countTokensRaw,
@@ -53,7 +56,7 @@ import {
   saveCalibrationFactor,
 } from '../core/tokenizer.js'
 
-const VERSION = '0.5.0'
+const VERSION = '0.6.0'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
 const CORK_HOME = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 const CONFIG_FILE = path.join(CORK_HOME, 'config.json')
@@ -236,6 +239,107 @@ function divider(char = '─', len = 66): string { return char.repeat(len) }
  * session at that session's own model price — sessions are effectively
  * single-model, which keeps this faithful to what was originally deducted.
  */
+interface LifetimeSavings {
+  /** What cork-ai reported before: every saved token valued once at 1× input. */
+  firstPass: number
+  /** Cache write + one cache read per subsequent turn, per the transcripts. */
+  lifetime: number
+  /** Re-read cost, valued on the same lifetime basis (raw tokens re-injected). */
+  penalty: number
+  /** Sessions whose transcript was found, over sessions considered. */
+  measured: number
+  total: number
+  /** Median amplification across measured sessions — the headline multiplier. */
+  medianAmplification: number
+  compactions: number
+}
+
+/**
+ * Values saved tokens over their life in context rather than on first send.
+ *
+ * The hook cannot do this at write time: when it fires, the session is still
+ * running and the number of turns that will re-read the context is unknowable.
+ * The transcript knows after the fact, and `SessionRecord.sessionId` is the
+ * transcript's filename, so the two join with no stored schema change.
+ *
+ * Sessions with no transcript fall back to the first-pass value and are
+ * excluded from `measured` so partial coverage stays visible.
+ */
+function lifetimeSavings(
+  sessions: Array<{ sessionId: string; byModel?: Record<string, ModelUsage>; reReadTokensServed?: number }>,
+): LifetimeSavings {
+  const out: LifetimeSavings = {
+    firstPass: 0,
+    lifetime: 0,
+    penalty: 0,
+    measured: 0,
+    total: 0,
+    medianAmplification: 0,
+    compactions: 0,
+  }
+  // cork-ai flushes a SessionRecord per activity window, so one Claude Code
+  // session can produce several records. Amplification and compaction counts
+  // are properties of the transcript, so they are gathered once per session id
+  // — counting a 1000-turn session nine times would drag the median with it.
+  const ampBySession = new Map<string, number>()
+  const cache = new Map<string, ReturnType<typeof sessionAmplification>>()
+  const seenSessions = new Set<string>()
+
+  for (const session of sessions) {
+    const models = Object.entries(session.byModel ?? {})
+    if (models.length === 0) continue
+    seenSessions.add(session.sessionId)
+
+    let amp = cache.get(session.sessionId)
+    if (!amp) {
+      amp = sessionAmplification(session.sessionId)
+      cache.set(session.sessionId, amp)
+      if (amp.found && amp.cacheWriteTokens > 0) {
+        out.compactions += amp.compactions
+        ampBySession.set(session.sessionId, amp.amplification)
+      }
+    }
+    // No transcript → amplification 0, which collapses costOfAvoidedTokens()
+    // to the cache-write tier: close to the old 1× figure, never inflated.
+    const factor = amp.found ? amp.amplification : 0
+
+    let saved = 0
+    let weightedPrice = 0
+    let totalTokens = 0
+    for (const [, usage] of models) totalTokens += usage.savedTokens
+
+    for (const [model, usage] of models) {
+      out.firstPass += (usage.savedTokens / 1_000_000) * inputPriceForModel(model)
+      saved += costOfAvoidedTokens(usage.savedTokens, model, factor)
+      if (totalTokens > 0) {
+        weightedPrice += inputPriceForModel(model) * (usage.savedTokens / totalTokens)
+      }
+    }
+    out.lifetime += saved
+
+    // Symmetric treatment: a re-read puts raw content back into the context and
+    // is re-billed every subsequent turn exactly like anything else. Valuing it
+    // at 1× while savings run at the lifetime rate would bias the net in
+    // cork-ai's favour.
+    const reRead = session.reReadTokensServed ?? 0
+    if (reRead > 0 && weightedPrice > 0) {
+      const model = models.sort((a, b) => b[1].savedTokens - a[1].savedTokens)[0][0]
+      out.penalty += costOfAvoidedTokens(reRead, model, factor)
+    }
+  }
+
+  out.measured = ampBySession.size
+  out.total = seenSessions.size
+
+  const sorted = [...ampBySession.values()].sort((a, b) => a - b)
+  if (sorted.length > 0) {
+    const mid = Math.floor(sorted.length / 2)
+    out.medianAmplification =
+      sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
+  }
+  return out
+}
+
 function reReadPenalty(stats: { sessions: SessionRecord[] } | null | undefined): number {
   if (!stats) return 0
   let total = 0
@@ -255,6 +359,7 @@ const C = {
   green:  (s: string) => `\x1b[32m${s}\x1b[0m`,
   cyan:   (s: string) => `\x1b[36m${s}\x1b[0m`,
   yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
+  red:    (s: string) => `\x1b[31m${s}\x1b[0m`,
   blue:   (s: string) => `\x1b[34m${s}\x1b[0m`,
   bold:   (s: string) => `\x1b[1m${s}\x1b[0m`,
   dim:    (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -440,16 +545,31 @@ function showAllTime(): void {
   console.log(`  ${C.bold('Avg / session')}     ${C.green(fmt(Math.round(avgPerSession)))} tokens`)
   console.log()
 
-  // Cost saved, split so the re-read penalty is visible instead of silently
-  // folded into a single net figure.
-  const penalty = reReadPenalty(stats)
+  // Cost saved. A token kept out of the context is not saved once — it avoids
+  // a cache write plus one cache read on every later turn. Both bounds are
+  // shown: the first-pass floor keeps the headline auditable.
+  const sessionsForLifetime = [...(stats?.sessions ?? []), ...(live ? [live] : [])]
+  const life = lifetimeSavings(sessionsForLifetime)
+  const penalty = life.measured > 0 ? life.penalty : reReadPenalty(stats)
+
   console.log(`  ${C.bold('Cost saved')}`)
-  if (penalty > 0) {
-    console.log(`    ${C.dim('Gross')}              ${C.green(fmtUsdLong(totalCost + penalty))} USD`)
-    console.log(`    ${C.dim('Re-read penalty')}    ${C.yellow(`-${fmtUsdLong(penalty)}`)} USD ${C.dim(`(${fmt(stats?.allTime.reReads ?? 0)} re-reads · ${fmtTokens(stats?.allTime.reReadTokensServed ?? 0)} tokens served raw)`)}`)
-    console.log(`    ${C.bold('Net')}                ${C.green(fmtUsdLong(totalCost))} USD`)
+  if (life.measured > 0) {
+    console.log(`    ${C.dim('First pass only')}      ${C.dim(`${fmtUsdLong(life.firstPass)} USD`)}`)
+    console.log(`    ${C.dim('Lifetime in context')}  ${C.green(fmtUsdLong(life.lifetime))} USD`)
+    console.log(`    ${C.dim('Re-read penalty')}      ${C.yellow(`-${fmtUsdLong(penalty)}`)} USD ${C.dim(`(${fmt(stats?.allTime.reReads ?? 0)} re-reads · ${fmtTokens(stats?.allTime.reReadTokensServed ?? 0)} raw)`)}`)
+    console.log(`    ${C.bold('Net')}                  ${C.green(fmtUsdLong(life.lifetime - penalty))} USD`)
+    console.log(
+      `    ${C.dim('Amplification')}        ${C.cyan(`${life.medianAmplification.toFixed(1)}x`)} ` +
+      `${C.dim(`median cache reads per token written · ${life.measured}/${life.total} sessions measured` +
+        (life.compactions > 0 ? ` · ${life.compactions} compactions` : ''))}`,
+    )
+  } else if (penalty > 0) {
+    console.log(`    ${C.dim('Gross')}                ${C.green(fmtUsdLong(totalCost + penalty))} USD`)
+    console.log(`    ${C.dim('Re-read penalty')}      ${C.yellow(`-${fmtUsdLong(penalty)}`)} USD`)
+    console.log(`    ${C.bold('Net')}                  ${C.green(fmtUsdLong(totalCost))} USD`)
+    console.log(`    ${C.dim('No transcripts found — first-pass estimate only')}`)
   } else {
-    console.log(`    ${C.bold('Net')}                ${C.green(fmtUsdLong(totalCost))} USD`)
+    console.log(`    ${C.bold('Net')}                  ${C.green(fmtUsdLong(totalCost))} USD`)
   }
 
   // Per-model breakdown — byModel[].costSaved has always been recorded but was
@@ -457,7 +577,7 @@ function showAllTime(): void {
   const models = getStatsByModel(stats, live)
   if (models.length > 0) {
     console.log()
-    console.log(`  ${C.bold('By model')}`)
+    console.log(`  ${C.bold('By model')} ${C.dim('(gross, before the re-read penalty)')}`)
     for (const m of models) {
       console.log(
         `    ${C.cyan(m.model.padEnd(20))} ${C.green(fmtTokens(m.savedTokens).padStart(8))} saved  ` +
@@ -518,14 +638,32 @@ function showAllTime(): void {
       }
     }
     if (spend.costUSD > 0) {
-      const ratio = (totalCost / spend.costUSD) * 100
+      const net = life.measured > 0 ? life.lifetime - penalty : totalCost
+      const ratio = (net / spend.costUSD) * 100
       console.log(`    ${C.dim('Estimated savings vs spend')}  ${C.green(fmtPct(ratio))} ${C.dim('— cork-ai avoided cost as a share of what you paid')}`)
     }
   }
 
-  if (stats?.allTime.editFailuresAfterCompression) {
-    console.log(`  ${C.yellow('Edit failures')}      ${fmt(stats.allTime.editFailuresAfterCompression)} on compressed-only files (auto-whitelisted)`)
+  // Health. A re-read means the file was sent twice — compressed, then raw —
+  // which is strictly worse than never compressing it. This ratio, not the
+  // savings percentage, is what says whether cork-ai is helping.
+  const reReads = stats?.allTime.reReads ?? 0
+  const learned = skippedCount()
+  if (totalRequests > 0 && (reReads > 0 || learned > 0)) {
+    const rate = (reReads / totalRequests) * 100
+    const colour = rate > 30 ? C.red : rate > 15 ? C.yellow : C.green
+    console.log()
+    console.log(`  ${C.bold('Health')}`)
+    console.log(
+      `    ${C.dim('Re-read rate')}         ${colour(fmtPct(rate))} ` +
+      `${C.dim(`(${fmt(reReads)} of ${fmt(totalRequests)} compressions sent twice)`)}`,
+    )
+    if (stats?.allTime.editFailuresAfterCompression) {
+      console.log(`    ${C.dim('Edit failures')}        ${C.yellow(fmt(stats.allTime.editFailuresAfterCompression))} ${C.dim('on compressed-only files')}`)
+    }
+    console.log(`    ${C.dim('Learned skips')}        ${fmt(learned)} ${C.dim('files served raw from now on')}`)
   }
+
   console.log(divider())
   console.log()
 }
@@ -1052,12 +1190,13 @@ function saveSessionReads(sessionId: string, reads: SessionReads): void {
   } catch { /* non-critical */ }
 }
 
-const CODE_EXTS = new Set([
+/** Languages whose method bodies open with a brace on the signature line. */
+const BRACE_METHOD_EXTS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
-  '.py', '.go', '.rs', '.java', '.cs', '.cpp', '.c', '.h',
-  '.rb', '.php', '.swift', '.kt', '.scala', '.r',
+  '.java', '.cs', '.cpp', '.c', '.h', '.hpp',
+  '.swift', '.kt', '.scala', '.php', '.go', '.rs', '.dart',
+  '.vue', '.svelte', '.zig',
 ])
-
 
 function extractCodeSignatures(content: string, filePath: string): string {
   const ext = path.extname(filePath).toLowerCase()
@@ -1107,7 +1246,13 @@ function extractCodeSignatures(content: string, filePath: string): string {
       continue
     }
 
-    if ((ext === '.ts' || ext === '.js') && methodRe.test(line)) {
+    // Indented `name(...)  {` is a method worth keeping as a signature — but
+    // only where a brace opens the body. In Python, Ruby or Lua the same shape
+    // is usually a call, and the `{`-stripping replace below would be a no-op
+    // that keeps a body line for nothing. Previously this was limited to
+    // .ts/.js, so .tsx and .jsx lost every method despite being declared
+    // compressible (62% re-read rate on .tsx).
+    if (BRACE_METHOD_EXTS.has(ext) && methodRe.test(line)) {
       kept.push(line.replace(/\{.*$/, '{ // ...'))
       lastWasSignature = true
       continue
@@ -1148,12 +1293,21 @@ function compressText(content: string): string {
   return `${head.join('\n')}\n\n[... ${omitted} lines omitted — use Read with offset to see more ...]\n\n${tail.join('\n')}`
 }
 
-type CompressType = 'code' | 'json' | 'text'
-
-function compressContent(content: string, filePath: string): { result: string; compressType: CompressType } {
-  const ext = path.extname(filePath).toLowerCase()
-  if (CODE_EXTS.has(ext)) return { result: extractCodeSignatures(content, filePath), compressType: 'code' }
-  if (ext === '.json') return { result: compressJson(content), compressType: 'json' }
+/**
+ * Applies the strategy `eligibility()` already picked.
+ *
+ * The dispatch lives in `file-eligibility.ts` rather than here: it used to end
+ * in a `return compressText(...)` catch-all, which meant every unrecognised
+ * type — binaries included — got head/tail truncated. Deciding and compressing
+ * are now separate steps, and "we don't know" is an answer.
+ */
+function compressContent(
+  content: string,
+  filePath: string,
+  kind: CompressionKind,
+): { result: string; compressType: CompressionKind } {
+  if (kind === 'code') return { result: extractCodeSignatures(content, filePath), compressType: 'code' }
+  if (kind === 'json') return { result: compressJson(content), compressType: 'json' }
   return { result: compressText(content), compressType: 'text' }
 }
 
@@ -1181,9 +1335,11 @@ function handlePostToolUseEdit(event: Record<string, unknown>): void {
   if (!EDIT_FAILURE_MARKERS.test(respText)) return
 
   // Whitelist: the next Read of this file is served raw so the retry can work
-  // from the real content.
+  // from the real content — permanently, not just for this session. A failed
+  // Edit is the strongest possible evidence that signatures were not enough.
   reads.files[filePath] += 1
   saveSessionReads(sessionId, reads)
+  markSkipped(filePath, 'edit-failure')
 
   try {
     accumulateInSession({
@@ -1234,9 +1390,20 @@ async function runHook(): Promise<void> {
     process.exit(0)
   }
 
-  let content: string
-  try { content = fs.readFileSync(filePath, 'utf-8') } catch { process.exit(0) }
+  // A file that already proved it needs its real content is served raw for
+  // good — the lesson outlives the session that learned it.
+  if (isSkipped(filePath)) process.exit(0)
 
+  // Read bytes, not a utf-8 string. `readFileSync(png, 'utf-8')` does not
+  // throw: it returns mojibake that passes every downstream check, which is
+  // how images ended up being "compressed" into binary garbage.
+  let buf: Buffer
+  try { buf = fs.readFileSync(filePath) } catch { process.exit(0) }
+
+  const verdict = eligibility(filePath, buf)
+  if (!verdict.compress) process.exit(0)
+
+  const content = buf.toString('utf-8')
   const lines = content.split('\n')
   const slice = lines.slice(0, 2000).join('\n')
 
@@ -1252,6 +1419,9 @@ async function runHook(): Promise<void> {
   if (reads && reads.files[filePath]) {
     reads.files[filePath] += 1
     saveSessionReads(sessionId, reads)
+    // Remember it beyond this session so the round-trip is paid once, not once
+    // per session forever.
+    markSkipped(filePath, 're-read')
     try {
       const cfg = loadConfig()
       const detectedModel =
@@ -1281,7 +1451,7 @@ async function runHook(): Promise<void> {
     process.exit(0)
   }
 
-  const { result: compressed, compressType } = compressContent(slice, filePath)
+  const { result: compressed, compressType } = compressContent(slice, filePath, verdict.kind)
   const compressedTokens = estimateTokens(compressed)
 
   if (compressedTokens >= originalTokens * 0.85) {

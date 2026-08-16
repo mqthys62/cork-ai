@@ -11,6 +11,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { MeasuredUsageStats } from '../types/index.js'
+import { inputPriceForModel } from '../pricing/index.js'
 
 // CORK_AI_HOME overrides the data directory (tests isolate through it —
 // without it, every `npm test` run would clobber the user's real stats).
@@ -113,13 +114,71 @@ function ensureDir(): void {
   fs.mkdirSync(GLOBAL_DIR, { recursive: true })
 }
 
+export const STATS_VERSION = '2'
+
+/**
+ * v1 → v2: reprice stored savings with the corrected pricing table.
+ *
+ * Up to v0.4.1 `claude-opus-5` fell through to the legacy `/opus/` rule and was
+ * billed at $15/$75 instead of $5/$25, so every cost written during an Opus 5
+ * session is 3× too high. Token counts were never affected — only the money —
+ * so the repair recomputes cost from the stored `savedTokens` per model and
+ * leaves every token figure untouched.
+ *
+ * The re-read penalty was folded into the stored net at the then-current model
+ * price, and only its token volume survives. It is re-deducted at the
+ * savedTokens-weighted average input price across the models in scope, which
+ * is exact for the single-model case and close enough for mixed history.
+ *
+ * Returns true when the file was migrated (caller persists it).
+ */
+function migrateStats(stats: GlobalStats): boolean {
+  if (stats.version === STATS_VERSION) return false
+
+  try {
+    fs.copyFileSync(STATS_FILE, `${STATS_FILE}.v${stats.version}.bak`)
+  } catch { /* backup is best-effort; never block the migration on it */ }
+
+  const repriceScope = (
+    byModel: Record<string, ModelUsage> | undefined,
+    reReadTokens: number,
+  ): number => {
+    let gross = 0
+    let weightedPrice = 0
+    let totalSaved = 0
+    for (const usage of Object.values(byModel ?? {})) {
+      totalSaved += usage.savedTokens
+    }
+    for (const [model, usage] of Object.entries(byModel ?? {})) {
+      const price = inputPriceForModel(model)
+      usage.costSaved = (usage.savedTokens / 1_000_000) * price
+      gross += usage.costSaved
+      if (totalSaved > 0) weightedPrice += price * (usage.savedTokens / totalSaved)
+    }
+    return gross - (reReadTokens / 1_000_000) * weightedPrice
+  }
+
+  for (const session of stats.sessions) {
+    session.estimatedCostSaved = repriceScope(session.byModel, session.reReadTokensServed ?? 0)
+  }
+  stats.allTime.estimatedCostSaved = repriceScope(
+    stats.allTime.byModel,
+    stats.allTime.reReadTokensServed ?? 0,
+  )
+
+  stats.version = STATS_VERSION
+  return true
+}
+
 function loadStats(): GlobalStats {
   try {
     const data = fs.readFileSync(STATS_FILE, 'utf-8')
-    return JSON.parse(data) as GlobalStats
+    const stats = JSON.parse(data) as GlobalStats
+    if (migrateStats(stats)) saveStats(stats)
+    return stats
   } catch {
     return {
-      version: '1',
+      version: STATS_VERSION,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       allTime: {
@@ -217,7 +276,7 @@ export function readGlobalStats(): GlobalStats | null {
 export function resetGlobalStats(): void {
   ensureDir()
   const fresh: GlobalStats = {
-    version: '1',
+    version: STATS_VERSION,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     allTime: {

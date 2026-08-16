@@ -59,6 +59,7 @@ import {
   recordSession,
   readGlobalStats,
   resetGlobalStats,
+  STATS_VERSION,
 } from '../../src/cli/persistent-stats.js'
 
 // ─── getStatsByProject ────────────────────────────────────────────────────────
@@ -277,7 +278,7 @@ describe('recordSession + readGlobalStats + resetGlobalStats', () => {
     expect(stats).not.toBeNull()
     expect(stats!.sessions).toHaveLength(0)
     expect(stats!.allTime.totalSavedTokens).toBe(0)
-    expect(stats!.version).toBe('1')
+    expect(stats!.version).toBe(STATS_VERSION)
   })
 
   it('recordSession ajoute une session et readGlobalStats la retrouve', () => {

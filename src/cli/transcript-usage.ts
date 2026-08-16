@@ -27,7 +27,17 @@ import os from 'os'
 import path from 'path'
 import { costOfUsage, type ApiUsage } from '../pricing/index.js'
 
-const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects')
+/**
+ * Root of Claude Code's transcripts.
+ *
+ * Resolved per call, not once at import: CLAUDE_PROJECTS_DIR lets tests point
+ * at a fixture directory instead of the developer's real conversation history,
+ * and a module-level constant would be frozen before a test could set it.
+ * Claude Code itself does not read this variable.
+ */
+function projectsDir(): string {
+  return process.env.CLAUDE_PROJECTS_DIR ?? path.join(os.homedir(), '.claude', 'projects')
+}
 
 export interface TranscriptUsage {
   /** Unique assistant messages counted (post-deduplication). */
@@ -132,6 +142,113 @@ export function scanTranscript(transcriptPath: string): TranscriptUsage {
   return acc
 }
 
+export interface SessionAmplification {
+  /** Assistant turns on the main thread (subagent sidechains excluded). */
+  turns: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  /** Cache reads per token written — how many times context gets re-billed. */
+  amplification: number
+  /** Context segments; > 1 means the conversation was compacted mid-session. */
+  compactions: number
+  /** false when no transcript exists for this session id. */
+  found: boolean
+}
+
+function emptyAmplification(): SessionAmplification {
+  return {
+    turns: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    amplification: 0,
+    compactions: 0,
+    found: false,
+  }
+}
+
+/** Locates `<sessionId>.jsonl` across every project directory. */
+function findTranscript(sessionId: string): string | undefined {
+  let projects: string[]
+  try {
+    projects = fs.readdirSync(projectsDir())
+  } catch {
+    return undefined
+  }
+  for (const project of projects) {
+    const candidate = path.join(projectsDir(), project, `${sessionId}.jsonl`)
+    if (fs.existsSync(candidate)) return candidate
+  }
+  return undefined
+}
+
+/**
+ * How many times this session re-billed each token it put into context.
+ *
+ * cork-ai's saved-token figures are worth `cacheWrite + amplification ×
+ * cacheRead` per token (see `costOfAvoidedTokens()`), and only the transcript
+ * knows the multiplier — it depends on how long the session ran after each
+ * file was read.
+ *
+ * Three exclusions matter:
+ *   - Sidechain (subagent) turns run their own context and never re-read the
+ *     main thread, so counting them would inflate the ratio.
+ *   - Duplicate stream lines are deduplicated on `message.id`, as elsewhere.
+ *   - Turns after a `compact_boundary` are dropped. Compaction replaces the
+ *     raw history with a summary, so tokens cork-ai kept out were not being
+ *     re-read past that point either — counting those turns would credit
+ *     cork-ai for savings that had already evaporated.
+ */
+export function sessionAmplification(sessionId: string): SessionAmplification {
+  const file = findTranscript(sessionId)
+  if (!file) return emptyAmplification()
+
+  let raw: string
+  try {
+    raw = fs.readFileSync(file, 'utf-8')
+  } catch {
+    return emptyAmplification()
+  }
+
+  const acc = emptyAmplification()
+  acc.found = true
+  const seen = new Set<string>()
+  let compacted = false
+
+  for (const line of raw.split('\n')) {
+    if (!line) continue
+
+    let entry: TranscriptLine & { subtype?: string; isCompactSummary?: boolean }
+    try {
+      entry = JSON.parse(line)
+    } catch {
+      continue
+    }
+
+    if (entry.subtype === 'compact_boundary' || entry.isCompactSummary) {
+      // Count each boundary once — Claude Code writes both a system
+      // `compact_boundary` and a user `isCompactSummary` entry per compaction.
+      if (entry.subtype === 'compact_boundary') acc.compactions += 1
+      compacted = true
+      continue
+    }
+    if (compacted) continue
+
+    if (entry.type !== 'assistant' || entry.isSidechain) continue
+    const usage = entry.message?.usage
+    const id = entry.message?.id
+    if (!usage || !id || seen.has(id)) continue
+    seen.add(id)
+
+    acc.turns += 1
+    acc.cacheReadTokens += usage.cache_read_input_tokens ?? 0
+    acc.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0
+  }
+
+  acc.amplification =
+    acc.cacheWriteTokens > 0 ? acc.cacheReadTokens / acc.cacheWriteTokens : 0
+  return acc
+}
+
 /**
  * Real usage across every Claude Code transcript on this machine.
  *
@@ -145,7 +262,7 @@ export function scanAllTranscripts(since?: Date): TranscriptUsage {
 
   let projects: string[]
   try {
-    projects = fs.readdirSync(PROJECTS_DIR)
+    projects = fs.readdirSync(projectsDir())
   } catch {
     return acc // no Claude Code transcripts on this machine
   }
@@ -153,7 +270,7 @@ export function scanAllTranscripts(since?: Date): TranscriptUsage {
   const cutoff = since?.getTime()
 
   for (const project of projects) {
-    const dir = path.join(PROJECTS_DIR, project)
+    const dir = path.join(projectsDir(), project)
     let entries: string[]
     try {
       entries = fs.readdirSync(dir)

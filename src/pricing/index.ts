@@ -110,6 +110,36 @@ export function costOfTokens(
   return (tokens / 1_000_000) * pricing[tier]
 }
 
+/**
+ * Cost avoided by tokens that never entered the context, over their whole life.
+ *
+ * A token valued at 1× the input price is priced as if the model read it once.
+ * That is not how an agent loop bills: a token entering Claude Code's context
+ * is paid once as a cache write (1.25× at the 5-minute TTL, 2× at the 1-hour
+ * TTL) and then again as a cache read (0.1×) on *every* subsequent turn.
+ * Keeping it out avoids the whole trail.
+ *
+ * @param amplification - Cache reads per token written, measured from the
+ *   session's own transcript (`sessionAmplification()` in
+ *   `src/cli/transcript-usage.ts`). 0 collapses this to the first-pass cost.
+ *
+ * This is an upper bound: it assumes the tokens would have stayed in context
+ * until the session ended. Always report it next to the first-pass floor
+ * (`costOfTokens(tokens, 'input', …)`) rather than on its own.
+ */
+export function costOfAvoidedTokens(
+  tokens: number,
+  modelId: string | undefined,
+  amplification: number,
+  ttl: '5m' | '1h' = '5m',
+  date?: Date,
+): number {
+  const p = resolvePricing(modelId, date)
+  const write = ttl === '1h' ? p.cacheWrite1h : p.cacheWrite5m
+  const reads = Math.max(0, amplification) * p.cacheRead
+  return (tokens / 1_000_000) * (write + reads)
+}
+
 /** Shape of the `usage` object returned by the Anthropic API. */
 export interface ApiUsage {
   input_tokens: number

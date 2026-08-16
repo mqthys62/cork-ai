@@ -2,8 +2,8 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { scanTranscript } from '../../src/cli/transcript-usage.js'
-import { costOfUsage } from '../../src/pricing/index.js'
+import { scanTranscript, sessionAmplification } from '../../src/cli/transcript-usage.js'
+import { costOfUsage, costOfAvoidedTokens } from '../../src/pricing/index.js'
 
 let dir: string
 let file: string
@@ -122,6 +122,99 @@ describe('scanTranscript', () => {
     const usage = scanTranscript(path.join(dir, 'nope.jsonl'))
     expect(usage.messages).toBe(0)
     expect(usage.costUSD).toBe(0)
+  })
+})
+
+describe('sessionAmplification', () => {
+  // sessionAmplification() résout <sessionId>.jsonl sous CLAUDE_PROJECTS_DIR.
+  let projects: string
+  let previous: string | undefined
+
+  function writeSession(sessionId: string, lines: string[]): void {
+    const project = path.join(projects, 'proj')
+    fs.mkdirSync(project, { recursive: true })
+    fs.writeFileSync(path.join(project, `${sessionId}.jsonl`), lines.join('\n'), 'utf-8')
+  }
+
+  beforeEach(() => {
+    projects = fs.mkdtempSync(path.join(os.tmpdir(), 'cork-projects-'))
+    previous = process.env.CLAUDE_PROJECTS_DIR
+    process.env.CLAUDE_PROJECTS_DIR = projects
+  })
+
+  afterEach(() => {
+    if (previous === undefined) delete process.env.CLAUDE_PROJECTS_DIR
+    else process.env.CLAUDE_PROJECTS_DIR = previous
+    fs.rmSync(projects, { recursive: true, force: true })
+  })
+
+  it('calcule les lectures de cache par token écrit', () => {
+    writeSession('sess-a', [
+      assistantTurn({ id: 'm1', cacheWrite5m: 1000, cacheRead: 0 }),
+      assistantTurn({ id: 'm2', cacheRead: 1000 }),
+      assistantTurn({ id: 'm3', cacheRead: 1000 }),
+      assistantTurn({ id: 'm4', cacheRead: 1000 }),
+    ])
+
+    const amp = sessionAmplification('sess-a')
+    expect(amp.found).toBe(true)
+    expect(amp.turns).toBe(4)
+    expect(amp.cacheWriteTokens).toBe(1000)
+    expect(amp.cacheReadTokens).toBe(3000)
+    expect(amp.amplification).toBeCloseTo(3)
+  })
+
+  it('exclut les tours de sous-agents — ils ne relisent pas le contexte principal', () => {
+    writeSession('sess-b', [
+      assistantTurn({ id: 'm1', cacheWrite5m: 1000 }),
+      assistantTurn({ id: 'm2', cacheRead: 1000 }),
+      assistantTurn({ id: 'm3', cacheRead: 50_000, sidechain: true }),
+    ])
+
+    const amp = sessionAmplification('sess-b')
+    expect(amp.turns).toBe(2)
+    expect(amp.amplification).toBeCloseTo(1)
+  })
+
+  it("s'arrête à la frontière de compaction", () => {
+    writeSession('sess-c', [
+      assistantTurn({ id: 'm1', cacheWrite5m: 1000 }),
+      assistantTurn({ id: 'm2', cacheRead: 1000 }),
+      line({ type: 'system', subtype: 'compact_boundary', compactMetadata: {} }),
+      assistantTurn({ id: 'm3', cacheRead: 99_000 }),
+    ])
+
+    const amp = sessionAmplification('sess-c')
+    expect(amp.compactions).toBe(1)
+    expect(amp.turns).toBe(2)
+    expect(amp.amplification).toBeCloseTo(1)
+  })
+
+  it('signale found:false quand aucun transcript ne correspond', () => {
+    const amp = sessionAmplification('inconnue')
+    expect(amp.found).toBe(false)
+    expect(amp.amplification).toBe(0)
+  })
+})
+
+describe('costOfAvoidedTokens', () => {
+  it('facture une écriture de cache plus une lecture par tour suivant', () => {
+    // Opus 5 : input $5/M → write 5m $6.25/M, read $0.50/M.
+    // 1M tokens évités avec 10 relectures : 6.25 + 10 × 0.50 = $11.25
+    expect(costOfAvoidedTokens(1_000_000, 'claude-opus-5', 10)).toBeCloseTo(11.25)
+  })
+
+  it('utilise le tarif 1h quand le TTL est 1h', () => {
+    // write 1h = $10/M, + 10 × 0.50 = $15
+    expect(costOfAvoidedTokens(1_000_000, 'claude-opus-5', 10, '1h')).toBeCloseTo(15)
+  })
+
+  it("retombe sur le coût d'écriture seul quand l'amplification est nulle", () => {
+    expect(costOfAvoidedTokens(1_000_000, 'claude-opus-5', 0)).toBeCloseTo(6.25)
+  })
+
+  it('ignore une amplification négative', () => {
+    expect(costOfAvoidedTokens(1_000_000, 'claude-opus-5', -5)).toBeCloseTo(6.25)
   })
 })
 

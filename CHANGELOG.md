@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-08-16
+
+### Fixed
+
+- **Le hook détruisait toutes les lectures d'images** — `fs.readFileSync(png, 'utf-8')` ne lève pas d'erreur : il renvoie du mojibake. Un PNG de 3,5 Mo revenait sous forme de ~12 700 « lignes » de garbage binaire, était tronqué tête/queue, puis renvoyé au modèle via `decision: 'block'` **à la place de l'image**. La vision de Claude était supprimée silencieusement à chaque lecture d'image. Aucune garde binaire n'existait : ni détection de null-byte, ni liste d'extensions. Mesuré sur un historique réel : **60 fichiers binaires interceptés, 25,7 Mo**, dont des PNG de 3,7 Mo, avec 76 % de re-lecture sur `.png`. Le hook lit désormais des `Buffer` et passe par `eligibility()` (nouveau `src/cli/file-eligibility.ts`) : liste d'extensions binaires, plus un reniflage de contenu (NUL, densité de caractères de contrôle C0) pour les fichiers dont l'extension ment.
+- **Les économies annoncées étaient très majoritairement fictives** — un PNG de 3,5 Mo comptait ~1M tokens dans l'heuristique du hook, alors que l'API l'aurait facturé ~1 600 tokens vision. Sur l'historique de référence, les binaires représentaient à eux seuls ~4,46M de tokens « économisés » contre 4,44M annoncés au total. Le correctif ci-dessus supprime la source ; les `stats.json` antérieurs restent pollués et ne peuvent pas être corrigés rétroactivement (l'attribution par fichier n'est pas stockée) — `cork-ai reset` donne une base propre.
+- **La leçon des re-lectures mourait avec la session** — la whitelist vivait dans le fichier de reads indexé par `session_id`, donc un fichier re-lu en session A était re-compressé en session B, indéfiniment. Taux de re-lecture mesuré : **54 % des fichiers compressés**. Or une re-lecture envoie le fichier **deux fois** (compressé puis brut), ce qui est strictement pire que de ne rien faire. Nouveau `src/cli/skip-list.ts` : liste persistante dans `~/.cork-ai/skip-list.json`, alimentée par les re-lectures et les échecs d'`Edit`, avec expiration à 30 jours (un fichier réécrit reprend sa chance) et plafond de 5 000 entrées.
+- **Les langages non listés tombaient sur une troncature tête/queue destructrice** — `compressContent` finissait par un `return compressText(...)` attrape-tout. `.luau` (absent de `CODE_EXTS`) perdait tout son milieu : 70 % de re-lecture. La stratégie est désormais choisie par allowlist — code connu, JSON, prose listée — et **s'abstient** sur tout le reste plutôt que de deviner.
+- **`.tsx` et `.jsx` perdaient toutes leurs méthodes** — le regex de méthodes d'`extractCodeSignatures` était gardé par `ext === '.ts' || ext === '.js'` alors que `.tsx` était déclaré compressible (62 % de re-lecture). Remplacé par `BRACE_METHOD_EXTS`, qui couvre les langages dont le corps de méthode s'ouvre par une accolade — et exclut volontairement Python, Ruby et Lua, où la même forme est généralement un appel.
+
+### Added
+
+- **`CODE_EXTS` étendu** — `.luau`, `.lua`, `.vue`, `.svelte`, `.dart`, `.ex`, `.exs`, `.zig`, `.sql`, `.hpp`. Et `TEXT_EXTS`, une allowlist explicite pour la prose et le markup (taux de re-lecture mesurés : `.md` 15 %, `.css`/`.scss` 25 %, `.html` 38 %).
+- **Bloc `Health` dans `gain --all`** — taux de re-lecture (vert < 15 %, jaune < 30 %, rouge au-delà), échecs d'`Edit`, et nombre de fichiers appris. C'est ce ratio, pas le pourcentage d'économie, qui dit si cork-ai aide ou nuit.
+
+### Changed
+
+- **Les tokens économisés sont désormais valorisés sur toute leur durée de vie en contexte, plus seulement au premier envoi** — c'était la principale sous-évaluation restante. cork-ai comptait chaque token économisé **une fois, au prix input plein (1×)**. Or dans une boucle d'agent, un token qui entre dans le contexte est payé une fois en écriture de cache (1,25× en TTL 5 min, 2× en TTL 1 h) **puis en lecture de cache (0,1×) à chaque tour suivant** : l'empêcher d'entrer évite toute la traînée. Mesuré sur les transcripts : **94,5 lectures médianes par token écrit**, soit un multiplicateur d'environ 10× par rapport à ce qui était affiché. Nouvelle fonction `costOfAvoidedTokens()` (`src/pricing/index.ts`) et `sessionAmplification()` (`src/cli/transcript-usage.ts`), qui mesure le ratio sur le transcript de la session — `SessionRecord.sessionId` est le nom du fichier transcript, donc la jointure ne demande aucun changement de schéma et s'applique rétroactivement à tout l'historique.
+- **`gain --all` encadre l'économie au lieu d'annoncer un chiffre unique** — « First pass only » (l'ancienne borne basse, gardée pour que le chiffre reste auditable), « Lifetime in context », pénalité de re-read, net, et le facteur d'amplification avec la couverture (`12/14 sessions measured`). Une couverture partielle doit se voir.
+- **La pénalité de re-read est valorisée sur la même base** — un re-read réinjecte du contenu brut dans le contexte et se paie lui aussi à chaque tour. La laisser à 1× pendant que les économies passent au tarif lifetime aurait biaisé le net en faveur de cork-ai. Effet concret : la pénalité passe de $7 à $106 et absorbe 73 % du brut.
+
+### Added
+
+- **Migration `stats.json` v1 → v2** — les coûts écrits avant la 0.4.2 utilisaient le tarif Opus 5 erroné ($15/M). La migration recalcule `estimatedCostSaved` et `byModel[].costSaved` à partir des `savedTokens` stockés avec la table corrigée, ne touche à **aucun** compteur de tokens, et sauvegarde `stats.json.v1.bak` avant d'écrire.
+- `CLAUDE_PROJECTS_DIR` redirige la racine des transcripts. Claude Code ne lit pas cette variable — elle existe pour que les tests pointent sur des fixtures au lieu de l'historique réel du développeur.
+
+### Notes
+
+L'amplification est une **borne haute** : elle suppose que les tokens économisés seraient restés en contexte jusqu'à la fin de la session. Les tours postérieurs à une frontière de compaction (`compact_boundary`) sont exclus, les tours de sous-agents aussi (ils ont leur propre contexte). Les sessions sans transcript retombent sur le coût d'écriture seul et sont exclues du décompte « measured ». Seul le bloc « Real spend » reste de la vérité terrain.
+
 ## [0.5.0] - 2026-08-16
 
 ### Added
@@ -215,7 +245,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark in `benchmarks/cost-comparison.ts`
 - CI/CD GitHub Actions (Node 18/20/22 × Ubuntu/Windows/macOS)
 
-[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/mqthys62/cork-ai/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/mqthys62/cork-ai/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/mqthys62/cork-ai/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/mqthys62/cork-ai/compare/v0.4.0...v0.4.1
