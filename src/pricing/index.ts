@@ -116,19 +116,41 @@ export interface ApiUsage {
   output_tokens: number
   cache_creation_input_tokens?: number
   cache_read_input_tokens?: number
+  /**
+   * Per-TTL breakdown of cache writes, when the API reports it. The 1-hour
+   * tier bills at 2× input against 1.25× for the 5-minute tier — a 60%
+   * difference, so use this split whenever it is present.
+   */
+  cache_creation?: {
+    ephemeral_5m_input_tokens?: number
+    ephemeral_1h_input_tokens?: number
+  }
 }
 
 /**
  * Real cost in USD of a request, from the API's own `usage` object.
- * `cache_creation_input_tokens` is billed at the 5-minute write tier
- * (the API does not expose the TTL split in the base field).
+ *
+ * Cache writes are billed per TTL when `usage.cache_creation` carries the
+ * split; otherwise the flat `cache_creation_input_tokens` field is assumed to
+ * be 5-minute writes (an underestimate for any 1-hour cache).
  */
 export function costOfUsage(usage: ApiUsage, modelId?: string, date?: Date): number {
   const p = resolvePricing(modelId, date)
+
+  const split = usage.cache_creation
+  const write5m = split?.ephemeral_5m_input_tokens
+  const write1h = split?.ephemeral_1h_input_tokens
+  const hasSplit = write5m !== undefined || write1h !== undefined
+
+  const cacheWriteCost = hasSplit
+    ? ((write5m ?? 0) / 1_000_000) * p.cacheWrite5m +
+      ((write1h ?? 0) / 1_000_000) * p.cacheWrite1h
+    : ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * p.cacheWrite5m
+
   return (
     (usage.input_tokens / 1_000_000) * p.input +
     (usage.output_tokens / 1_000_000) * p.output +
-    ((usage.cache_creation_input_tokens ?? 0) / 1_000_000) * p.cacheWrite5m +
+    cacheWriteCost +
     ((usage.cache_read_input_tokens ?? 0) / 1_000_000) * p.cacheRead
   )
 }

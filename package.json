@@ -1,6 +1,6 @@
 {
   "name": "cork-ai",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Surgical context optimization for Claude Code — 60–75% token reduction on long sessions",
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",

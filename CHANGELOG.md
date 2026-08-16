@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-16
+
+### Added
+
+- **Dépense réelle dans `gain --all`** — jusqu'ici cork-ai ne savait chiffrer que ce qu'il avait *évité* sur les sorties de `Read` vues par le hook ; le coût réellement payé restait hors de portée. Nouveau module `src/cli/transcript-usage.ts` : les transcripts Claude Code (`~/.claude/projects/<slug>/<session>.jsonl`) portent l'objet `usage` de l'API sur chaque tour assistant. `gain --all` affiche désormais prompt/output, taux de cache hit, total en $ ventilé par modèle, tours de sous-agents, et l'économie estimée en pourcentage de la dépense réelle. Déduplication obligatoire sur `message.id` (Claude Code écrit 2 à 5 lignes par message pendant le stream — sans dédup le coût est surestimé d'environ 2,5×). Validé contre `ccusage` : concordance des tokens à 0,1–1 %.
+- **Ventilation par modèle des économies dans `gain --all`** — `byModel[].costSaved` était enregistré depuis la 0.4.0 mais jamais affiché : un historique multi-modèles ne montrait qu'un chiffre agrégé.
+- **Économies brutes / pénalité de re-read / net** — le coût affiché était net des re-reads, la déduction restant invisible. Les trois lignes sont désormais séparées (dans le cas présent : $17.60 brut, -$7.25 de pénalité, $10.35 net — la pénalité pesait 41 % sans être montrée).
+
+### Fixed
+
+- **Facturation des écritures de cache 1 heure à 1,25× au lieu de 2×** — `costOfUsage()` traitait tout `cache_creation_input_tokens` comme du cache 5 minutes. `ApiUsage` accepte désormais le split `cache_creation.ephemeral_{5m,1h}_input_tokens` que l'API renvoie, et facture chaque palier à son propre tarif.
+- **`gain --all` : libellés « Total tokens in / out » trompeurs** — ils ne désignaient pas les tokens input/output de l'API (que le hook ne voit jamais) mais la taille des fichiers lus avant et après compression. Renommés « Read raw » / « After compression ».
+
 ## [0.4.2] - 2026-08-16
 
 ### Fixed
@@ -202,7 +215,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmark in `benchmarks/cost-comparison.ts`
 - CI/CD GitHub Actions (Node 18/20/22 × Ubuntu/Windows/macOS)
 
-[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/mqthys62/cork-ai/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/mqthys62/cork-ai/compare/v0.4.2...v0.5.0
 [0.4.2]: https://github.com/mqthys62/cork-ai/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/mqthys62/cork-ai/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/mqthys62/cork-ai/compare/v0.3.0...v0.4.0

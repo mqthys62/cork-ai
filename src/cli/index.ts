@@ -41,8 +41,10 @@ import {
   getForecast,
   STATS_FILE,
   LIVE_DIR,
+  type SessionRecord,
 } from './persistent-stats.js'
 import { inputPriceForModel } from '../pricing/index.js'
+import { scanAllTranscripts } from './transcript-usage.js'
 import {
   CALIBRATION_FILE,
   countTokensRaw,
@@ -51,7 +53,7 @@ import {
   saveCalibrationFactor,
 } from '../core/tokenizer.js'
 
-const VERSION = '0.4.2'
+const VERSION = '0.5.0'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
 const CORK_HOME = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 const CONFIG_FILE = path.join(CORK_HOME, 'config.json')
@@ -224,6 +226,28 @@ function miniBar(percent: number, width = 15): string {
 }
 
 function divider(char = '─', len = 66): string { return char.repeat(len) }
+
+/**
+ * USD already deducted from the displayed savings by re-reads.
+ *
+ * `estimatedCostSaved` is stored net: every re-read subtracted
+ * `rawTokens × inputPrice(model)` at the time it happened. Only the token
+ * volume survives in the stats file, so the penalty is reconstructed per
+ * session at that session's own model price — sessions are effectively
+ * single-model, which keeps this faithful to what was originally deducted.
+ */
+function reReadPenalty(stats: { sessions: SessionRecord[] } | null | undefined): number {
+  if (!stats) return 0
+  let total = 0
+  for (const session of stats.sessions) {
+    const served = session.reReadTokensServed ?? 0
+    if (served <= 0) continue
+    const model = Object.entries(session.byModel ?? {})
+      .sort((a, b) => b[1].requests - a[1].requests)[0]?.[0]
+    total += (served / 1_000_000) * inputPriceForModel(model)
+  }
+  return total
+}
 
 // ─── Colors (no deps — raw ANSI) ─────────────────────────────────────────────
 
@@ -405,13 +429,42 @@ function showAllTime(): void {
   console.log(`  ${C.dim('Sessions')}       ${fmt(sessionCnt)}`)
   console.log(`  ${C.dim('Requests')}       ${fmt(totalRequests)}`)
   console.log()
-  console.log(`  ${C.dim('Total tokens in')}   ${C.cyan(fmt(totalOriginal))}`)
-  console.log(`  ${C.dim('Total tokens out')}  ${C.green(fmt(totalOriginal - totalSaved))}`)
-  console.log(`  ${C.dim('Total saved')}       ${C.green(fmt(totalSaved))} tokens`)
+  // These count the Read tool outputs the hook saw, before/after compression.
+  // They are NOT the API's input/output tokens — labelling them "tokens in/out"
+  // read as prompt/completion tokens, which cork-ai never sees via the hook.
+  console.log(`  ${C.dim('Read raw')}            ${C.cyan(fmt(totalOriginal))} tokens`)
+  console.log(`  ${C.dim('After compression')}   ${C.green(fmt(totalOriginal - totalSaved))} tokens`)
+  console.log(`  ${C.dim('Saved')}               ${C.green(fmt(totalSaved))} tokens`)
   console.log()
   console.log(`  ${C.bold('Overall savings')}   ${C.green(bar(pct))}`)
-  console.log(`  ${C.bold('Total cost saved')}  ${C.green(fmtUsdLong(totalCost))} USD`)
   console.log(`  ${C.bold('Avg / session')}     ${C.green(fmt(Math.round(avgPerSession)))} tokens`)
+  console.log()
+
+  // Cost saved, split so the re-read penalty is visible instead of silently
+  // folded into a single net figure.
+  const penalty = reReadPenalty(stats)
+  console.log(`  ${C.bold('Cost saved')}`)
+  if (penalty > 0) {
+    console.log(`    ${C.dim('Gross')}              ${C.green(fmtUsdLong(totalCost + penalty))} USD`)
+    console.log(`    ${C.dim('Re-read penalty')}    ${C.yellow(`-${fmtUsdLong(penalty)}`)} USD ${C.dim(`(${fmt(stats?.allTime.reReads ?? 0)} re-reads · ${fmtTokens(stats?.allTime.reReadTokensServed ?? 0)} tokens served raw)`)}`)
+    console.log(`    ${C.bold('Net')}                ${C.green(fmtUsdLong(totalCost))} USD`)
+  } else {
+    console.log(`    ${C.bold('Net')}                ${C.green(fmtUsdLong(totalCost))} USD`)
+  }
+
+  // Per-model breakdown — byModel[].costSaved has always been recorded but was
+  // never surfaced here, so a mixed-model history showed one blended number.
+  const models = getStatsByModel(stats, live)
+  if (models.length > 0) {
+    console.log()
+    console.log(`  ${C.bold('By model')}`)
+    for (const m of models) {
+      console.log(
+        `    ${C.cyan(m.model.padEnd(20))} ${C.green(fmtTokens(m.savedTokens).padStart(8))} saved  ` +
+        `${C.green(fmtUsd(m.costSaved).padStart(9))}  ${C.dim(`${fmt(m.requests)} req`)}`,
+      )
+    }
+  }
 
   // Ground truth from wrapClient sessions (response.usage), when available
   const measured = stats?.allTime.measured
@@ -440,9 +493,36 @@ function showAllTime(): void {
       }
     }
   }
-  if (stats?.allTime.reReads) {
-    console.log(`  ${C.yellow('Re-reads')}           ${fmt(stats.allTime.reReads)} (${fmtTokens(stats.allTime.reReadTokensServed ?? 0)} tokens served raw — cost deducted)`)
+  // Ground truth for what was actually *spent*, read back from Claude Code's
+  // transcripts. Everything above is an estimate of avoided cost on the Read
+  // outputs the hook touched; this covers the entire bill.
+  const spend = scanAllTranscripts(stats ? new Date(stats.createdAt) : undefined)
+  if (spend.messages > 0) {
+    const promptTokens = spend.inputTokens + spend.cacheReadTokens + spend.cacheWriteTokens
+    console.log()
+    console.log(`  ${C.bold('Real spend')} ${C.dim(`(Claude Code transcripts · ${fmt(spend.messages)} assistant turns)`)}`)
+    console.log(`    ${C.dim('Prompt')}             ${fmt(promptTokens)} tokens ${C.dim(`(${fmtTokens(spend.inputTokens)} fresh · ${fmtTokens(spend.cacheReadTokens)} cache read · ${fmtTokens(spend.cacheWriteTokens)} cache write)`)}`)
+    console.log(`    ${C.dim('Output')}             ${fmt(spend.outputTokens)} tokens`)
+    if (promptTokens > 0) {
+      console.log(`    ${C.dim('Cache hit rate')}     ${fmtPct((spend.cacheReadTokens / promptTokens) * 100)}`)
+    }
+    if (spend.sidechainMessages > 0) {
+      console.log(`    ${C.dim('Subagent turns')}     ${fmt(spend.sidechainMessages)} ${C.dim('(included above)')}`)
+    }
+    console.log(`    ${C.bold('Total')}              ${C.yellow(fmtUsdLong(spend.costUSD))} USD`)
+
+    const modelRows = Object.entries(spend.byModel).sort((a, b) => b[1].costUSD - a[1].costUSD)
+    if (modelRows.length > 1) {
+      for (const [model, m] of modelRows) {
+        console.log(`      ${C.dim(model.padEnd(20))} ${C.yellow(fmtUsdLong(m.costUSD).padStart(8))} ${C.dim(`${fmt(m.messages)} turns`)}`)
+      }
+    }
+    if (spend.costUSD > 0) {
+      const ratio = (totalCost / spend.costUSD) * 100
+      console.log(`    ${C.dim('Estimated savings vs spend')}  ${C.green(fmtPct(ratio))} ${C.dim('— cork-ai avoided cost as a share of what you paid')}`)
+    }
   }
+
   if (stats?.allTime.editFailuresAfterCompression) {
     console.log(`  ${C.yellow('Edit failures')}      ${fmt(stats.allTime.editFailuresAfterCompression)} on compressed-only files (auto-whitelisted)`)
   }
