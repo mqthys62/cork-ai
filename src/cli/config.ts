@@ -29,6 +29,14 @@ export interface CorkConfig {
   autoCompactAnswered?: boolean
   /** ISO time of the last `savings_snapshot` telemetry event (one per day at most). */
   lastSnapshotAt?: string
+  policy?: PolicyConfig
+}
+
+export interface PolicyConfig {
+  /** A whole file already in context, unchanged, read again → a one-line reminder instead of the content (default true). */
+  reReadCache?: boolean
+  /** Read-only subagents (Explore, Plan) get outlines from 800 saved tokens instead of 1,500 (default true). */
+  readonlyAgentsAggressive?: boolean
 }
 
 /** Keys `cork-ai config set` accepts, with a one-line description and a parser. */
@@ -38,6 +46,8 @@ export const CONFIG_KEYS: Record<string, { description: string; parse: (raw: str
   'contextGuard.nudgeModel': { description: 'Also nudge the model, not only the user (true/false)', parse: raw => raw === 'true' },
   'contextGuard.bands': { description: 'Context sizes that trigger a notice, e.g. 150k,300k,500k', parse: raw => raw.split(',').map(s => parseTokens(s.trim())).filter((n): n is number => n !== undefined) },
   'contextGuard.everyNthToolUse': { description: 'Evaluate the guard every N edits (PostToolUse)', parse: raw => Number(raw) },
+  'policy.reReadCache': { description: 'Remind instead of re-serving a whole file already in context (true/false)', parse: raw => raw === 'true' },
+  'policy.readonlyAgentsAggressive': { description: 'Lower outline threshold for read-only subagents such as Explore (true/false)', parse: raw => raw === 'true' },
   'measuredAmplification': { description: 'Cache reads per token written used by the EV gate (auto-measured by gain --all)', parse: raw => Number(raw) },
 }
 

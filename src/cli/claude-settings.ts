@@ -34,14 +34,15 @@ export interface HookGroup {
  * `hook_event_name` and `tool_name` decide what happens.
  *
  *   PreToolUse Read       compress whole-file reads (the original hook)
- *   PreToolUse Bash       same for `cat file` & co — auto mode reads through Bash
+ *   PreToolUse Bash|PowerShell  same for `cat file` & co — auto mode reads through Bash;
+ *                         `Get-Content` under Claude Code's PowerShell tool (Windows without Git Bash)
  *   PostToolUse Edit…     failed-edit detection, edited-file tracking, context guard
  *   UserPromptSubmit/Stop context guard (band notices to the user and the model)
  *   SessionEnd            session digest (~/.cork-ai/digests, telemetry)
  */
 export const CORK_HOOKS: Array<{ event: string; matcher?: string; legacyMatchers?: string[] }> = [
   { event: 'PreToolUse', matcher: 'Read' },
-  { event: 'PreToolUse', matcher: 'Bash' },
+  { event: 'PreToolUse', matcher: 'Bash|PowerShell', legacyMatchers: ['Bash'] },
   { event: 'PostToolUse', matcher: 'Edit|MultiEdit|Write', legacyMatchers: ['Edit|MultiEdit'] },
   { event: 'UserPromptSubmit' },
   { event: 'Stop' },

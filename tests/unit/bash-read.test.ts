@@ -98,3 +98,33 @@ describe('parseBashEdit', () => {
     expect(parseBashEdit('cat app.ts', dir)).toBeUndefined()
   })
 })
+
+describe('parseBashRead — PowerShell (Get-Content)', () => {
+  it('Get-Content, gc, -Path, -LiteralPath → lecture entière', () => {
+    expect(parseBashRead('Get-Content app.ts', dir, 'powershell')).toEqual({ kind: 'full', file, tool: 'Get-Content' })
+    expect(parseBashRead('gc app.ts', dir, 'powershell')?.tool).toBe('Get-Content')
+    expect(parseBashRead('Get-Content -Path app.ts -Raw', dir, 'powershell')?.kind).toBe('full')
+    expect(parseBashRead('Get-Content -LiteralPath ./app.ts -Encoding utf8', dir, 'powershell')?.file).toBe(file)
+    // the aliases work in Git Bash too when the cmdlet name is unambiguous
+    expect(parseBashRead('Get-Content app.ts', dir)?.kind).toBe('full')
+  })
+
+  it('-TotalCount / -Head / -Tail → lecture ciblée', () => {
+    expect(parseBashRead('Get-Content app.ts -TotalCount 40', dir, 'powershell')?.kind).toBe('range')
+    expect(parseBashRead('Get-Content -Tail 20 app.ts', dir, 'powershell')?.kind).toBe('range')
+    expect(parseBashRead('gc app.ts -Head:10', dir, 'powershell')?.kind).toBe('range')
+    expect(parseBashRead('cat app.ts -TotalCount 40', dir)?.kind).toBe('range')
+  })
+
+  it('type et cat sont des alias sous PowerShell seulement', () => {
+    expect(parseBashRead('type app.ts', dir, 'powershell')?.kind).toBe('full')
+    expect(parseBashRead('type app.ts', dir)).toBeUndefined()
+    expect(parseBashRead('cat app.ts', dir, 'powershell')?.kind).toBe('full')
+  })
+
+  it('ignore les formes composées ou ambiguës', () => {
+    for (const cmd of ['Get-Content app.ts | Select-Object -First 10', 'Get-Content *.ts', 'Get-Content app.ts src/b.ts', 'Get-Content -Unknown app.ts', 'Get-Content']) {
+      expect(parseBashRead(cmd, dir, 'powershell'), cmd).toBeUndefined()
+    }
+  })
+})

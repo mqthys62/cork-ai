@@ -558,6 +558,57 @@ export function lastMainTurnUsage(transcriptPath: string | undefined, tailBytes 
   return undefined
 }
 
+// ─── What happened since a byte offset (re-read cache) ──────────────────────
+
+export interface TranscriptSince {
+  /** A compaction happened after the offset: whatever was in context is gone. */
+  compacted: boolean
+  /** Main-thread assistant turns since the offset. */
+  turns: number
+}
+
+/** Beyond this much new transcript the scan is skipped and the caller plays safe. */
+const SINCE_MAX_BYTES = 8 * 1024 * 1024
+
+/**
+ * Reads the transcript from `offset` (its size at some earlier hook event) and
+ * says whether a compaction happened since and how many turns went by. The
+ * transcript is append-only, so an offset is a stable "moment". Returns
+ * undefined when it cannot tell (file gone, truncated, too much to read).
+ */
+export function transcriptSince(transcriptPath: string | undefined, offset: number): TranscriptSince | undefined {
+  if (!transcriptPath || offset < 0) return undefined
+  let text: string
+  try {
+    const stat = fs.statSync(transcriptPath)
+    if (stat.size < offset || stat.size - offset > SINCE_MAX_BYTES) return undefined
+    const fd = fs.openSync(transcriptPath, 'r')
+    const buf = Buffer.alloc(stat.size - offset)
+    fs.readSync(fd, buf, 0, buf.length, offset)
+    fs.closeSync(fd)
+    text = buf.toString('utf-8')
+  } catch {
+    return undefined
+  }
+  const out: TranscriptSince = { compacted: false, turns: 0 }
+  const seen = new Set<string>()
+  for (const line of text.split('\n')) {
+    if (!line) continue
+    if (line.includes('compact_boundary') || line.includes('"isCompactSummary":true')) {
+      let entry: { subtype?: string; isCompactSummary?: boolean }
+      try { entry = JSON.parse(line) } catch { continue }
+      if (entry.subtype === 'compact_boundary' || entry.isCompactSummary) { out.compacted = true; continue }
+    }
+    if (!line.includes('"assistant"')) continue
+    let entry: TranscriptLine & { message?: { id?: string } }
+    try { entry = JSON.parse(line) } catch { continue }
+    if (entry.type !== 'assistant' || entry.isSidechain) continue
+    const id = entry.message?.id
+    if (id && !seen.has(id)) { seen.add(id); out.turns += 1 }
+  }
+  return out
+}
+
 // ─── Context profile (what an oversized context costs) ──────────────────────
 
 export interface ContextProfile {
@@ -770,7 +821,7 @@ const COMPRESSED_VIEW_MARKERS = /\[cork-ai\]|signatures extracted|^\/\/ JSON com
 
 /** A shell command that reads a file: `cat`, `sed -n`, `head`, `tail`, … */
 const SHELL_READ_RE =
-  /(?:^|[;&|]\s*)(?:rtk proxy )?(?:cat|nl|less|more|bat|sed -n [^ ]+|head(?: -[nc] ?\d+)?|tail(?: -[nc] ?\d+)?)\s+((?:\/|\.{0,2}\/)?[\w.@~/-]+\.\w+)/
+  /(?:^|[;&|]\s*)(?:rtk proxy )?(?:cat|nl|less|more|bat|sed -n [^ ]+|head(?: -[nc] ?\d+)?|tail(?: -[nc] ?\d+)?|Get-Content(?: -Path)?|gc|type)\s+((?:[A-Za-z]:)?(?:[\\/]|\.{0,2}[\\/])?[\w.@~\\/-]+\.\w+)/i
 
 export interface ReReadTurns {
   found: boolean
@@ -840,7 +891,7 @@ function computeReReadTurns(file: string): ReReadTurns {
         if (block.type !== 'tool_use' || !block.id || !block.name) continue
         let target: string | undefined
         if (block.name === 'Read') target = block.input?.file_path as string | undefined
-        else if (block.name === 'Bash') target = SHELL_READ_RE.exec((block.input?.command as string) ?? '')?.[1]
+        else if (block.name === 'Bash' || block.name === 'PowerShell') target = SHELL_READ_RE.exec((block.input?.command as string) ?? '')?.[1]
         toolUses.set(block.id, { name: block.name, file: target })
         if (!target) continue
         const key = path.basename(target)

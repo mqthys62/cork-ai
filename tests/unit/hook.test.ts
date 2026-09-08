@@ -271,3 +271,184 @@ describe('Heartbeat and unknown events', () => {
     expect(handleHookEvent({}, deps())).toBeUndefined()
   })
 })
+
+// ─── Re-read cache (1.0) ────────────────────────────────────────────────────
+
+/** `.ts` on probation: the outline gate serves raw, which is what the cache needs to see first. */
+function putTsOnProbation(): void {
+  fs.writeFileSync(POLICY_FILE, JSON.stringify({ version: 1, ext: { '.ts': { compressions: 21, reReads: 19, editsAfter: 0, lastAt: '' } } }))
+}
+
+function mediumTs(n = 20): string {
+  const out = ["import fs from 'fs'", '']
+  for (let i = 0; i < n; i++) {
+    out.push(`export function handler${i}(input: string, options: { retries: number; verbose: boolean }): Promise<string> {`)
+    out.push(`  const value = input.trim().toLowerCase().split(',').map(s => s.trim()).filter(Boolean)`)
+    out.push(`  if (options.verbose) console.log('handler${i}', value, options.retries)`)
+    out.push(`  return Promise.resolve(value.join(';'))`)
+    out.push('}', '')
+  }
+  return out.join('\n')
+}
+
+describe('re-read cache', () => {
+  it('un fichier servi brut puis relu à l’identique reçoit un rappel, pas le contenu', () => {
+    putTsOnProbation()
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined()
+    expect(events[0].properties).toMatchObject({ decision: 'raw', reason: 'probation', agent_class: 'main' })
+    const raw = loadSessionReads(sessionId).raw![bigFile]
+    expect(raw).toMatchObject({ hits: 0, agent: null, size: fs.statSync(bigFile).size })
+    expect(raw.offset).toBe(fs.statSync(transcript).size)
+
+    // the model works a turn, then reads the same file again
+    fs.appendFileSync(transcript, transcriptLines(45_000))
+    const again = handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    expect(again).toBeDefined()
+    const reason = (again!.hookSpecificOutput as { permissionDecisionReason: string }).permissionDecisionReason
+    expect(reason).toContain('[cork-ai] big.ts — already read 1 turn ago')
+    expect(reason).toContain('still in your context')
+    expect(reason).not.toContain('export function handler0(')  // the reminder carries no content
+    expect(reason.length).toBeLessThan(500)
+
+    expect(loadSessionReads(sessionId).raw![bigFile].hits).toBe(1)
+    expect(loadPolicy().ext['cache:.ts']).toMatchObject({ compressions: 1, reReads: 0 })
+    const live = readActiveLiveSessions().find(s => s.sessionId === sessionId)!
+    expect(live.byModule.hookReadCache).toBeGreaterThan(1_000)
+    expect(events.at(-1)).toMatchObject({ event: 'hook_read', properties: { decision: 'cached', ext: '.ts', turns_ago: 1, agent_class: 'main' } })
+    expect(JSON.stringify(events)).not.toContain('big.ts')
+  })
+
+  it('fichier modifié entre-temps → brut, empreinte rafraîchie', () => {
+    putTsOnProbation()
+    handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    const before = loadSessionReads(sessionId).raw![bigFile].hash
+    fs.appendFileSync(bigFile, '\nexport const extra = 1\n')
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', cache_miss: 'changed' })
+    const after = loadSessionReads(sessionId).raw![bigFile]
+    expect(after.hash).not.toBe(before)
+    expect(after.hits).toBe(0)
+  })
+
+  it('compaction après la lecture → le contenu a quitté le contexte, brut', () => {
+    putTsOnProbation()
+    handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    fs.appendFileSync(transcript, JSON.stringify({ type: 'system', subtype: 'compact_boundary', version: '2.1.263' }) + '\n' + transcriptLines(30_000))
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', cache_miss: 'compacted' })
+    // the fresh raw read starts a new cache window past the compaction
+    fs.appendFileSync(transcript, transcriptLines(31_000))
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeDefined()
+  })
+
+  it('un sous-agent a son propre contexte : pas de rappel entre agents, rappel au sein du même agent', () => {
+    putTsOnProbation()
+    handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    const worker = { agent_type: 'general-purpose', agent_id: 'agent-1' }
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }, worker), deps())).toBeUndefined()
+    // no reminder (the agent never saw the file), and no false "re-read" either
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'probation', agent_class: 'editing' })
+    expect(events.at(-1)!.properties.cache_miss).toBeUndefined()
+    expect(isSkipped(bigFile)).toBe(false)
+    // the same agent again: its own raw read is now the cache entry
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }, worker), deps())).toBeDefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'cached', agent_class: 'editing' })
+    // and the main conversation still has its own entry
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeDefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'cached', agent_class: 'main' })
+  })
+
+  it('relecture entière après un rappel → brut, apprise, pénalisée, et plus jamais de rappel pour ce fichier', () => {
+    putTsOnProbation()
+    handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeDefined()   // reminder
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined() // insisted
+    expect(events.at(-1)).toMatchObject({ event: 'hook_reread', properties: { kind: 'after-cache', ext: '.ts' } })
+    expect(loadPolicy().ext['cache:.ts']).toMatchObject({ compressions: 1, reReads: 1 })
+    expect(loadSessionReads(sessionId).raw![bigFile].missed).toBe(true)
+    const live = readActiveLiveSessions().find(s => s.sessionId === sessionId)!
+    expect(live.reReads).toBe(1)
+    expect(isSkipped(bigFile)).toBe(false) // the skip list is for outlines; the cache only gives up for this session
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', cache_miss: 'missed' })
+  })
+
+  it('offset/limit passe toujours ; policy.reReadCache=false désactive le rappel', () => {
+    putTsOnProbation()
+    handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    expect(handleHookEvent(pre('Read', { file_path: bigFile, offset: 5, limit: 10 }), deps())).toBeUndefined()
+    saveConfig({ telemetry: false, contextGuard: { enabled: true }, policy: { reReadCache: false } })
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'probation' })
+  })
+
+  it('la relecture d’un fichier déjà outliné (servie brute) alimente aussi le cache', () => {
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeDefined()   // outline
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined() // re-read → raw, skip-listed
+    expect(loadSessionReads(sessionId).raw![bigFile]).toBeDefined()
+    // skip-listed for good: no reminder either — the file proved it needs its content
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'skip-list' })
+  })
+})
+
+describe('agent class', () => {
+  it('Explore obtient un outline dès 800 tokens économisés, la conversation principale non', () => {
+    const medium = path.join(dir, 'src', 'medium.ts')
+    fs.writeFileSync(medium, mediumTs(20))
+    expect(handleHookEvent(pre('Read', { file_path: medium }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'saves-only', agent_class: 'main', subagent: false })
+
+    const out = handleHookEvent(pre('Read', { file_path: medium }, { agent_type: 'Explore', agent_id: 'agent-2' }), deps())
+    expect(out).toBeDefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'outline', agent_class: 'readonly', subagent: true })
+    expect(loadPolicy().ext['ro:.ts'].compressions).toBe(1)
+    expect(loadPolicy().ext['.ts']).toBeUndefined()
+
+    // an editing subagent keeps the main threshold
+    expect(handleHookEvent(pre('Read', { file_path: medium }, { agent_type: 'general-purpose', agent_id: 'agent-3' }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'saves-only', agent_class: 'editing' })
+  })
+
+  it('policy.readonlyAgentsAggressive=false remet Explore au seuil normal', () => {
+    saveConfig({ telemetry: false, contextGuard: { enabled: true }, policy: { readonlyAgentsAggressive: false } })
+    const medium = path.join(dir, 'src', 'medium.ts')
+    fs.writeFileSync(medium, mediumTs(20))
+    expect(handleHookEvent(pre('Read', { file_path: medium }, { agent_type: 'Explore', agent_id: 'agent-4' }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'saves-only', agent_class: 'readonly' })
+  })
+})
+
+describe('reads state per agent', () => {
+  it('un sous-agent qui lit un fichier outliné par la conversation principale n’est pas une relecture', () => {
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }), deps())).toBeDefined()
+    const out = handleHookEvent(pre('Read', { file_path: bigFile }, { agent_type: 'general-purpose', agent_id: 'agent-9' }), deps())
+    expect(out).toBeDefined() // its own outline: its context never had one
+    expect(events.map(e => e.event)).toEqual(['hook_read', 'hook_read'])
+    expect(loadPolicy().ext['.ts']).toMatchObject({ compressions: 2, reReads: 0 })
+    expect(isSkipped(bigFile)).toBe(false)
+    const reads = loadSessionReads(sessionId)
+    expect(reads.files[bigFile]).toBe(1)
+    expect(reads.files[`@agent-9:${bigFile}`]).toBe(1)
+  })
+
+  it('un Edit du sous-agent sur son fichier outliné est appris pour la classe de l’agent', () => {
+    const explore = { agent_type: 'Explore', agent_id: 'agent-10' }
+    expect(handleHookEvent(pre('Read', { file_path: bigFile }, explore), deps())).toBeDefined()
+    handleHookEvent({ ...pre('Read', {}, explore), hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: bigFile, old_string: 'a', new_string: 'b' }, tool_response: { ok: true } }, deps())
+    expect(loadPolicy().ext['ro:.ts']).toMatchObject({ compressions: 1, editsAfter: 1 })
+    expect(loadPolicy().ext['.ts']).toBeUndefined()
+    expect(loadSessionReads(sessionId).edited![bigFile]).toBeTruthy() // edits are session-wide
+  })
+})
+
+describe('PreToolUse PowerShell', () => {
+  it('Get-Content d’un gros fichier → outline, -TotalCount → suite ciblée', () => {
+    const ps = (command: string) => ({ ...pre('Bash', { command }), tool_name: 'PowerShell' })
+    const out = handleHookEvent(ps(`Get-Content ${bigFile}`), deps())
+    expect(out).toBeDefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'outline', source: 'Get-Content' })
+    expect(handleHookEvent(ps(`Get-Content ${bigFile} -TotalCount 30`), deps())).toBeUndefined()
+    expect(events.at(-1)).toMatchObject({ event: 'hook_reread', properties: { kind: 'range' } })
+  })
+})

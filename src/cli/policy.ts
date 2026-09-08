@@ -44,6 +44,11 @@ export interface PolicyState {
 
 /** Prior belief before any local evidence: a coin flip, weighted like 4 observations. */
 const PRIOR_RE_READ = 0.5
+/**
+ * The re-read cache reminds the model of a file it already has in context —
+ * a much smaller leap of faith than an outline, so it starts from a lower prior.
+ */
+const PRIOR_RE_READ_CACHE = 0.3
 const PRIOR_WEIGHT = 4
 /** Above this measured re-read rate an extension is put on probation. */
 export const PROBATION_RATE = 0.35
@@ -57,6 +62,48 @@ export const DEFAULT_AMPLIFICATION = 50
 const RE_READ_OUTPUT_TOKENS = 300
 /** Compressed reads must save at least this many tokens to be worth the risk at all. */
 export const MIN_SAVED_TOKENS = 1_500
+/**
+ * Read-only subagents (Explore, Plan) never edit what they read and their
+ * context is thrown away at the end: a lower bar is worth it. Same bar for the
+ * re-read cache, whose failure mode (one extra turn) is cheaper than an
+ * outline's (a wasted view plus the raw file).
+ */
+export const MIN_SAVED_TOKENS_AGGRESSIVE = 800
+
+/**
+ * Who is reading. `main` is the conversation itself; `readonly` a subagent that
+ * cannot edit (Explore, Plan, the docs guide); `editing` any other subagent,
+ * forks and custom agents included — unknown means editing, the safe side.
+ */
+export type AgentClass = 'main' | 'readonly' | 'editing'
+const READONLY_AGENT_TYPES = new Set(['explore', 'plan', 'claude-code-guide', 'statusline-setup'])
+
+export function agentClassOf(event: { agent_type?: unknown; agent_id?: unknown }): AgentClass {
+  const type = typeof event.agent_type === 'string' ? event.agent_type : undefined
+  const id = typeof event.agent_id === 'string' ? event.agent_id : undefined
+  if (!type && !id) return 'main'
+  return type && READONLY_AGENT_TYPES.has(type.toLowerCase()) ? 'readonly' : 'editing'
+}
+
+/** Which learned statistic a decision reads and feeds. */
+export interface PolicyScope {
+  /** `outline` (default) or the re-read `cache`. */
+  mode?: 'outline' | 'cache'
+  agentClass?: AgentClass
+}
+
+/**
+ * The key under which an extension's history is kept. Plain `.ts` for the
+ * main conversation and editing agents (the historic bucket), `ro:.ts` for
+ * read-only agents, `cache:.ts` for the re-read cache — three different
+ * behaviours, three different re-read rates.
+ */
+export function policyKey(filePath: string, scope: PolicyScope = {}): string {
+  const ext = normalizeExt(filePath)
+  if (scope.mode === 'cache') return `cache:${ext}`
+  if (scope.agentClass === 'readonly') return `ro:${ext}`
+  return ext
+}
 
 export function loadPolicy(): PolicyState {
   try {
@@ -87,20 +134,21 @@ function bump(ext: string, field: 'compressions' | 'reReads' | 'rangeReads' | 'e
   savePolicy(state)
 }
 
-export function recordCompression(filePath: string): void { bump(normalizeExt(filePath), 'compressions') }
-export function recordReRead(filePath: string): void { bump(normalizeExt(filePath), 'reReads') }
-export function recordRangeRead(filePath: string): void { bump(normalizeExt(filePath), 'rangeReads') }
-export function recordEditAfter(filePath: string): void { bump(normalizeExt(filePath), 'editsAfter') }
+export function recordCompression(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'compressions') }
+export function recordReRead(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'reReads') }
+export function recordRangeRead(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'rangeReads') }
+export function recordEditAfter(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'editsAfter') }
 
 /**
- * Probability that a compressed read of this extension gets re-read, blending
- * the prior with what this machine has seen (a Beta posterior mean).
+ * Probability that a compressed read of this key gets re-read, blending the
+ * prior with what this machine has seen (a Beta posterior mean).
  */
-export function reReadProbability(ext: string, state: PolicyState = loadPolicy()): number {
-  const e = state.ext[ext]
+export function reReadProbability(key: string, state: PolicyState = loadPolicy()): number {
+  const e = state.ext[key]
   const n = e?.compressions ?? 0
   const k = e?.reReads ?? 0
-  return (PRIOR_RE_READ * PRIOR_WEIGHT + k) / (PRIOR_WEIGHT + n)
+  const prior = key.startsWith('cache:') ? PRIOR_RE_READ_CACHE : PRIOR_RE_READ
+  return (prior * PRIOR_WEIGHT + k) / (PRIOR_WEIGHT + n)
 }
 
 export interface GateInput {
@@ -113,6 +161,8 @@ export interface GateInput {
   /** Cache reads per token for the rest of the session; defaults to a conservative 50. */
   amplification?: number
   state?: PolicyState
+  /** Which statistic to consult: outline vs cache, main vs agent class. */
+  scope?: PolicyScope
 }
 
 export interface GateDecision {
@@ -136,8 +186,10 @@ export interface GateDecision {
  */
 export function gate(input: GateInput): GateDecision {
   const state = input.state ?? loadPolicy()
-  const ext = normalizeExt(input.filePath)
+  const scope = input.scope ?? {}
+  const ext = policyKey(input.filePath, scope)
   const p = reReadProbability(ext, state)
+  const minSaved = scope.mode === 'cache' || scope.agentClass === 'readonly' ? MIN_SAVED_TOKENS_AGGRESSIVE : MIN_SAVED_TOKENS
   const pricing = resolvePricing(input.model)
   const amp = Math.max(1, input.amplification ?? DEFAULT_AMPLIFICATION)
   const saved = input.originalTokens - input.compressedTokens
@@ -155,8 +207,8 @@ export function gate(input: GateInput): GateDecision {
   const onProbation = samples >= PROBATION_MIN_SAMPLES && p > PROBATION_RATE
   const probe = onProbation && samples % PROBE_EVERY === 0
 
-  if (saved < MIN_SAVED_TOKENS) {
-    return { compress: false, reason: `saves only ${saved} tokens (< ${MIN_SAVED_TOKENS})`, expectedValueUSD: ev, reReadProbability: p, probation: onProbation }
+  if (saved < minSaved) {
+    return { compress: false, reason: `saves only ${saved} tokens (< ${minSaved})`, expectedValueUSD: ev, reReadProbability: p, probation: onProbation }
   }
   if (onProbation && !probe) {
     return { compress: false, reason: `${ext} on probation (re-read rate ${(p * 100).toFixed(0)}% over ${samples} reads)`, expectedValueUSD: ev, reReadProbability: p, probation: true }

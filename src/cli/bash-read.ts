@@ -39,6 +39,39 @@ const CAT_FLAG_RE = /^-(?:[nbsAvetETu]+|-number|-number-nonblank|-squeeze-blank|
 const FULL_READ_TOOLS = new Set(['cat', 'nl', 'less', 'more', 'bat', 'batcat'])
 const RANGE_READ_TOOLS = new Set(['head', 'tail', 'sed'])
 
+/**
+ * PowerShell: Claude Code runs a PowerShell tool on Windows when Git Bash is
+ * absent. `Get-Content` and its aliases (`gc`, `cat`, `type`) are its `cat`;
+ * `-TotalCount` / `-Head` / `-Tail` make it a range read. `type` is only
+ * recognised under PowerShell — in bash it describes a command.
+ */
+const PS_READ_TOOLS = new Set(['get-content', 'gc'])
+const PS_PARAM_RE = /^-(?:Path|LiteralPath|TotalCount|Head|Tail|Raw|Encoding|ReadCount|Delimiter|Force|Stream|Wait)(?::.*)?$/i
+const PS_RANGE_PARAM_RE = /^-(?:TotalCount|Head|Tail)(?::.*)?$/i
+/** Parameters that take a value in the next word (unless given as `-Name:value`). */
+const PS_VALUE_PARAM_RE = /^-(?:Path|LiteralPath|TotalCount|Head|Tail|Encoding|ReadCount|Delimiter|Stream)$/i
+
+export type ShellKind = 'bash' | 'powershell'
+
+function parsePowerShellRead(tool: string, args: string[], cwd: string): BashRead | undefined {
+  const operands: string[] = []
+  let range = false
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]
+    if (a.startsWith('-')) {
+      if (!PS_PARAM_RE.test(a)) return undefined
+      if (PS_RANGE_PARAM_RE.test(a)) range = true
+      if (/^-(?:Path|LiteralPath)$/i.test(a) && i + 1 < args.length) { operands.push(args[++i]); continue }
+      if (PS_VALUE_PARAM_RE.test(a)) i++
+      continue
+    }
+    operands.push(a)
+  }
+  if (operands.length !== 1 || /[*?]/.test(operands[0])) return undefined
+  const file = resolveFile(operands[0], cwd)
+  return file ? { kind: range ? 'range' : 'full', file, tool } : undefined
+}
+
 /** Shell words, honouring single/double quotes (no escapes beyond that). */
 export function splitWords(command: string): string[] | undefined {
   const words: string[] = []
@@ -84,7 +117,7 @@ function resolveFile(operand: string, cwd: string): string | undefined {
  * Returns `undefined` for anything compound or unusual, which the caller must
  * treat as "not a read we understand" — never as "not a read".
  */
-export function parseBashRead(command: string, cwd: string): BashRead | undefined {
+export function parseBashRead(command: string, cwd: string, shell: ShellKind = 'bash'): BashRead | undefined {
   const trimmed = command.trim()
   if (!trimmed || COMPOUND_RE.test(trimmed)) return undefined
 
@@ -98,6 +131,13 @@ export function parseBashRead(command: string, cwd: string): BashRead | undefine
 
   const tool = path.basename(words[0])
   const args = words.slice(1)
+
+  const lower = tool.toLowerCase()
+  if (PS_READ_TOOLS.has(lower) || (shell === 'powershell' && (lower === 'type' || lower === 'cat'))) {
+    return parsePowerShellRead(lower === 'gc' || lower === 'get-content' ? 'Get-Content' : tool, args, cwd)
+  }
+  // `cat file -TotalCount 40` in Git Bash is still PowerShell muscle memory.
+  if (lower === 'cat' && args.some(a => PS_PARAM_RE.test(a))) return parsePowerShellRead('cat', args, cwd)
 
   if (FULL_READ_TOOLS.has(tool)) {
     const flags = args.filter(a => a.startsWith('-') && a !== '-')

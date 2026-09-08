@@ -65,7 +65,7 @@ describe('hooks install', () => {
     expect(first.status).toBe(0)
     const hooks = corkHooks()
     expect(hooks.map(h => `${h.event}:${h.matcher ?? '*'}`).sort()).toEqual([
-      'PostToolUse:Edit|MultiEdit|Write', 'PreToolUse:Bash', 'PreToolUse:Read', 'SessionEnd:*', 'Stop:*', 'UserPromptSubmit:*',
+      'PostToolUse:Edit|MultiEdit|Write', 'PreToolUse:Bash|PowerShell', 'PreToolUse:Read', 'SessionEnd:*', 'Stop:*', 'UserPromptSubmit:*',
     ])
     // the foreign hook on Read is kept, cork-ai appended to the same group
     const readGroup = settings().hooks!.PreToolUse.find(g => g.matcher === 'Read')!

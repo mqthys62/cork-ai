@@ -1087,7 +1087,7 @@ function coverage(days = 14): CoverageRow[] {
       for (const block of entry.message?.content ?? []) {
         if (block.type !== 'tool_use') continue
         if (block.name === 'Read') reads++
-        else if (block.name === 'Bash' && /(?:^|[;&|]\s*)(?:rtk proxy )?(?:cat|sed -n|head|tail|nl|bat)\b/.test(String(block.input?.command ?? ''))) bashReads++
+        else if ((block.name === 'Bash' || block.name === 'PowerShell') && /(?:^|[;&|]\s*)(?:rtk proxy )?(?:cat|sed -n|head|tail|nl|bat|Get-Content|gc|type)\b/i.test(String(block.input?.command ?? ''))) bashReads++
       }
     }
     if (turns < 5) continue
@@ -1215,7 +1215,7 @@ async function runDoctor(args: string[]): Promise<void> {
       const project = r.project.replace(/^-home-[^-]+-projects-/, '').replace(/^-/, '').slice(0, 22)
       return `${r.seen ? C.green('●') : C.red('○')} ${date.padEnd(7)} ${project.padEnd(23)} ${fmt(r.turns).padStart(5)} turns  ${fmt(r.reads).padStart(4)} Read  ${fmt(r.bashReads).padStart(4)} Bash-read  ${C.dim(`${r.claudeVersion ?? ''}${r.permissionMode ? ' ' + r.permissionMode : ''}`)}`
     })
-    if (totalBash > totalReads && !hooks.find(h => h.matcher === 'Bash')?.present) {
+    if (totalBash > totalReads && !hooks.find(h => h.matcher?.startsWith('Bash'))?.present) {
       lines.push(`${C.red('→')} the model reads through Bash (auto mode) and the Bash hook is missing: ${C.cyan('cork-ai hooks install')}`)
     }
     push({

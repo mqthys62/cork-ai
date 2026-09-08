@@ -60,7 +60,7 @@ describe('installedCorkHooks', () => {
       hooks: {
         PreToolUse: [
           { matcher: 'Read', hooks: [{ type: 'command', command: WIN, args: ['hook'] }] },
-          { matcher: 'Bash', hooks: [{ type: 'command', command: `"${WIN}" hook` }] },
+          { matcher: 'Bash', hooks: [{ type: 'command', command: `"${WIN}" hook` }] }, // legacy matcher (< 1.0)
         ],
         SessionEnd: [{ hooks: [{ type: 'command', command: CORK_HOOK_FALLBACK }] }],
       },
@@ -70,7 +70,7 @@ describe('installedCorkHooks', () => {
     const by = (e: string, m?: string) => rows.find(r => r.event === e && r.matcher === m)!
     expect(by('PreToolUse', 'Read')).toMatchObject({ present: true, command: `${WIN} hook` })
     expect(by('PreToolUse', 'Read').entry?.args).toEqual(['hook'])
-    expect(by('PreToolUse', 'Bash')).toMatchObject({ present: true, command: `"${WIN}" hook` })
+    expect(by('PreToolUse', 'Bash|PowerShell')).toMatchObject({ present: true, command: `"${WIN}" hook` })
     expect(by('SessionEnd')).toMatchObject({ present: true, command: CORK_HOOK_FALLBACK })
     expect(by('Stop').present).toBe(false)
     expect(rows.filter(r => r.present)).toHaveLength(3)

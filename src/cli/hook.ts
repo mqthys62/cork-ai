@@ -8,16 +8,18 @@
  * Events handled:
  *   PreToolUse  Read           whole-file reads → numbered outline when the EV gate says so
  *   PreToolUse  Bash           `cat file` & co → same path; `sed -n` & co → follow-up tracking;
- *                              `sed -i` / redirections → file marked as being edited
+ *               PowerShell     `sed -i` / redirections → file marked as being edited;
+ *                              `Get-Content` / `gc` / `type` under the PowerShell tool
  *   PostToolUse Edit/Write     failed-edit detection, edited-file tracking, context guard
  *   UserPromptSubmit, Stop     context guard
  *   SessionEnd                 session digest (local file + telemetry)
  */
 
+import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
 import { estimateTokensFast } from '../core/tokenizer.js'
-import { inputPriceForModel } from '../pricing/index.js'
+import { inputPriceForModel, resolvePricing } from '../pricing/index.js'
 import { parseBashEdit, parseBashRead } from './bash-read.js'
 import { CORK_HOME, loadConfig, updateConfig } from './config.js'
 import { evaluateGuard, guardHookOutput } from './context-guard.js'
@@ -25,11 +27,11 @@ import { eligibility } from './file-eligibility.js'
 import { noteSessionSeen, readSessionsSeen, writeHeartbeat } from './heartbeat.js'
 import { outline } from './outline.js'
 import { LIVE_DIR, accumulateInSession, readActiveLiveSessions } from './persistent-stats.js'
-import { gate, recordCompression, recordEditAfter, recordRangeRead, recordReRead } from './policy.js'
+import { agentClassOf, gate, recordCompression, recordEditAfter, recordRangeRead, recordReRead, type AgentClass, type PolicyScope } from './policy.js'
 import { isSkipped, markSkipped } from './skip-list.js'
 import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
 import { snapshotDue, type SnapshotReason } from './savings.js'
-import { lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile } from './transcript-usage.js'
+import { lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile, transcriptSince } from './transcript-usage.js'
 
 export type HookOutput = Record<string, unknown> | undefined
 
@@ -48,7 +50,56 @@ export interface SessionReads {
   files: Record<string, number>
   /** filePath → ISO time of the last edit seen this session */
   edited?: Record<string, string>
+  /** filePath → the last time the whole file was served raw (re-read cache). */
+  raw?: Record<string, RawRead>
 }
+
+/**
+ * A whole file the model received raw, and everything needed to know later
+ * whether it still has that exact content in context: the file's fingerprint
+ * (changed on disk?), the transcript offset (compacted since?), the agent
+ * (same context?).
+ */
+export interface RawRead {
+  mtimeMs: number
+  size: number
+  /** Short content hash — mtime and size can both survive a `git checkout`. */
+  hash: string
+  at: string
+  /** Transcript size when the read was served; `transcriptSince` scans from here. */
+  offset: number
+  /** Subagent id, null for the main conversation. Contexts are separate. */
+  agent: string | null
+  /** Reminders served instead of the content since this raw read. */
+  hits: number
+  /** The model re-read the whole file after a reminder: never remind again this session. */
+  missed?: boolean
+}
+
+/**
+ * Key of a file in `SessionReads.files` / `.raw`. Subagents share the session
+ * id but not the context: what the main conversation was served says nothing
+ * about what an Explore agent has. Edits stay session-wide (`edited`): a
+ * change on disk is a change for everyone.
+ */
+export function readsKey(filePath: string, event: Record<string, unknown>): string {
+  const agent = typeof event.agent_id === 'string' ? event.agent_id : ''
+  return agent ? `@${agent}:${filePath}` : filePath
+}
+
+function fingerprint(filePath: string, buf: Buffer): Pick<RawRead, 'mtimeMs' | 'size' | 'hash'> {
+  let mtimeMs = 0
+  try { mtimeMs = fs.statSync(filePath).mtimeMs } catch { /* fingerprint on content only */ }
+  return { mtimeMs, size: buf.length, hash: crypto.createHash('sha1').update(buf).digest('hex').slice(0, 12) }
+}
+
+function transcriptSize(transcriptPath: string | undefined): number {
+  if (!transcriptPath) return -1
+  try { return fs.statSync(transcriptPath).size } catch { return -1 }
+}
+
+/** Tokens of the reminder itself, for the accounting (the real text is ~60). */
+const CACHE_REMINDER_TOKENS = 80
 
 export function readsFileFor(sessionId: string): string {
   const safe = sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)
@@ -71,14 +122,14 @@ function saveSessionReads(sessionId: string, reads: SessionReads): void {
   } catch { /* non-critical */ }
 }
 
-function markEdited(sessionId: string, filePath: string, now: Date): void {
+function markEdited(sessionId: string, filePath: string, now: Date, event: Record<string, unknown>): void {
   if (!sessionId || !filePath) return
   const reads = loadSessionReads(sessionId)
   reads.edited ??= {}
   reads.edited[filePath] = now.toISOString()
   // A file served compressed and then edited: the model needed the real
   // content after all. Learn it for the extension.
-  if (reads.files[filePath]) recordEditAfter(filePath)
+  if (reads.files[readsKey(filePath, event)]) recordEditAfter(filePath, { agentClass: agentClassOf(event) })
   saveSessionReads(sessionId, reads)
 }
 
@@ -115,8 +166,9 @@ function handlePostToolUseEdit(event: Record<string, unknown>, now: Date): void 
   const sessionId = (event.session_id as string) || ''
   if (!filePath || !sessionId) return
 
-  const wasCompressed = Boolean(loadSessionReads(sessionId).files[filePath])
-  markEdited(sessionId, filePath, now)
+  const key = readsKey(filePath, event)
+  const wasCompressed = Boolean(loadSessionReads(sessionId).files[key])
+  markEdited(sessionId, filePath, now, event)
   if (!wasCompressed) return
 
   let respText = ''
@@ -126,7 +178,7 @@ function handlePostToolUseEdit(event: Record<string, unknown>, now: Date): void 
   // Whitelist for good: a failed Edit is the strongest possible evidence that
   // the outline was not enough for this file.
   const reads = loadSessionReads(sessionId)
-  reads.files[filePath] = (reads.files[filePath] ?? 0) + 1
+  reads.files[key] = (reads.files[key] ?? 0) + 1
   saveSessionReads(sessionId, reads)
   markSkipped(filePath, 'edit-failure')
   try {
@@ -150,9 +202,34 @@ interface ReadContext {
   deps: Required<HookDeps>
 }
 
-function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, detectedModel: string | undefined, ext: string): void {
+/**
+ * The re-read cache: the file was served raw earlier in this session and the
+ * model still has it — same bytes on disk, no compaction since, same context.
+ * Returns why it does not apply otherwise (telemetry `cache_miss`).
+ */
+function cacheStatus(entry: RawRead | undefined, fp: ReturnType<typeof fingerprint>, transcriptPath: string | undefined, agent: string | null): { hit: true; turnsAgo: number } | { hit: false; miss?: string } {
+  if (!entry) return { hit: false }
+  if (entry.missed) return { hit: false, miss: 'missed' }
+  if (entry.agent !== agent) return { hit: false, miss: 'other-agent' }
+  if (entry.hash !== fp.hash || entry.size !== fp.size) return { hit: false, miss: 'changed' }
+  const since = transcriptSince(transcriptPath, entry.offset)
+  if (!since) return { hit: false, miss: 'unknown' }
+  if (since.compacted) return { hit: false, miss: 'compacted' }
+  return { hit: true, turnsAgo: since.turns }
+}
+
+function cacheReminder(filePath: string, lines: number, turnsAgo: number): string {
+  const when = turnsAgo === 0 ? 'this turn' : turnsAgo === 1 ? '1 turn ago' : `${turnsAgo} turns ago`
+  return [
+    `[cork-ai] ${path.basename(filePath)} — already read ${when}, unchanged since (${lines} lines, L1–L${lines}): the full content is still in your context above.`,
+    `[cork-ai] To view a region again: Read with offset=<line> limit=<n>, or \`sed -n '<a>,<b>p' ${filePath}\`.`,
+    `[cork-ai] Re-reading the whole file once more serves it raw.`,
+  ].join('\n')
+}
+
+function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, detectedModel: string | undefined, ext: string, scope: PolicyScope): void {
   markSkipped(ctx.filePath, 're-read')
-  recordReRead(ctx.filePath)
+  recordReRead(ctx.filePath, scope)
   try {
     accumulateInSession({
       projectPath: (ctx.event.cwd as string) || process.cwd(),
@@ -167,7 +244,7 @@ function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, d
       reReadTokensServed: rawTokens,
     })
   } catch { /* non-critical */ }
-  ctx.deps.telemetry({ event: 'hook_reread', properties: { kind: 'full', ext, source: ctx.source, tokens: tokenBucket(rawTokens), model: modelFamily(detectedModel) } })
+  ctx.deps.telemetry({ event: 'hook_reread', properties: { kind: 'full', ext, source: ctx.source, tokens: tokenBucket(rawTokens), model: modelFamily(detectedModel), agent_class: scope.agentClass } })
 }
 
 /**
@@ -180,41 +257,63 @@ function noteRangeRead(event: Record<string, unknown>, filePath: string, deps: R
   const sessionId = (event.session_id as string) || ''
   if (!sessionId) return
   const reads = loadSessionReads(sessionId)
-  if (reads.files[filePath] !== 1) return
-  reads.files[filePath] = 2
+  const key = readsKey(filePath, event)
+  if (reads.files[key] !== 1) return
+  reads.files[key] = 2
   saveSessionReads(sessionId, reads)
-  recordRangeRead(filePath)
+  recordRangeRead(filePath, { agentClass: agentClassOf(event) })
   deps.telemetry({ event: 'hook_reread', properties: { kind: 'range', ext: path.extname(filePath).toLowerCase() || 'none' } })
 }
 
 function handleRead(ctx: ReadContext): HookOutput {
   const { event, filePath, deps } = ctx
   const ext = path.extname(filePath).toLowerCase() || 'none'
-  const isSubagent = typeof event.agent_type === 'string' || typeof event.agent_id === 'string'
+  const agentClass: AgentClass = agentClassOf(event)
+  const isSubagent = agentClass !== 'main'
+  const agent = typeof event.agent_id === 'string' ? event.agent_id : null
+  const transcriptPath = event.transcript_path as string | undefined
+  const sessionId = (event.session_id as string) || ''
+  const reads = sessionId ? loadSessionReads(sessionId) : null
+  const key = readsKey(filePath, event)
+  const cfg = loadConfig()
+  // Read-only subagents can be handled more aggressively (lower threshold, no
+  // "being edited" rule): their context is discarded and they never edit.
+  const aggressive = agentClass === 'readonly' && cfg.policy?.readonlyAgentsAggressive !== false
+  const scope: PolicyScope = { agentClass: aggressive ? 'readonly' : agentClass === 'main' ? 'main' : 'editing' }
+
+  // Whatever leaves this function raw and whole is now in the model's context:
+  // remember it so the next identical read can be a reminder (re-read cache).
+  let fp: ReturnType<typeof fingerprint> | undefined
+  const servedRaw = () => {
+    if (!fp || !reads || !sessionId) return
+    reads.raw ??= {}
+    const prev = reads.raw[key]
+    reads.raw[key] = { ...fp, at: deps.now().toISOString(), offset: transcriptSize(transcriptPath), agent, hits: 0, ...(prev?.missed ? { missed: true } : {}) }
+    saveSessionReads(sessionId, reads)
+  }
   const skipped = (reason: string, extra: Record<string, string | number | undefined> = {}) => {
-    deps.telemetry({ event: 'hook_read', properties: { decision: 'raw', reason, ext, source: ctx.source, subagent: isSubagent, ...extra } })
+    servedRaw()
+    deps.telemetry({ event: 'hook_read', properties: { decision: 'raw', reason, ext, source: ctx.source, subagent: isSubagent, agent_class: agentClass, ...extra } })
     return undefined
   }
 
   // Never compress the file the user is explicitly asking about — the model
   // almost certainly needs its real content.
-  const userPrompt = lastUserPromptFromTranscript(event.transcript_path as string | undefined)
+  const userPrompt = lastUserPromptFromTranscript(transcriptPath)
   if (userPrompt && userPrompt.toLowerCase().includes(path.basename(filePath).toLowerCase())) return skipped('user-mentioned')
 
   // A file that already proved it needs its real content is served raw for good.
   if (isSkipped(filePath)) return skipped('skip-list')
 
-  const sessionId = (event.session_id as string) || ''
-  const reads = sessionId ? loadSessionReads(sessionId) : null
-
   // A file the model is editing in this session is served raw: every measured
   // edit flow (59% of compressed files, 97% of .tsx) ended in a full re-read.
-  if (reads?.edited?.[filePath]) return skipped('editing')
+  if (!aggressive && reads?.edited?.[filePath]) return skipped('editing')
 
   // Bytes, not a utf-8 string: `readFileSync(png, 'utf-8')` returns mojibake
   // that passes every downstream check.
   let buf: Buffer
   try { buf = fs.readFileSync(filePath) } catch { return undefined }
+  fp = fingerprint(filePath, buf)
 
   const verdict = eligibility(filePath, buf)
   if (!verdict.compress) return skipped(`ineligible: ${verdict.reason.split(' ')[0]}`)
@@ -223,44 +322,103 @@ function handleRead(ctx: ReadContext): HookOutput {
   const slice = content.split('\n').slice(0, 2000).join('\n')
   const originalTokens = estimateTokensFast(slice)
 
-  const cfg = loadConfig()
-  const turn = lastMainTurnUsage(event.transcript_path as string | undefined)
+  const turn = lastMainTurnUsage(transcriptPath)
   const detectedModel = turn?.model || (event.model as string) || cfg.detectedModel
+  const contextTokens = turn?.contextTokens ?? 0
 
   // Re-read of a file we already compressed this session: serve it raw,
   // whitelist it, and account the induced cost against our savings.
-  if (reads && reads.files[filePath]) {
-    reads.files[filePath] += 1
+  if (reads && reads.files[key]) {
+    reads.files[key] += 1
     saveSessionReads(sessionId, reads)
-    accountReRead(ctx, sessionId, originalTokens, detectedModel, ext)
+    accountReRead(ctx, sessionId, originalTokens, detectedModel, ext, scope)
+    servedRaw()
     return undefined
   }
 
+  // The re-read cache: the whole file went raw into this very context earlier
+  // and nothing changed since — a reminder instead of the content.
+  const cached = reads?.raw?.[key]
+  const cache = cfg.policy?.reReadCache === false ? { hit: false as const } : cacheStatus(cached, fp, transcriptPath, agent)
+  if (cached && cached.hits > 0 && !cached.missed && cache.hit) {
+    // A whole read right after a reminder: the reminder was not enough. Serve
+    // raw, learn it, charge the extra turn, stop reminding for this file.
+    cached.missed = true
+    saveSessionReads(sessionId, reads!)
+    recordReRead(filePath, { mode: 'cache' })
+    try {
+      accumulateInSession({
+        projectPath: (event.cwd as string) || process.cwd(),
+        originalTokens: 0, compressedTokens: 0, savedTokens: 0,
+        // The induced cost is the extra turn: one cache read of the whole context plus its output.
+        estimatedCostSaved: -((contextTokens / 1_000_000) * resolvePricing(detectedModel).cacheRead + (300 / 1_000_000) * resolvePricing(detectedModel).output),
+        byModule: {}, model: detectedModel, sessionId, reRead: true, reReadTokensServed: originalTokens,
+      })
+    } catch { /* non-critical */ }
+    deps.telemetry({ event: 'hook_reread', properties: { kind: 'after-cache', ext, source: ctx.source, tokens: tokenBucket(originalTokens), model: modelFamily(detectedModel), agent_class: agentClass } })
+    servedRaw()
+    return undefined
+  }
+  if (cache.hit && reads && cached) {
+    const lines = content.split('\n').length
+    const decision = gate({
+      filePath, originalTokens, compressedTokens: CACHE_REMINDER_TOKENS,
+      contextTokens, model: detectedModel, amplification: cfg.measuredAmplification,
+      scope: { mode: 'cache' },
+    })
+    if (decision.compress) {
+      cached.hits += 1
+      saveSessionReads(sessionId, reads)
+      recordCompression(filePath, { mode: 'cache' })
+      const saved = originalTokens - CACHE_REMINDER_TOKENS
+      try {
+        accumulateInSession({
+          projectPath: (event.cwd as string) || process.cwd(),
+          originalTokens, compressedTokens: CACHE_REMINDER_TOKENS, savedTokens: saved,
+          estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(detectedModel),
+          byModule: { hookReadCache: saved }, model: detectedModel, sessionId,
+        })
+      } catch { /* non-critical */ }
+      deps.telemetry({
+        event: 'hook_read',
+        properties: {
+          decision: 'cached', ext, source: ctx.source, kind: verdict.kind, subagent: isSubagent, agent_class: agentClass,
+          tokens: tokenBucket(originalTokens), saved_pct: Math.round((saved / originalTokens) * 100),
+          context: contextBucket(contextTokens), model: modelFamily(detectedModel),
+          p_reread: Math.round(decision.reReadProbability * 100), turns_ago: cache.turnsAgo,
+        },
+      })
+      return denyWith(cacheReminder(filePath, lines, cache.turnsAgo))
+    }
+  }
+  const cacheMiss = cached && !cache.hit ? cache.miss : undefined
+
   const view = outline(slice, filePath, verdict.kind)
   const compressedTokens = estimateTokensFast(view.text)
-  if (compressedTokens >= originalTokens * 0.85) return skipped('not-compressible', { tokens: tokenBucket(originalTokens) })
+  if (compressedTokens >= originalTokens * 0.85) return skipped('not-compressible', { tokens: tokenBucket(originalTokens), cache_miss: cacheMiss })
 
   // The expected-value gate: worth the re-read risk, given the live context
   // size and what this extension has done before?
   const decision = gate({
     filePath, originalTokens, compressedTokens,
-    contextTokens: turn?.contextTokens ?? 0,
+    contextTokens,
     model: detectedModel,
     amplification: cfg.measuredAmplification,
+    scope,
   })
   if (!decision.compress) {
     return skipped(decision.probation ? 'probation' : decision.reason.split(' ').slice(0, 2).join('-'), {
-      tokens: tokenBucket(originalTokens), context: contextBucket(turn?.contextTokens ?? 0), model: modelFamily(detectedModel),
-      p_reread: Math.round(decision.reReadProbability * 100),
+      tokens: tokenBucket(originalTokens), context: contextBucket(contextTokens), model: modelFamily(detectedModel),
+      p_reread: Math.round(decision.reReadProbability * 100), cache_miss: cacheMiss,
     })
   }
 
   const saved = originalTokens - compressedTokens
   if (reads && sessionId) {
-    reads.files[filePath] = 1
+    reads.files[key] = 1
     saveSessionReads(sessionId, reads)
   }
-  recordCompression(filePath)
+  recordCompression(filePath, scope)
 
   try {
     if (detectedModel && cfg.detectedModel !== detectedModel) updateConfig({ detectedModel })
@@ -277,10 +435,10 @@ function handleRead(ctx: ReadContext): HookOutput {
   deps.telemetry({
     event: 'hook_read',
     properties: {
-      decision: 'outline', ext, source: ctx.source, kind: verdict.kind, subagent: isSubagent,
+      decision: 'outline', ext, source: ctx.source, kind: verdict.kind, subagent: isSubagent, agent_class: agentClass,
       tokens: tokenBucket(originalTokens), saved_pct: Math.round((saved / originalTokens) * 100),
-      context: contextBucket(turn?.contextTokens ?? 0), model: modelFamily(detectedModel),
-      p_reread: Math.round(decision.reReadProbability * 100), probe: decision.reason === 'probation probe',
+      context: contextBucket(contextTokens), model: modelFamily(detectedModel),
+      p_reread: Math.round(decision.reReadProbability * 100), probe: decision.reason === 'probation probe', cache_miss: cacheMiss,
     },
   })
   return denyWith(view.text)
@@ -292,9 +450,9 @@ function handleBash(event: Record<string, unknown>, deps: Required<HookDeps>): H
   const sessionId = (event.session_id as string) || ''
 
   const edit = parseBashEdit(command, cwd)
-  if (edit) { markEdited(sessionId, edit.file, deps.now()); return undefined }
+  if (edit) { markEdited(sessionId, edit.file, deps.now(), event); return undefined }
 
-  const read = parseBashRead(command, cwd)
+  const read = parseBashRead(command, cwd, event.tool_name === 'PowerShell' ? 'powershell' : 'bash')
   if (!read) return undefined
   if (read.kind === 'range') { noteRangeRead(event, read.file, deps); return undefined }
   return handleRead({ event, filePath: read.file, source: read.tool, deps })
@@ -439,7 +597,7 @@ export function handleHookEvent(event: Record<string, unknown>, partialDeps: Hoo
       return undefined
   }
 
-  if (toolName === 'Bash') return handleBash(event, deps)
+  if (toolName === 'Bash' || toolName === 'PowerShell') return handleBash(event, deps)
   if (toolName !== 'Read') return undefined
 
   const filePath = toolInput.file_path as string

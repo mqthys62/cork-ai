@@ -6,7 +6,9 @@ import {
   MIN_SAVED_TOKENS,
   POLICY_FILE,
   PROBATION_MIN_SAMPLES,
+  agentClassOf,
   gate,
+  policyKey,
   loadPolicy,
   policySummary,
   recordCompression,
@@ -100,5 +102,46 @@ describe('gate — valeur attendue', () => {
 
   it('l’amplification par défaut vaut 50', () => {
     expect(DEFAULT_AMPLIFICATION).toBe(50)
+  })
+})
+
+describe('scopes (1.0): cache and agent class', () => {
+  it('agentClassOf : principal, lecture seule, édition', () => {
+    expect(agentClassOf({})).toBe('main')
+    expect(agentClassOf({ agent_type: 'Explore', agent_id: 'x' })).toBe('readonly')
+    expect(agentClassOf({ agent_type: 'plan' })).toBe('readonly')
+    expect(agentClassOf({ agent_type: 'general-purpose', agent_id: 'x' })).toBe('editing')
+    expect(agentClassOf({ agent_id: 'fork-1' })).toBe('editing')          // a fork: unknown type → editing
+    expect(agentClassOf({ agent_type: 'my-custom-reviewer' })).toBe('editing')
+  })
+
+  it('policyKey : .ts / ro:.ts / cache:.ts', () => {
+    expect(policyKey('/p/a.ts')).toBe('.ts')
+    expect(policyKey('/p/a.ts', { agentClass: 'editing' })).toBe('.ts')
+    expect(policyKey('/p/a.ts', { agentClass: 'readonly' })).toBe('ro:.ts')
+    expect(policyKey('/p/a.ts', { mode: 'cache', agentClass: 'readonly' })).toBe('cache:.ts')
+  })
+
+  it('la porte est plus basse (800) en lecture seule et pour le cache, et le cache part d’un a priori plus bas', () => {
+    const base = { filePath: '/p/a.ts', originalTokens: 2_000, compressedTokens: 900, contextTokens: 40_000, model: 'claude-opus-5', state: { version: 1 as const, ext: {} } }
+    expect(gate(base).compress).toBe(false)
+    expect(gate(base).reason).toContain('< 1500')
+    expect(gate({ ...base, scope: { agentClass: 'readonly' } }).compress).toBe(true)
+    expect(gate({ ...base, scope: { agentClass: 'editing' } }).compress).toBe(false)
+    const cache = gate({ ...base, compressedTokens: 80, scope: { mode: 'cache' } })
+    expect(cache.compress).toBe(true)
+    expect(cache.reReadProbability).toBeCloseTo(0.3, 5)
+    expect(gate(base).reReadProbability).toBeCloseTo(0.5, 5)
+  })
+
+  it('les statistiques se cumulent sous la bonne clé', () => {
+    recordCompression('/p/a.ts', { agentClass: 'readonly' })
+    recordCompression('/p/a.ts', { mode: 'cache' })
+    recordReRead('/p/a.ts', { mode: 'cache' })
+    recordCompression('/p/a.ts')
+    const s = loadPolicy().ext
+    expect(s['ro:.ts']).toMatchObject({ compressions: 1, reReads: 0 })
+    expect(s['cache:.ts']).toMatchObject({ compressions: 1, reReads: 1 })
+    expect(s['.ts']).toMatchObject({ compressions: 1 })
   })
 })

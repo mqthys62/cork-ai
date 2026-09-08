@@ -2,7 +2,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { scanTranscript, sessionAmplification } from '../../src/cli/transcript-usage.js'
+import { scanTranscript, sessionAmplification, transcriptSince } from '../../src/cli/transcript-usage.js'
 import { costOfUsage, costOfAvoidedTokens } from '../../src/pricing/index.js'
 
 let dir: string
@@ -245,5 +245,25 @@ describe('costOfUsage — split TTL du cache', () => {
       'claude-opus-5',
     )
     expect(cost).toBeCloseTo(12.5)
+  })
+})
+
+describe('transcriptSince (re-read cache)', () => {
+  it('compte les tours et repère une compaction après un offset', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cork-since-'))
+    const file = path.join(dir, 't.jsonl')
+    const turn = (id: string) => JSON.stringify({ type: 'assistant', message: { id, model: 'claude-opus-5', usage: { input_tokens: 1 } } }) + '\n'
+    fs.writeFileSync(file, turn('a1'))
+    const offset = fs.statSync(file).size
+    expect(transcriptSince(file, offset)).toEqual({ compacted: false, turns: 0 })
+    fs.appendFileSync(file, turn('a2') + turn('a2') + JSON.stringify({ type: 'assistant', isSidechain: true, message: { id: 'side' } }) + '\n' + turn('a3'))
+    expect(transcriptSince(file, offset)).toEqual({ compacted: false, turns: 2 })
+    fs.appendFileSync(file, JSON.stringify({ type: 'system', subtype: 'compact_boundary' }) + '\n' + turn('a4'))
+    expect(transcriptSince(file, offset)).toEqual({ compacted: true, turns: 3 })
+    // an offset past the end (file rotated) or a missing file: unknown
+    expect(transcriptSince(file, fs.statSync(file).size + 10)).toBeUndefined()
+    expect(transcriptSince(path.join(dir, 'none.jsonl'), 0)).toBeUndefined()
+    expect(transcriptSince(undefined, 0)).toBeUndefined()
+    fs.rmSync(dir, { recursive: true, force: true })
   })
 })
