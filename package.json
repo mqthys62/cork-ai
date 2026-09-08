@@ -9,6 +9,7 @@
     "build": "tsup --entry.cli/index src/cli/index.ts --format cjs --clean",
     "dev": "tsup --entry.cli/index src/cli/index.ts --format cjs --watch",
     "test": "vitest run",
+    "test:sdk": "vitest run --config vitest.sdk.config.ts",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "benchmark": "node --loader tsx/esm benchmarks/cost-comparison.ts",

@@ -52,6 +52,14 @@ export const CORK_HOOK_FALLBACK = 'cork-ai hook'
 
 /** Claude Code version that introduced the exec form (`args`) of command hooks. */
 export const CLAUDE_EXEC_FORM_SINCE = '2.1.139'
+/**
+ * Oldest Claude Code the hook payload was verified against (session_id,
+ * transcript_path, cwd, permission_mode, agent_type/agent_id, tool_input,
+ * SessionEnd). Older versions probably work; `doctor` says so.
+ */
+export const CLAUDE_CODE_MIN = '2.1.47'
+/** Last Claude Code version the 1.0 test pass ran on. Newer is fine until proven otherwise. */
+export const CLAUDE_CODE_TESTED_MAX = '2.1.263'
 
 /**
  * The hook entry to install for a resolved binary path ('' → PATH fallback).

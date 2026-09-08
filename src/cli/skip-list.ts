@@ -14,6 +14,7 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { writeFileAtomic } from './fs-utils.js'
 
 const GLOBAL_DIR = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 const SKIP_FILE = path.join(GLOBAL_DIR, 'skip-list.json')
@@ -50,7 +51,7 @@ function load(): SkipList {
 function save(list: SkipList): void {
   try {
     fs.mkdirSync(GLOBAL_DIR, { recursive: true })
-    fs.writeFileSync(SKIP_FILE, JSON.stringify(list), 'utf-8')
+    writeFileAtomic(SKIP_FILE, JSON.stringify(list))
   } catch { /* non-critical: the hook must never break a Read */ }
 }
 

@@ -11,6 +11,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { ContextGuardConfig } from './context-guard.js'
+import { writeFileAtomic } from './fs-utils.js'
 
 export const CORK_HOME = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 export const CONFIG_FILE = path.join(CORK_HOME, 'config.json')
@@ -69,7 +70,7 @@ export function loadConfig(): CorkConfig {
 export function saveConfig(cfg: CorkConfig): void {
   try {
     fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true })
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8')
+    writeFileAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2))
   } catch { /* non-critical */ }
 }
 

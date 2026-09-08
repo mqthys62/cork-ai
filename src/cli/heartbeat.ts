@@ -11,6 +11,7 @@ import fs from 'fs'
 import path from 'path'
 import { CORK_HOME } from './config.js'
 import { VERSION } from './version.js'
+import { writeFileAtomic, debugLog } from './fs-utils.js'
 
 export const HEARTBEAT_FILE = path.join(CORK_HOME, 'heartbeat.json')
 
@@ -60,9 +61,10 @@ export function writeHeartbeat(event: Record<string, unknown>, now: Date = new D
       corkVersion: VERSION,
     }
     fs.mkdirSync(CORK_HOME, { recursive: true })
-    fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(beat), 'utf-8')
+    writeFileAtomic(HEARTBEAT_FILE, JSON.stringify(beat))
     return beat
-  } catch {
+  } catch (err) {
+    debugLog('heartbeat.write', err)
     return undefined
   }
 }
@@ -98,7 +100,7 @@ export function noteSessionSeen(sessionId: string, now: Date = new Date()): { fi
     const cutoff = now.getTime() - SESSIONS_SEEN_TTL_MS
     for (const [id, at] of Object.entries(seen)) if (new Date(at).getTime() < cutoff) delete seen[id]
     fs.mkdirSync(CORK_HOME, { recursive: true })
-    fs.writeFileSync(SESSIONS_SEEN_FILE, JSON.stringify(seen), 'utf-8')
-  } catch { /* best effort */ }
+    writeFileAtomic(SESSIONS_SEEN_FILE, JSON.stringify(seen))
+  } catch (err) { debugLog('heartbeat.sessionsSeen', err) }
   return { first: true, startedAt }
 }

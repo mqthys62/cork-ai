@@ -23,6 +23,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { resolvePricing } from '../pricing/index.js'
+import { writeFileAtomic, debugLog } from './fs-utils.js'
 
 const GLOBAL_DIR = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 export const POLICY_FILE = path.join(GLOBAL_DIR, 'policy.json')
@@ -116,8 +117,8 @@ export function loadPolicy(): PolicyState {
 export function savePolicy(state: PolicyState): void {
   try {
     fs.mkdirSync(GLOBAL_DIR, { recursive: true })
-    fs.writeFileSync(POLICY_FILE, JSON.stringify(state), 'utf-8')
-  } catch { /* non-critical: the hook must never fail a read */ }
+    writeFileAtomic(POLICY_FILE, JSON.stringify(state))
+  } catch (err) { debugLog('policy.save', err) /* non-critical: the hook must never fail a read */ }
 }
 
 export function normalizeExt(filePath: string): string {

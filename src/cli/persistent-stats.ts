@@ -12,6 +12,7 @@ import os from 'os'
 import path from 'path'
 import type { MeasuredUsageStats } from '../types/index.js'
 import { inputPriceForModel } from '../pricing/index.js'
+import { writeFileAtomic } from './fs-utils.js'
 
 // CORK_AI_HOME overrides the data directory (tests isolate through it —
 // without it, every `npm test` run would clobber the user's real stats).
@@ -196,7 +197,7 @@ function loadStats(): GlobalStats {
 function saveStats(stats: GlobalStats): void {
   ensureDir()
   stats.updatedAt = new Date().toISOString()
-  fs.writeFileSync(STATS_FILE, JSON.stringify(stats, null, 2), 'utf-8')
+  writeFileAtomic(STATS_FILE, JSON.stringify(stats, null, 2))
 }
 
 // ─── Write (completed sessions) ────────────────────────────────────────────────────────────
@@ -289,7 +290,7 @@ export function resetGlobalStats(): void {
     },
     sessions: [],
   }
-  fs.writeFileSync(STATS_FILE, JSON.stringify(fresh, null, 2), 'utf-8')
+  writeFileAtomic(STATS_FILE, JSON.stringify(fresh, null, 2))
 }
 
 // ─── Live sessions (one file per Claude Code session_id) ─────────────────────
@@ -504,7 +505,7 @@ export function accumulateInSession(event: SessionEvent): void {
     }
   }
 
-  fs.writeFileSync(file, JSON.stringify(live, null, 2), 'utf-8')
+  writeFileAtomic(file, JSON.stringify(live, null, 2))
 }
 
 export function clearLiveSession(): void {

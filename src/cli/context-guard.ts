@@ -20,6 +20,7 @@ import os from 'os'
 import path from 'path'
 import { resolvePricing } from '../pricing/index.js'
 import { lastMainTurnUsage } from './transcript-usage.js'
+import { writeFileAtomic } from './fs-utils.js'
 
 const GLOBAL_DIR = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
 const LIVE_DIR = path.join(GLOBAL_DIR, 'live')
@@ -58,7 +59,7 @@ function loadState(sessionId: string): GuardState {
 function saveState(sessionId: string, state: GuardState): void {
   try {
     fs.mkdirSync(LIVE_DIR, { recursive: true })
-    fs.writeFileSync(stateFile(sessionId), JSON.stringify(state), 'utf-8')
+    writeFileAtomic(stateFile(sessionId), JSON.stringify(state))
   } catch { /* non-critical */ }
 }
 

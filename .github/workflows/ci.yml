@@ -35,6 +35,10 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Deprecated SDK tests
+        if: matrix.os == 'ubuntu-latest' && matrix.node == '22'
+        run: npm run test:sdk
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

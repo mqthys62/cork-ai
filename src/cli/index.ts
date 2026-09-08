@@ -49,11 +49,12 @@ import {
 import { inputPriceForModel } from '../pricing/index.js'
 import { scanAllTranscripts, contextReport, listTranscriptFiles } from './transcript-usage.js'
 import { DIGEST_DIR, DIGEST_MAX_AGE_DAYS, latestDigest, listDigests, type SessionDigest } from './digests.js'
+import { DEBUG_LOG_FILE, debugEnabled, debugLog, debugTrace } from './fs-utils.js'
 import { lifetimeSavings, reReadPenalty, buildSavingsSnapshot, runSendSnapshot, snapshotDue, snapshotInputs } from './savings.js'
-import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, corkHookEntry, ensureHookGroup, renderHookEntry, isShellFormOnWindows, type ClaudeSettings } from './claude-settings.js'
+import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE, CLAUDE_CODE_MIN, CLAUDE_CODE_TESTED_MAX, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, corkHookEntry, ensureHookGroup, renderHookEntry, isShellFormOnWindows, type ClaudeSettings } from './claude-settings.js'
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
-import { handleHookEvent } from './hook.js'
+import { handleHookEvent, type HookOutput } from './hook.js'
 import { VERSION } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat } from './heartbeat.js'
@@ -972,13 +973,18 @@ function hooksStatus(): void {
 
 // All the logic lives in src/cli/hook.ts (pure, unit-tested). This is the I/O shell.
 async function runHook(): Promise<void> {
+  const started = Date.now()
   let input = ''
-  for await (const chunk of process.stdin) input += chunk
+  try { for await (const chunk of process.stdin) input += chunk } catch (err) { debugLog('hook.stdin', err); return }
   if (!input.trim()) return
   let event: Record<string, unknown>
-  try { event = JSON.parse(input) as Record<string, unknown> } catch { return }
-  const output = handleHookEvent(event)
+  try { event = JSON.parse(input) as Record<string, unknown> } catch (err) { debugLog('hook.parse', err, { bytes: input.length }); return }
+  // Whatever happens, the tool call must go through: an exception here would
+  // surface as a hook error in Claude Code and, worse, hide the cause.
+  let output: HookOutput
+  try { output = handleHookEvent(event) } catch (err) { debugLog('hook.handle', err, { event: event.hook_event_name, tool: event.tool_name }); return }
   if (output) console.log(JSON.stringify(output))
+  debugTrace('hook.event', { event: event.hook_event_name, tool: event.tool_name, agent: typeof event.agent_type === 'string' ? event.agent_type : undefined, decision: output ? 'deny' : 'pass', ms: Date.now() - started })
 }
 
 // ─── context (the report that explains the bill) ─────────────────────────────
@@ -1278,18 +1284,59 @@ async function runDoctor(args: string[]): Promise<void> {
     })
   }
 
-  // 6b. Windows: the exec form needs Claude Code ≥ 2.1.139
-  if (process.platform === 'win32') {
+  // 6b. Claude Code version: inside the range cork-ai was built and tested against?
+  {
     const cc = beat?.claudeVersion ?? rows.find(r => r.claudeVersion)?.claudeVersion
-    const tooOld = cc !== undefined && compareVersions(cc, CLAUDE_EXEC_FORM_SINCE) < 0
+    const min = process.platform === 'win32' ? CLAUDE_EXEC_FORM_SINCE : CLAUDE_CODE_MIN
+    const tooOld = cc !== undefined && compareVersions(cc, min) < 0
+    const newer = cc !== undefined && compareVersions(cc, CLAUDE_CODE_TESTED_MAX) > 0
     push({
       name: 'claude-code',
-      status: tooOld ? 'fail' : cc ? 'ok' : 'info',
+      status: tooOld ? (process.platform === 'win32' ? 'fail' : 'warn') : cc ? 'ok' : 'info',
       summary: tooOld
-        ? `Claude Code ${cc} runs hooks through a shell only — cork-ai needs ≥ ${CLAUDE_EXEC_FORM_SINCE} on Windows (update Claude Code)`
-        : cc ? `Claude Code ${cc} (exec-form hooks supported)` : `Claude Code version unknown yet — exec-form hooks need ≥ ${CLAUDE_EXEC_FORM_SINCE}`,
-      data: { claudeVersion: cc ?? null, minimum: CLAUDE_EXEC_FORM_SINCE },
+        ? `Claude Code ${cc} is older than ${min}${process.platform === 'win32' ? ' — hooks in exec form need it on Windows' : ' — the oldest version the hook payload was verified against'}: update Claude Code`
+        : cc
+          ? `Claude Code ${cc}${newer ? ` (newer than ${CLAUDE_CODE_TESTED_MAX}, the last version tested — see docs/METHODOLOGY.md)` : ' (tested range)'}`
+          : `Claude Code version unknown yet (appears with the first hook event) — supported: ${min} … ${CLAUDE_CODE_TESTED_MAX}`,
+      data: { claudeVersion: cc ?? null, minimum: min, testedMax: CLAUDE_CODE_TESTED_MAX },
     })
+  }
+
+  // 6c. Telemetry snapshot and caches
+  const cfgNow = loadConfig()
+  if (cfgNow.telemetry) {
+    const last = cfgNow.lastSnapshotAt ? new Date(cfgNow.lastSnapshotAt).getTime() : undefined
+    const ageH = last ? Math.round((Date.now() - last) / 3_600_000) : undefined
+    push({
+      name: 'snapshot',
+      status: ageH === undefined || ageH > 48 ? 'warn' : 'ok',
+      summary: ageH === undefined ? 'telemetry on but no daily snapshot sent yet — cork-ai gain or the end of a session sends one' : ageH > 48 ? `last daily snapshot ${ageH} h ago — cork-ai gain sends a new one` : `last daily snapshot ${ageH} h ago`,
+      data: { lastSnapshotAt: cfgNow.lastSnapshotAt ?? null, ageHours: ageH ?? null },
+    })
+  }
+  {
+    const has = (f: string) => { try { return fs.statSync(f).size > 2 } catch { return false } }
+    const spend = has(SPEND_CACHE_FILE), analysis = has(ANALYSIS_CACHE_FILE)
+    push({ name: 'caches', status: 'info', summary: `transcript caches: spend ${spend ? 'present' : 'absent'}, analysis ${analysis ? 'present' : 'absent'} ${C.dim('(built by gain --all / context; reset --spend-cache clears them)')}`, data: { spendCache: spend, analysisCache: analysis } })
+  }
+  {
+    let errors24h = 0, lines = 0
+    try {
+      const cutoff = Date.now() - 86_400_000
+      for (const line of fs.readFileSync(DEBUG_LOG_FILE, 'utf-8').split('\n')) {
+        if (!line) continue
+        lines++
+        try { const r = JSON.parse(line) as { at?: string; error?: string }; if (r.error && r.at && new Date(r.at).getTime() > cutoff) errors24h++ } catch { /* partial */ }
+      }
+    } catch { /* no log */ }
+    if (debugEnabled() || lines > 0) {
+      push({
+        name: 'debug',
+        status: errors24h > 0 ? 'warn' : 'info',
+        summary: `${debugEnabled() ? 'CORK_AI_DEBUG on' : 'debug log present'} — ${DEBUG_LOG_FILE}: ${lines} line(s), ${errors24h} error(s) in 24 h`,
+        data: { enabled: debugEnabled(), file: DEBUG_LOG_FILE, lines, errors24h },
+      })
+    }
   }
 
   // 7. Context settings

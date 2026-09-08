@@ -9,6 +9,7 @@
 import fs from 'fs'
 import path from 'path'
 import { CORK_HOME } from './config.js'
+import { writeFileAtomic, debugLog } from './fs-utils.js'
 
 export const DIGEST_DIR = path.join(CORK_HOME, 'digests')
 export const DIGEST_MAX_AGE_DAYS = 30
@@ -46,8 +47,8 @@ function digestFile(sessionId: string, dir = DIGEST_DIR): string {
 export function writeDigest(digest: SessionDigest, now: Date = new Date(), dir = DIGEST_DIR): void {
   try {
     fs.mkdirSync(dir, { recursive: true })
-    fs.writeFileSync(digestFile(digest.sessionId, dir), JSON.stringify(digest, null, 2), 'utf-8')
-  } catch { /* non-critical */ }
+    writeFileAtomic(digestFile(digest.sessionId, dir), JSON.stringify(digest, null, 2))
+  } catch (err) { debugLog('digests.write', err) }
   pruneDigests(now, dir)
 }
 

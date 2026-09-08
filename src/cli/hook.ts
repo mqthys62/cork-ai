@@ -33,6 +33,7 @@ import { isSkipped, markSkipped } from './skip-list.js'
 import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
 import { snapshotDue, type SnapshotReason } from './savings.js'
 import { lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile, transcriptSince } from './transcript-usage.js'
+import { writeFileAtomic, debugLog } from './fs-utils.js'
 
 export type HookOutput = Record<string, unknown> | undefined
 
@@ -119,8 +120,8 @@ export function loadSessionReads(sessionId: string): SessionReads {
 function saveSessionReads(sessionId: string, reads: SessionReads): void {
   try {
     fs.mkdirSync(LIVE_DIR, { recursive: true })
-    fs.writeFileSync(readsFileFor(sessionId), JSON.stringify(reads), 'utf-8')
-  } catch { /* non-critical */ }
+    writeFileAtomic(readsFileFor(sessionId), JSON.stringify(reads))
+  } catch (err) { debugLog('hook.saveSessionReads', err) }
 }
 
 function markEdited(sessionId: string, filePath: string, now: Date, event: Record<string, unknown>): void {
@@ -190,7 +191,7 @@ function handlePostToolUseEdit(event: Record<string, unknown>, now: Date): void 
       sessionId,
       editFailure: true,
     })
-  } catch { /* non-critical */ }
+  } catch (err) { debugLog('hook.editFailure.accumulate', err) }
 }
 
 // ─── Read handling (Read tool and Bash equivalents share one path) ───────────
@@ -244,7 +245,7 @@ function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, d
       reRead: true,
       reReadTokensServed: rawTokens,
     })
-  } catch { /* non-critical */ }
+  } catch (err) { debugLog('hook.reRead.accumulate', err) }
   ctx.deps.telemetry({ event: 'hook_reread', properties: { kind: 'full', ext, source: ctx.source, tokens: tokenBucket(rawTokens), model: modelFamily(detectedModel), agent_class: scope.agentClass } })
 }
 
@@ -355,7 +356,7 @@ function handleRead(ctx: ReadContext): HookOutput {
         estimatedCostSaved: -((contextTokens / 1_000_000) * resolvePricing(detectedModel).cacheRead + (300 / 1_000_000) * resolvePricing(detectedModel).output),
         byModule: {}, model: detectedModel, sessionId, reRead: true, reReadTokensServed: originalTokens,
       })
-    } catch { /* non-critical */ }
+    } catch (err) { debugLog('hook.afterCache.accumulate', err) }
     deps.telemetry({ event: 'hook_reread', properties: { kind: 'after-cache', ext, source: ctx.source, tokens: tokenBucket(originalTokens), model: modelFamily(detectedModel), agent_class: agentClass } })
     servedRaw()
     return undefined
@@ -379,7 +380,7 @@ function handleRead(ctx: ReadContext): HookOutput {
           estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(detectedModel),
           byModule: { hookReadCache: saved }, model: detectedModel, sessionId,
         })
-      } catch { /* non-critical */ }
+      } catch (err) { debugLog('hook.cacheHit.accumulate', err) }
       deps.telemetry({
         event: 'hook_read',
         properties: {
@@ -431,7 +432,7 @@ function handleRead(ctx: ReadContext): HookOutput {
       model: detectedModel,
       sessionId: sessionId || undefined,
     })
-  } catch { /* non-critical */ }
+  } catch (err) { debugLog('hook.outline.accumulate', err) }
 
   deps.telemetry({
     event: 'hook_read',

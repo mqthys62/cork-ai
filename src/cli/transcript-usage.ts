@@ -26,6 +26,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { costOfUsage, resolvePricing, type ApiUsage } from '../pricing/index.js'
+import { writeFileAtomic } from './fs-utils.js'
 
 // ─── Durable per-session cache ──────────────────────────────────────────────
 //
@@ -69,7 +70,7 @@ function loadSpendCache(): SpendCache {
 function saveSpendCache(cache: SpendCache): void {
   try {
     fs.mkdirSync(CORK_HOME, { recursive: true })
-    fs.writeFileSync(SPEND_CACHE_FILE, JSON.stringify(cache), 'utf-8')
+    writeFileAtomic(SPEND_CACHE_FILE, JSON.stringify(cache))
   } catch { /* best effort */ }
 }
 
@@ -125,7 +126,7 @@ function writeAnalysisCache(file: string, patch: Omit<AnalysisEntry, 'size' | 'm
     // Drop entries whose transcript is gone (Claude Code purges after 30 days).
     for (const key of Object.keys(cache.files)) if (!fs.existsSync(key)) delete cache.files[key]
     fs.mkdirSync(CORK_HOME, { recursive: true })
-    fs.writeFileSync(ANALYSIS_CACHE_FILE, JSON.stringify(cache), 'utf-8')
+    writeFileAtomic(ANALYSIS_CACHE_FILE, JSON.stringify(cache))
   } catch { /* best effort */ }
 }
 
