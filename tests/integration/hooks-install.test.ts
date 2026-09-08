@@ -4,22 +4,34 @@
  */
 import { spawnSync } from 'child_process'
 import fs from 'fs'
+import { createRequire } from 'module'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 const CLI = path.resolve(__dirname, '../../src/cli/index.ts')
+// Run tsx through the current node binary rather than `npx`: on Windows `npx`
+// is a .cmd shim that spawnSync cannot start without a shell.
+const TSX = createRequire(import.meta.url).resolve('tsx/cli')
 let home: string
 let settingsFile: string
 
 function run(...args: string[]): { stdout: string; status: number | null } {
-  const res = spawnSync('npx', ['tsx', CLI, ...args], {
+  const res = spawnSync(process.execPath, [TSX, CLI, ...args], {
     encoding: 'utf-8',
-    env: { ...process.env, HOME: home, CORK_AI_HOME: path.join(home, '.cork-ai'), CLAUDE_PROJECTS_DIR: path.join(home, 'none') },
+    env: {
+      ...process.env,
+      // os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
+      HOME: home,
+      USERPROFILE: home,
+      CORK_AI_HOME: path.join(home, '.cork-ai'),
+      CLAUDE_PROJECTS_DIR: path.join(home, 'none'),
+    },
     input: '',
     timeout: 60_000,
+    windowsHide: true,
   })
-  return { stdout: res.stdout + res.stderr, status: res.status }
+  return { stdout: (res.stdout ?? '') + (res.stderr ?? '') + (res.error ? String(res.error) : ''), status: res.status }
 }
 
 function settings(): { hooks?: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string }> }>> } {

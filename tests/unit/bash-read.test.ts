@@ -33,9 +33,11 @@ describe('parseBashRead — lectures entières', () => {
     expect(parseBashRead('cat app.ts', dir)).toEqual({ kind: 'full', file, tool: 'cat' })
     expect(parseBashRead('cat src/b.ts', dir)?.file).toBe(path.join(dir, 'src', 'b.ts'))
   })
-  it('cat -n, cat -A et le chemin absolu sont acceptés', () => {
-    expect(parseBashRead(`cat -n ${file}`, '/')?.kind).toBe('full')
-    expect(parseBashRead(`cat -A "${file}"`, '/')?.kind).toBe('full')
+  it('cat -n, cat -A et le chemin absolu (entre guillemets) sont acceptés', () => {
+    // Quoted: an unquoted Windows path would have its backslashes eaten as
+    // shell escapes, which is also what a real shell would do.
+    expect(parseBashRead(`cat -n "${file}"`, '/')?.kind).toBe('full')
+    expect(parseBashRead(`cat -A '${file}'`, '/')?.kind).toBe('full')
   })
   it('rtk proxy cat est une lecture', () => {
     expect(parseBashRead('rtk proxy cat app.ts', dir)?.kind).toBe('full')

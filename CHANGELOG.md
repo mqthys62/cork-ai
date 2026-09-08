@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **CI rouge sur Windows (Node 18/20/22)** — le test d'intégration `hooks-install` lançait le CLI via `npx tsx` : sur Windows `npx` est un shim `.cmd` que `spawnSync` ne peut pas démarrer sans shell, et `HOME` n'y est pas lu par `os.homedir()` (`USERPROFILE`). Le test passe désormais par `process.execPath` + le `cli.mjs` de tsx résolu localement (plus rapide aussi : 0,6 s au lieu de 1,2 s par cas) et pose les deux variables. Les chemins absolus des tests `bash-read` sont entre guillemets, comme un vrai shell l'exigerait pour des antislashs.
+- L'outline normalise les fins de ligne `\r\n` — les fichiers Windows (et le checkout CRLF des runners) donnaient des lignes terminées par `\r`.
+
+### Changed
+
+- Matrice CI : Node 24 ajouté (LTS courante) ; les jobs coverage et build passent sur Node 22.
+
 ## [0.7.0] - 2026-09-08
 
 ### Fixed

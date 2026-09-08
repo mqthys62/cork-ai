@@ -102,7 +102,7 @@ function hint(filePath: string, lines: number): string {
 /** Code files: imports folded, declarations with line numbers. */
 export function outlineCode(content: string, filePath: string): OutlineResult {
   const ext = path.extname(filePath).toLowerCase()
-  const lines = content.split('\n')
+  const lines = content.split(/\r?\n/)
   const width = String(lines.length).length
   const out: string[] = []
   let entries = 0
@@ -179,7 +179,7 @@ export function outlineCode(content: string, filePath: string): OutlineResult {
 
 /** Markdown and prose: headings with line numbers, plus the opening lines. */
 export function outlineText(content: string, filePath: string): OutlineResult {
-  const lines = content.split('\n')
+  const lines = content.split(/\r?\n/)
   const width = String(lines.length).length
   const ext = path.extname(filePath).toLowerCase()
   const out: string[] = []
@@ -223,7 +223,7 @@ export function outlineText(content: string, filePath: string): OutlineResult {
 
 /** JSON: keys kept, long strings and arrays elided. */
 export function outlineJson(content: string, filePath: string): OutlineResult {
-  const lines = content.split('\n').length
+  const lines = content.split(/\r?\n/).length
   try {
     const obj = JSON.parse(content) as unknown
     const slim = JSON.stringify(obj, (_k, v) => {
