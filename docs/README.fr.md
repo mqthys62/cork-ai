@@ -51,6 +51,8 @@ Télécharge le bon binaire pour ton OS + architecture, le place dans `~/.local/
 irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
+Nécessite Claude Code 2.1.139 ou plus récent : sous Windows les hooks sont installés en forme exec (`command` + `args`), la seule qui fonctionne que Claude Code lance les hooks via Git Bash ou via PowerShell. `cork-ai doctor` le signale si la version est trop ancienne.
+
 ### Téléchargement manuel
 
 [Releases GitHub](https://github.com/mqthys62/cork-ai/releases/latest) → télécharge le binaire pour ta plateforme :

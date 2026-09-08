@@ -47,6 +47,8 @@ Descarga el binario correcto para tu OS + arquitectura, lo coloca en `~/.local/b
 irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex
 ```
 
+Requiere Claude Code 2.1.139 o más reciente: en Windows los hooks se instalan en forma exec (`command` + `args`), la única que funciona tanto si Claude Code ejecuta los hooks con Git Bash como con PowerShell. `cork-ai doctor` lo indica si la versión es demasiado antigua.
+
 ### Descarga manual
 
 [Releases de GitHub](https://github.com/mqthys62/cork-ai/releases/latest) → descarga el binario para tu plataforma:

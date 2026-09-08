@@ -48,7 +48,7 @@ import {
 import { inputPriceForModel } from '../pricing/index.js'
 import { scanAllTranscripts, contextReport, listTranscriptFiles } from './transcript-usage.js'
 import { lifetimeSavings, reReadPenalty, buildSavingsSnapshot, runSendSnapshot, snapshotDue, snapshotInputs } from './savings.js'
-import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, type ClaudeSettings, type HookGroup } from './claude-settings.js'
+import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, corkHookEntry, ensureHookGroup, renderHookEntry, isShellFormOnWindows, type ClaudeSettings } from './claude-settings.js'
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
 import { handleHookEvent } from './hook.js'
@@ -764,51 +764,15 @@ function resolveHookBinary(): string {
   return ''  // fallback: CORK_HOOK_FALLBACK, resolved through PATH
 }
 
-/**
- * Makes one hook spec present in the settings. Returns true when something
- * changed: added, migrated from the bare `cork-ai hook` form to the absolute
- * path, migrated from a legacy matcher, or the command path updated.
- */
-function ensureHookGroup(settings: ClaudeSettings, spec: { event: string; matcher?: string; legacyMatchers?: string[] }, hookCmd: string): boolean {
-  settings.hooks ??= {}
-  settings.hooks[spec.event] ??= []
-  const groups = settings.hooks[spec.event] as HookGroup[]
-  const accepted = [spec.matcher, ...(spec.legacyMatchers ?? [])]
-
-  for (const g of groups) {
-    const existing = g.hooks?.find(h => isCorkCmd(h.command))
-    if (!existing) continue
-    if (spec.matcher !== undefined && !accepted.includes(g.matcher)) continue
-    let changed = false
-    // Migrate a bare "cork-ai hook" fallback (pre-dates resolveHookBinary())
-    // to a resolved absolute path. The bare form depends on Claude Code's
-    // hook subprocess inheriting a shell PATH that includes the binary,
-    // which isn't guaranteed — it fails as a silent, non-blocking hook error.
-    if (existing.command !== hookCmd && hookCmd !== CORK_HOOK_FALLBACK) { existing.command = hookCmd; changed = true }
-    if (spec.matcher !== undefined && g.matcher !== spec.matcher) { g.matcher = spec.matcher; changed = true }
-    return changed
-  }
-
-  const existingGroup = spec.matcher !== undefined ? groups.find(g => g.matcher === spec.matcher) : undefined
-  if (existingGroup) {
-    existingGroup.hooks.push({ type: 'command', command: hookCmd })
-  } else {
-    groups.push(spec.matcher !== undefined
-      ? { matcher: spec.matcher, hooks: [{ type: 'command', command: hookCmd }] }
-      : { hooks: [{ type: 'command', command: hookCmd }] })
-  }
-  return true
-}
-
 async function hooksInstall(): Promise<void> {
   const settings = loadClaudeSettings()
 
   // Use the absolute binary path so the hook works
   // even if ~/.local/bin is not in Claude Code's PATH (Mac / Electron)
   const binaryPath = resolveHookBinary()
-  const hookCmd = binaryPath ? `"${binaryPath}" hook` : CORK_HOOK_FALLBACK
+  const entry = corkHookEntry(binaryPath)
 
-  const changed = CORK_HOOKS.map(spec => ({ spec, changed: ensureHookGroup(settings, spec, hookCmd) })).filter(x => x.changed)
+  const changed = CORK_HOOKS.map(spec => ({ spec, changed: ensureHookGroup(settings, spec, entry) })).filter(x => x.changed)
 
   // The guard is on by default once installed; keep any explicit user choice.
   const cfg = loadConfig()
@@ -825,7 +789,7 @@ async function hooksInstall(): Promise<void> {
   for (const { spec } of changed) {
     console.log(`   ${spec.event}${spec.matcher ? ` (${spec.matcher})` : ''} → ${C.cyan(CLAUDE_SETTINGS)}`)
   }
-  if (binaryPath) console.log(`   Binary: ${C.dim(binaryPath)}`)
+  if (binaryPath) console.log(`   Binary: ${C.dim(binaryPath)}${entry.args ? C.dim(' (exec form, no shell — needs Claude Code ≥ ' + CLAUDE_EXEC_FORM_SINCE + ')') : ''}`)
   console.log()
   console.log(`   ${C.dim('Read / Bash:')} whole-file reads (Read tool, cat, …) get a numbered outline when it pays off.`)
   console.log(`   ${C.dim('Context guard:')} a notice at 150k / 300k / 500k / 750k tokens of context — the cost that matters.`)
@@ -919,7 +883,7 @@ function hooksRemove(): void {
   for (const eventName of Object.keys(settings.hooks ?? {})) {
     const groups = settings.hooks?.[eventName] ?? []
     for (const group of groups) {
-      group.hooks = group.hooks.filter(h => !isCorkCmd(h.command))
+      group.hooks = group.hooks.filter(h => !isCorkCmd(h))
     }
     if (settings.hooks) {
       const kept = groups.filter(g => g.hooks.length > 0)
@@ -1191,23 +1155,27 @@ async function runDoctor(args: string[]): Promise<void> {
   const hooks = installedCorkHooks(settings)
   const missing = hooks.filter(h => !h.present)
   const stale = hooks.filter(h => h.present && h.command && h.command !== CORK_HOOK_FALLBACK && binary && !h.command.includes(binary))
+  // Windows: the shell form runs through PowerShell when Git Bash is absent
+  // (Claude Code ≥ 2.1.120) and `"…\cork-ai.exe" hook` is a parse error there.
+  const shellForm = hooks.filter(h => h.present && h.entry && isShellFormOnWindows(h.entry))
   push({
     name: 'hooks',
-    status: missing.length === 0 ? 'ok' : 'fail',
-    summary: `${hooks.length - missing.length}/${hooks.length} installed in ${CLAUDE_SETTINGS}`,
+    status: missing.length === 0 && shellForm.length === 0 ? 'ok' : 'fail',
+    summary: `${hooks.length - missing.length}/${hooks.length} installed in ${CLAUDE_SETTINGS}${shellForm.length > 0 ? `  ${shellForm.length} in shell form (never fires under PowerShell)` : ''}`,
     lines: [
       ...missing.map(h => `${C.yellow('missing')} ${h.event}${h.matcher ? ` (${h.matcher})` : ''}`),
       ...(missing.length > 0 ? [`→ ${C.cyan('cork-ai hooks install')}`] : []),
       ...(stale.length > 0 ? [`${C.yellow('!')} ${stale.length} hook(s) point at another binary path — ${C.cyan('cork-ai hooks install')} re-targets them`] : []),
+      ...(shellForm.length > 0 ? [`${C.yellow('!')} On Windows the hook must be in exec form (command + args) — ${C.cyan('cork-ai hooks install')} rewrites it. Needs Claude Code ≥ ${CLAUDE_EXEC_FORM_SINCE}.`] : []),
     ],
-    data: { installed: hooks.filter(h => h.present).map(h => `${h.event}${h.matcher ? `:${h.matcher}` : ''}`), missing: missing.map(h => `${h.event}${h.matcher ? `:${h.matcher}` : ''}`), stale: stale.length },
+    data: { installed: hooks.filter(h => h.present).map(h => `${h.event}${h.matcher ? `:${h.matcher}` : ''}`), missing: missing.map(h => `${h.event}${h.matcher ? `:${h.matcher}` : ''}`), stale: stale.length, shellFormOnWindows: shellForm.length },
   })
 
   // 3. Other hooks on the same matchers
   for (const spec of CORK_HOOKS.filter(h => h.event === 'PreToolUse')) {
     const others = (settings.hooks?.PreToolUse ?? [])
       .filter(g => g.matcher === spec.matcher)
-      .flatMap(g => g.hooks.filter(h => !isCorkCmd(h.command)).map(h => h.command))
+      .flatMap(g => g.hooks.filter(h => !isCorkCmd(h)).map(h => renderHookEntry(h)))
     if (others.length > 0) {
       push({
         name: `neighbours:${spec.matcher}`, status: 'warn',
@@ -1256,6 +1224,20 @@ async function runDoctor(args: string[]): Promise<void> {
       summary: `${rows.length - unseen.length}/${rows.length} sessions (14 days) produced cork-ai events · reads: ${fmt(totalReads)} via Read, ${fmt(totalBash)} via Bash (cat/sed/head)`,
       lines,
       data: { sessions: rows.length, seen: rows.length - unseen.length, reads: totalReads, bashReads: totalBash, rows: rows.map(r => ({ sessionId: r.sessionId, startedAt: r.startedAt, turns: r.turns, reads: r.reads, bashReads: r.bashReads, seen: r.seen, claudeVersion: r.claudeVersion, permissionMode: r.permissionMode })) },
+    })
+  }
+
+  // 6b. Windows: the exec form needs Claude Code ≥ 2.1.139
+  if (process.platform === 'win32') {
+    const cc = beat?.claudeVersion ?? rows.find(r => r.claudeVersion)?.claudeVersion
+    const tooOld = cc !== undefined && compareVersions(cc, CLAUDE_EXEC_FORM_SINCE) < 0
+    push({
+      name: 'claude-code',
+      status: tooOld ? 'fail' : cc ? 'ok' : 'info',
+      summary: tooOld
+        ? `Claude Code ${cc} runs hooks through a shell only — cork-ai needs ≥ ${CLAUDE_EXEC_FORM_SINCE} on Windows (update Claude Code)`
+        : cc ? `Claude Code ${cc} (exec-form hooks supported)` : `Claude Code version unknown yet — exec-form hooks need ≥ ${CLAUDE_EXEC_FORM_SINCE}`,
+      data: { claudeVersion: cc ?? null, minimum: CLAUDE_EXEC_FORM_SINCE },
     })
   }
 
@@ -1676,7 +1658,7 @@ async function runUpdate(args: string[]): Promise<void> {
   if (process.platform === 'win32') {
     // A running .exe cannot be replaced on Windows: leave the new file next to it.
     console.log(`  ${C.green('✔')}  Saved to ${C.dim(tmp)}. Close Claude Code, then replace the binary:`)
-    console.log(`     ${C.cyan(`move /Y "${tmp}" "${binary}"`)}\n`)
+    console.log(`     ${C.cyan(`Move-Item -Force "${tmp}" "${binary}"`)}   ${C.dim('(PowerShell)')}\n`)
     return
   }
   fs.renameSync(tmp, binary)  // atomic on POSIX; the running process keeps its old inode

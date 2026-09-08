@@ -78,8 +78,11 @@ try {
 Write-Host ""
 Write-Host "  Setting up Claude Code integration..."
 
+# Not piped to Out-Null: `hooks install` asks two questions (telemetry,
+# auto-compaction) on the terminal, and a hidden prompt looks like a hang.
 try {
-    & $dest hooks install | Out-Null
+    & $dest hooks install
+    if ($LASTEXITCODE -ne 0) { throw "hooks install exited with $LASTEXITCODE" }
     Write-Ok "Claude Code hook installed"
     Write-Info "All Claude Code sessions will compress Read outputs automatically."
     Write-Info "No per-project setup needed — works across all projects."

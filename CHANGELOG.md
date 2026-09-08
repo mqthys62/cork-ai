@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] — 2026-09-08
+
+### Fixed
+- **Windows: the hooks never fired.** Since Claude Code 2.1.120, hook commands run through PowerShell when Git Bash is not installed, and the shell-form command cork-ai wrote — `"C:\…\cork-ai.exe" hook` — is a PowerShell parse error (`Unexpected token 'hook'`), a silent non-blocking failure: no outline, no heartbeat, no session tracked. On Windows `hooks install` now writes the exec form (`command` + `args`, Claude Code ≥ 2.1.139), which spawns the binary directly with no shell in between; an existing shell-form install is migrated by re-running `cork-ai hooks install` (or the PowerShell installer).
+- `cork-ai doctor` on Windows fails the hooks check when a hook is still in shell form, and reports whether the Claude Code version supports the exec form.
+- `scripts/install.ps1` no longer pipes `hooks install` to `Out-Null`: the telemetry and auto-compaction questions were invisible, so the installer looked hung.
+- `cork-ai update` on Windows prints a PowerShell `Move-Item` command instead of cmd's `move /Y`.
+
 ## [0.9.0] — 2026-09-08
 
 Telemetry that can answer questions — and be shown.
