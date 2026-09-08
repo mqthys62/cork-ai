@@ -12,7 +12,7 @@
  * Coût  : $0 — aucun appel API
  */
 
-import { CtxForge, countMessageTokens } from '../../src/index.js'
+import { CtxForge, countMessageTokens } from '../../src/sdk/index.js'
 import type { Message } from '../../src/types/index.js'
 
 // ─── Couleurs ────────────────────────────────────────────────────────────────

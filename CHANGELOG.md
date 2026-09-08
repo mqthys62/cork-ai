@@ -5,15 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2026-09-08
 
-### Fixed
-
-- **CI rouge sur Windows (Node 18/20/22)** — le test d'intégration `hooks-install` lançait le CLI via `npx tsx` : sur Windows `npx` est un shim `.cmd` que `spawnSync` ne peut pas démarrer sans shell, et `HOME` n'y est pas lu par `os.homedir()` (`USERPROFILE`). Le test passe désormais par `process.execPath` + le `cli.mjs` de tsx résolu localement (plus rapide aussi : 0,6 s au lieu de 1,2 s par cas) et pose les deux variables. Les chemins absolus des tests `bash-read` sont entre guillemets, comme un vrai shell l'exigerait pour des antislashs.
-- L'outline normalise les fins de ligne `\r\n` — les fichiers Windows (et le checkout CRLF des runners) donnaient des lignes terminées par `\r`.
+**cork-ai est désormais l'outil Claude Code, et seulement lui.** La bibliothèque de compression de conversation (`wrapClient`, `CtxForge`, les sept stratégies) dont le projet est parti est dépréciée : elle reste dans le dépôt (`src/sdk/`, tests dans `tests/sdk/`, `npm run build:sdk`) mais n'est plus exportée par le paquet npm ni maintenue comme produit. Mesurée sur deux mois d'historique réel, la compression des lectures pèse ~1 % de la facture ; la gouvernance du contexte, 50 % et plus. Le README cesse de promettre « 60–75 % » et dit ce que l'outil fait. Détails et migration : `docs/SDK.md`.
 
 ### Changed
 
+- **Le hook est une fonction pure et testée** — `src/cli/hook.ts` : `handleHookEvent(payload) → JSON | undefined`, sans `process.exit` ni `console.log` ; l'entrée CLI ne fait plus que lire stdin et écrire stdout. 17 tests unitaires couvrent chaque chemin (outline, relecture complète, suite ciblée, fichier cité, contexte énorme, image, fichier édité, sous-agent, `cat`, `sed -n`, `sed -i`, Edit échoué, garde, SessionEnd, heartbeat). `index.ts` passe de 2 300 à 1 940 lignes ; config, télémétrie, heartbeat et version ont leur module.
+- **Paquet npm CLI seul** — plus de `main`/`exports`/`peerDependencies` ; `bin` inchangé (`dist/cli/index.js`). `cork-ai init` (intégration du SDK dans un projet) est retiré.
+- **`hooks install` pose la question qui compte** — après les hooks et la télémétrie, propose de régler `autoCompactWindow` à 200k (une fois ; `cork-ai context --set-autocompact` sinon). Réponse mémorisée dans `config.json`.
+- **Télémétrie v2 sur PostHog Cloud EU** — l'ancien endpoint PHP auto-hébergé n'a jamais fonctionné : dans le binaire compilé, `spawn(process.execPath, ['-e', …])` lançait `cork-ai -e …` et n'envoyait rien. Remplacé par `POST eu.i.posthog.com/capture` via un sous-processus détaché `cork-ai __send-telemetry`, clé de projet en écriture seule, identifiant d'installation aléatoire. Événements : `install`, `telemetry_toggled`, `command`, `hook_read` (décision et raison), `hook_reread`, `guard_notice`, `session_digest`. Jamais de chemin, de nom, de contenu ni d'identifiant de session ; tokens, contexte et coûts en tranches. Tout est listé dans `docs/TELEMETRY.md`, et les tests vérifient qu'aucun chemin ne fuit.
+
+### Added
+
+- **Hook `SessionEnd`** — écrit un digest par session dans `~/.cork-ai/digests/` (tours, contexte moyen/max, coût, coût à 200k, compactions, outlines, relectures, bandes du garde) et envoie `session_digest`. Base de la fonctionnalité « digest de session » prévue en 0.9.
+- **`cork-ai update`** — remplace le binaire standalone par la dernière release GitHub (remplacement atomique sur POSIX, fichier `.new` sur Windows) ; `--check` ne fait que regarder. `doctor` signale les versions en retard.
+- **`cork-ai config`** — `list` / `get` / `set` / `unset` sur `~/.cork-ai/config.json`, clés documentées (télémétrie, bandes et cadence du garde, amplification).
+- **`cork-ai reset` granulaire** — `--stats` (défaut), `--policy`, `--skip-list`, `--spend-cache`, `--digests`, `--all`.
+- **`--json`** sur `cork-ai context` et `cork-ai doctor`, pour les scripts et les bêta-testeurs.
+- Tests : `hook`, `telemetry`, `config` ; 354 → 382.
+
+### Fixed
+
+- **CI rouge sur Windows (Node 18/20/22)** — le test d'intégration `hooks-install` lançait le CLI via `npx tsx` : sur Windows `npx` est un shim `.cmd` que `spawnSync` ne peut pas démarrer sans shell, et `HOME` n'y est pas lu par `os.homedir()` (`USERPROFILE`). Le test passe désormais par `process.execPath` + le `cli.mjs` de tsx résolu localement et pose les deux variables. Les chemins absolus des tests `bash-read` sont entre guillemets, comme un vrai shell l'exigerait pour des antislashs.
+- L'outline normalise les fins de ligne `\r\n` — les fichiers Windows (et le checkout CRLF des runners) donnaient des lignes terminées par `\r`.
 - Matrice CI : Node 24 ajouté (LTS courante) ; les jobs coverage et build passent sur Node 22.
 
 ## [0.7.0] - 2026-09-08

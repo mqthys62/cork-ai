@@ -6,7 +6,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { CtxForge, countMessageTokens } from '../dist/index.js'
+import { CtxForge, countMessageTokens } from '../dist/sdk/index.js'
 
 // ─── Lecture des vrais fichiers du projet ─────────────────────────────────────
 
@@ -254,7 +254,7 @@ import {
   stripHeaders,
   deduplicateCode,
   deduplicateSemantic,
-} from '../dist/index.js'
+} from '../dist/sdk/index.js'
 
 function bar(pct) {
   const filled = Math.round(pct / 2.5)

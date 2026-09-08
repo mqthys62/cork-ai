@@ -11,7 +11,7 @@
 
 ## C'est quoi cork-ai ?
 
-À chaque appel API de Claude Code, l'**historique entier** est renvoyé — chaque fichier lu, chaque sortie bash, chaque header répétitif. Sur une session de 2h, ça dépasse facilement **100 000 tokens par requête**, dont la plupart sont redondants.
+À chaque appel API, Claude Code renvoie **toute la conversation** — chaque fichier lu, chaque sortie de commande, chaque tour précédent. Sur les modèles à 1M de contexte, ça fait couramment 300 à 500k tokens par appel d'outil, facturés en cache reads à chaque tour. C'est ça la facture, pas les fichiers eux-mêmes.
 
 cork-ai se branche sur Claude Code et fait deux choses. Il garde les lectures de fichiers entiers hors du contexte quand ça rapporte, et — c'est ce qui fait bouger la facture — il te montre ce que coûte la taille de ton contexte et t'aide à la tenir. **Ton workflow ne change pas. Les résultats ne changent pas. La facture, oui.**
 
@@ -82,35 +82,6 @@ cork-ai hooks install   # ajoute les hooks qui manquent à une installation plus
 
 ---
 
-## Comment ça marche — 7 stratégies de compression
-
-| # | Ce qui est gaspillé | Comment cork-ai le corrige | Gain |
-|---|--------------------|-----------------------------|------|
-| 1 | **Lectures de fichiers** — chaque `Read` renvoie le fichier entier, à chaque tour | Extrait les signatures de code, tronque les bash, aplatit les JSON | **30–50%** |
-| 2 | **Headers répétitifs** — Claude Code injecte CWD, OS, fichiers ouverts à chaque message | Garde le premier, remplace les suivants par un diff court | **5–10%** |
-| 3 | **Code dupliqué** — le code qu'on vient d'écrire sur disque est renvoyé dans l'historique | Remplacé par `[code written to src/foo.ts — omitted]` | **10–20%** |
-| 4 | **Historique non pertinent** — vieille discussion CSS quand on debug du SQL | Scoring de pertinence, résume les messages peu pertinents à une ligne | **15–25%** |
-| 5 | **Concepts répétés** — la même idée exprimée 5 fois différemment | TF-IDF + similarité Jaccard, remplace les quasi-doublons par une référence | **10–15%** |
-| 6 | **Vieux messages verbeux** — texte d'exploration qui pourrait faire 10% de sa taille | Résumé en préservant verbatim les chemins, erreurs, décisions | **20–30%** |
-| 7 | **Démarrage à froid** — la session suivante redécouvre tout le projet depuis zéro | Snapshot de projet compressé, rechargé au démarrage | **40–60%** session suivante |
-
-cork-ai est **adaptatif** : ne fait rien sur les petites sessions, monte en intensité au fur et à mesure que le contexte grossit.
-
----
-
-## Résultats mesurés
-
-| Durée de session | Sans cork-ai | Avec cork-ai | Réduction |
-|-----------------|-------------|-------------|-----------|
-| Courte (< 30 min) | ~15 000 tokens | ~12 000 | ~20% |
-| Moyenne (1h) | ~60 000 tokens | ~22 000 | **~63%** |
-| Longue (2h+) | ~140 000 tokens | ~38 000 | **~73%** |
-| Session suivante (même projet) | ~50 000 tokens | ~18 000 | **~64%** |
-
-Combiné avec [RTK](https://github.com/rtk-ai/rtk) : **75–85% de réduction totale** sur les longues sessions.
-
----
-
 ## CLI
 
 ### `cork-ai hooks install`
@@ -169,6 +140,15 @@ Un segment de barre de statut : taille du contexte, coût cache-read du prochain
 { "statusLine": { "type": "command", "command": "cork-ai statusline" } }
 ```
 
+### `cork-ai update`, `config`, `reset`, `telemetry`
+
+```bash
+cork-ai update            # remplace le binaire par la dernière release (--check pour seulement regarder)
+cork-ai config            # liste les réglages de ~/.cork-ai/config.json · config set contextGuard.bands 150k,400k
+cork-ai reset             # efface les stats · --policy (taux de relecture appris) · --skip-list · --all
+cork-ai telemetry on      # événements d'usage anonymes, opt-in — ce qui est envoyé : docs/TELEMETRY.md
+```
+
 ### `cork-ai calibrate`
 
 Les comptages de tokens et les estimations de coût valent ce que vaut le tokenizer derrière. `calibrate` mesure les **vrais** facteurs de tokens Claude pour ton modèle via l'endpoint gratuit `count_tokens` (échantillons code + anglais + français) et les stocke dans `~/.cork-ai/calibration.json` — tous les comptages (bibliothèque + hook) deviennent exacts pour ce modèle :
@@ -181,48 +161,28 @@ cork-ai calibrate claude-sonnet-5    # ou un modèle précis
 
 Pas de clé API sous la main ? `wrapClient` **calibre aussi passivement** : à chaque réponse, il compare son estimation locale aux tokens de prompt réellement facturés par l'API et corrige l'estimateur automatiquement.
 
-### `cork-ai init`
-
-Si tu as du code qui appelle l'API Anthropic directement :
-
-```bash
-cd ton-projet
-cork-ai init
-```
-
-cork-ai scanne les fichiers qui instancient `new Anthropic()` et soit :
-- **Patche automatiquement** le fichier — ajoute `wrapClient` et wrappe le client en place
-- **Génère** un fichier `cork-ai-client.ts` prêt à l'emploi — si aucun client existant
-- **Affiche les instructions ciblées** — si plusieurs fichiers sont trouvés
-
 ### `cork-ai gain`
 
-Consulte tes économies après chaque session :
-
 ```
-$ cork-ai gain
+$ cork-ai gain --all
 
-cork-ai — Dernière session
-────────────────────────────────────────────────────────────
-  Date         26 mai, 18h42
-  Requêtes     34
+  Cost saved
+    First pass only      $12.46 USD
+    Lifetime in context  $94.63 USD
+    Re-read penalty      -$48.47 USD (174 re-reads · 3.63M raw)
+    Re-read extra turns  -$5.84 USD  (47 turns that only existed to re-read an outlined file)
+    Net                  $40.32 USD
 
-  Tokens in    45 200
-  Tokens out   14 800
-  Économisés   30 400 tokens
+  Real spend (Claude Code transcripts · 15,822 assistant turns)
+    Total              $4290.55 USD
+    Estimated savings vs spend  0.9%
 
-  Économies    [████████████████████░░░░░░░░░░] 67.3%
-  Coût économisé  0,09 $ USD
-
-  Par module :
-    toolResultCompressor       18 200 tokens  (40,3%)
-    codeDedup                   5 400 tokens  (11,9%)
-    headerStripper              2 800 tokens   (6,2%)
-    heatmap                     2 900 tokens   (6,4%)
-    semanticDedup               1 100 tokens   (2,4%)
-────────────────────────────────────────────────────────────
-  Total depuis le début : 284 000 tokens — 0,85 $ USD
+  Context (last 30 days · 22 sessions ≥ 20 turns)
+    Cache reads          78.4% of spend — the context re-read on every turn, 407.8k tokens on average
+    Auto-compact at 200k would have saved $2290.81 USD (−57.3%) → cork-ai context
 ```
+
+Oui, c'est un vrai rapport, et oui, la ligne honnête dit *0,9 %* : outliner les lectures est un petit levier. Le bloc Context est le gros.
 
 ```bash
 cork-ai gain              # dernière session
@@ -247,165 +207,11 @@ cork-ai report --json       # sortie machine pour dashboards / CI
 
 ---
 
-## Utilisation conjointe avec RTK
+## Avec RTK et les fonctionnalités natives d'Anthropic
 
-[RTK](https://github.com/rtk-ai/rtk) et cork-ai couvrent des couches complètement différentes — ils sont conçus pour être utilisés ensemble.
+[RTK](https://github.com/rtk-ai/rtk) réécrit les commandes Bash pour élaguer leurs sorties ; cork-ai couvre ce que le README de RTK dit ne pas atteindre — l'outil `Read` — plus les lectures de fichiers entiers faites *via* Bash, et la gouvernance de la taille de contexte qu'aucun des deux ne fait. La compaction et l'édition de contexte côté serveur d'Anthropic gèrent les tokens déjà envoyés ; cork-ai empêche des tokens d'être envoyés et te prévient quand le contexte a dépassé ce qu'il coûte de le garder. Les trois s'empilent.
 
-```
-Ce que RTK compresse (appels Bash) :
-  git status, git diff, cargo test, npm test, docker ps, grep, ls …
-  → 60–90% d'économie sur les sorties de commandes shell
-
-Ce que cork-ai compresse (outils natifs Claude Code + conversation) :
-  Read → contenu de fichiers compressé en signatures
-  Historique → headers dédupliqués, code dédupliqué, vieux messages résumés
-  → 40–90% sur les lectures de fichiers, 20–60% sur l'historique
-
-──────────────────────────────────────────────────────────────────
-Ensemble → 75–85% de réduction totale sur les longues sessions
-```
-
-Le README de RTK précise lui-même : *"Claude Code built-in tools like Read, Grep, and Glob do not pass through the Bash hook."* cork-ai est la réponse exacte à cette limitation.
-
-```bash
-# RTK — compression des commandes Bash
-curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh
-rtk init -g
-
-# cork-ai — compression de l'outil Read + historique de conversation
-curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | sh
-```
-
----
-
-## cork-ai vs les fonctionnalités natives d'Anthropic
-
-L'API Anthropic embarque désormais de la gestion de contexte côté serveur. cork-ai est conçu pour la compléter, pas la concurrencer — quand utiliser quoi :
-
-| Besoin | Utiliser | Pourquoi |
-|---|---|---|
-| Conversations longues proches de la limite de contexte | **Compaction native** (bêta `compact-2026-01-12`) | Résumé côté serveur, conscient du modèle — meilleure qualité que toute heuristique côté client |
-| Purger les vieux résultats d'outils dans les boucles agentiques | **Context editing natif** (`clear_tool_uses_20250919`) | Élagage côté serveur, aucune logique client |
-| L'historique re-envoyé coûte plein tarif à chaque tour | **Prompt caching** (`cache_control`) | Les lectures de cache coûtent 0,1× — le plus gros levier de coût |
-| Réduire le contenu **avant qu'il n'entre dans le contexte** (lectures de fichiers, sorties d'outils) | **cork-ai** | L'API ne peut gérer que les tokens déjà envoyés — cork-ai les empêche de partir |
-| Mesurer ce que la compression économise vraiment | **cork-ai** | Comptabilité vérité-terrain depuis `response.usage`, par modèle, par session |
-
-Deux règles que cork-ai suit pour rester compatible avec le prompt caching :
-
-1. **Stabilité du préfixe** (défaut dans `wrapClient`) : les décisions de compression sur les anciens messages sont gelées byte-identiques entre les requêtes. Réécrire le préfixe à chaque tour invaliderait le prompt cache et coûterait jusqu'à 8× plus cher que ne rien compresser.
-2. **Comptabilité cache-aware** : les économies sur le contenu déjà gelé sont valorisées au tarif cache-read (0,1×), pas au tarif input — pas de chiffres gonflés.
-
----
-
-## API bibliothèque (pour les développeurs d'apps IA)
-
-Si tu construis une application qui appelle l'API Anthropic directement, tu peux utiliser cork-ai comme bibliothèque pour compresser ton historique automatiquement.
-
-Compilation depuis les sources :
-
-```bash
-git clone https://github.com/mqthys62/cork-ai.git
-cd cork-ai && npm install && npm run build
-```
-
-Puis importer depuis `./dist` :
-
-### Option A — Wrapper transparent (recommandé)
-
-```typescript
-import Anthropic from '@anthropic-ai/sdk'
-import { wrapClient } from './dist/index.js'
-
-const client = wrapClient(new Anthropic(), {
-  maxContextTokens: 150_000,
-  aggressiveness: 0.6,
-  onStats: (stats) => {
-    if (stats.request.savingsPercent > 5) {
-      process.stderr.write(`[cork-ai] ${stats.request.savingsPercent}% économisé\n`)
-    }
-  },
-})
-
-// Interface identique au SDK brut — aucun autre changement nécessaire
-const response = await client.messages.create({
-  model: 'claude-sonnet-4-6',
-  max_tokens: 4096,
-  messages: historique,
-})
-```
-
-### Option B — Compression manuelle (CtxForge)
-
-```typescript
-import { CtxForge } from './dist/index.js'
-
-const forge = new CtxForge({ maxContextTokens: 150_000 })
-const { messages, stats } = forge.compress(historique)
-
-await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 4096, messages })
-console.log(`${stats.request.savingsPercent}% économisé`)
-```
-
-### Niveaux de compression adaptatifs (API bibliothèque uniquement)
-
-Quand tu utilises `wrapClient()` ou `CtxForge`, cork-ai compte les tokens dans ton tableau `messages[]` et décide du niveau de compression en fonction du taux de remplissage de la fenêtre de contexte. Tu contrôles le budget via `maxContextTokens`.
-
-```
-Utilisation tokens / maxContextTokens   Niveau    Ce qui s'exécute
-────────────────────────────────────────────────────────────────────────
-< 40%   → Passthrough   Rien — le contexte est petit.
-40–65%  → Niveau 1      Tool results + Headers
-65–80%  → Niveau 2      + Code dedup + Heatmap
-> 80%   → Niveau 3      + Semantic dedup + Summarizer
-```
-
-Ajuste `maxContextTokens` selon ta fenêtre de contexte réelle et le moment où tu veux que la compression démarre :
-
-```typescript
-// Commencer plus tôt — ex: sur une fenêtre 200k de Claude,
-// la compression démarre à 20k tokens au lieu de 80k
-wrapClient(client, { maxContextTokens: 50_000 })
-```
-
-> **Note :** Cette logique adaptative ne s'applique qu'à l'API bibliothèque. Le hook Claude Code
-> compresse **chaque** lecture de fichier inconditionnellement — il ne connaît pas la taille de la
-> conversation, et c'est voulu : chaque token économisé sur un Read est économisé peu importe
-> où tu en es dans la session.
-
-### Cache inter-sessions
-
-```typescript
-import { SessionCache } from './dist/index.js'
-
-const cache = new SessionCache()
-
-// Au démarrage : injecter le contexte de la session précédente (~4 000 tokens au lieu de ~40 000)
-const contextePrec = cache.load(process.cwd())
-if (contextePrec) systemPrompt += '\n\n' + contextePrec
-
-// À la fin : sauvegarder
-process.on('exit', () => cache.save(historique, process.cwd()))
-```
-
-### Toutes les options
-
-```typescript
-wrapClient(client, {
-  aggressiveness: 0.6,        // 0 = conservateur, 1 = agressif (défaut : 0.6)
-  maxContextTokens: 150_000,  // budget tokens (défaut : 150 000)
-  budget: {
-    maxTokens: 150_000,
-    hardLimit: false,          // throw si le contexte dépasse encore après compression totale
-  },
-  pricing: {
-    input: 3.0,               // USD / 1M tokens (défaut : Sonnet 4)
-    output: 15.0,
-  },
-  debug: false,
-  onStats: (stats) => { ... },
-  disabledModules: ['semanticDedup', 'selectiveSummarizer'],
-})
-```
+La bibliothèque de compression de conversation dont cork-ai est parti (`wrapClient`, sept stratégies) est dépréciée et documentée dans [docs/SDK.md](SDK.md).
 
 ---
 
@@ -413,7 +219,7 @@ wrapClient(client, {
 
 - **OS** : Linux (Ubuntu 20.04+, Debian, Alpine), macOS (Intel + Apple Silicon), Windows (natif + WSL2)
 - **Zéro dépendance runtime** — binaire standalone, pas de Node.js ni de npm requis
-- **API bibliothèque** : requiert Node.js ≥ 18 et `@anthropic-ai/sdk ≥ 0.20.0`
+- **Depuis npm** (`npx cork-ai`) : Node.js ≥ 18
 
 ---
 

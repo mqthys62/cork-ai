@@ -106,7 +106,5 @@ Write-Host "  cork-ai gain              " -NoNewline; Write-Host "see token savi
 Write-Host "  cork-ai context           " -NoNewline; Write-Host "where the money goes (context size per turn)" -ForegroundColor DarkGray
 Write-Host "  cork-ai doctor            " -NoNewline; Write-Host "check the install after a claude update" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  To integrate into your own code:"
-Write-Host "  cd your-project && " -NoNewline
-Write-Host "cork-ai init" -ForegroundColor Cyan
+Write-Host "  cork-ai telemetry on      " -NoNewline; Write-Host "help improve it (anonymous, opt-in)" -ForegroundColor DarkGray
 Write-Host ""

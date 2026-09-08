@@ -25,72 +25,54 @@ npm run test:coverage
 # TypeScript type checking
 npm run typecheck
 
-# Build library + CLI
+# Build the CLI (dist/cli/index.js)
 npm run build
 ```
 
-All 144 tests must pass before opening a PR.
+All tests must pass before opening a PR (`npm test`, ~380 tests).
 
 ## Project structure
 
 ```
 src/
-├── cli/               # Standalone CLI (cork-ai hook, gain, report, init, hooks)
-│   ├── index.ts       # All CLI commands — compiled to a standalone binary
-│   └── persistent-stats.ts  # ~/.cork-ai/stats.json read/write
-├── compressors/       # Stateless content compression modules
-├── managers/          # Stateful modules and orchestration
-├── core/              # Infrastructure (tokenizer, pipeline, interceptor, wrapClient)
-├── stats/             # Per-request and per-session stats tracking
-└── types/             # Shared TypeScript types
+├── cli/                     # The tool — compiled to a standalone binary (bun build --compile)
+│   ├── index.ts             # Commands: gain, context, doctor, hooks, config, update, reset, telemetry, statusline
+│   ├── hook.ts              # The hook, as one pure function: handleHookEvent(event) → stdout JSON | undefined
+│   ├── bash-read.ts         # Which shell commands are reads (cat, sed -n, …) or edits (sed -i, redirections)
+│   ├── outline.ts           # The numbered outline served instead of a whole file
+│   ├── policy.ts            # Expected-value gate + per-extension re-read rates (~/.cork-ai/policy.json)
+│   ├── context-guard.ts     # Band notices (150k / 300k / 500k / 750k) to the user and the model
+│   ├── transcript-usage.ts  # Everything read from ~/.claude/projects transcripts (spend, context, re-reads)
+│   ├── persistent-stats.ts  # ~/.cork-ai/stats.json and live sessions
+│   ├── config.ts · telemetry.ts · heartbeat.ts · skip-list.ts · file-eligibility.ts · version.ts
+├── pricing/                 # Single source of truth for model pricing (4 billing tiers)
+├── core/tokenizer.ts        # Calibrated token estimates
+├── types/                   # Shared types
+└── sdk/                     # Deprecated conversation-compression library (docs/SDK.md) — tests in tests/sdk/
 ```
 
-Modules in `compressors/` and `managers/` do not know about each other. Everything goes through the pipeline (`src/core/pipeline.ts`).
+The CLI imports only Node.js built-ins and local files — no npm dependencies. This is required for `bun build --compile` to produce a zero-dependency binary.
 
-The CLI (`src/cli/index.ts`) only imports Node.js built-ins (`fs`, `os`, `path`) and local files — no npm dependencies. This is required for `bun build --compile` to produce a zero-dependency binary.
+## Working on the hook
 
-## Adding a new compression module
+All hook logic is in `src/cli/hook.ts` and is unit-tested in `tests/unit/hook.test.ts` by calling `handleHookEvent()` directly with a synthetic payload, a temp file and a fake transcript. Add a test for every new decision path. The I/O shell (`runHook` in `index.ts`) stays three lines.
 
-1. **Create the source file** in `src/compressors/` (stateless) or `src/managers/` (stateful / orchestrated)
-
-2. **Implement the `CompressResult` interface**:
-   ```typescript
-   export function myModule(messages: Message[], options?: Partial<MyOptions>): CompressResult {
-     return { messages: [...], savedTokens: 0 }
-   }
-   ```
-
-3. **Write tests** in `tests/unit/my-module.test.ts`:
-   - Happy path
-   - Empty messages array
-   - Edge cases: short content, already minimal content, content just above/below threshold
-   - Verify the message count is preserved (modules summarize, never delete)
-
-4. **Register the module** in `src/managers/budget.ts`:
-   - Add a `ModuleName` in `src/types/index.ts`
-   - Add the call in `compressWithBudget()` at the appropriate level (1, 2, or 3)
-
-5. **Export from** `src/index.ts`
-
-6. **Update** `CHANGELOG.md` under `[Unreleased]` and add a row to the README table
-
-## CLI commands
-
-The CLI is a single compiled file. All commands are in `src/cli/index.ts`.
-
-To add a new command, add a branch to the `main()` switch and wire it to a function. Keep all compression logic inline or in `src/cli/` — do not import from `src/compressors/` or `src/managers/` in the CLI (it would break binary compilation).
+Persistent state always goes through `CORK_AI_HOME` (vitest isolates it in a temp dir). Never write a test that touches the real `~/.cork-ai`.
 
 To test a CLI command during development:
 ```bash
-npm run build
-node dist/cli/index.js <command>
+npx tsx src/cli/index.ts <command>
 ```
 
-To test the hook specifically:
+To test the hook end to end:
 ```bash
-echo '{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"/path/to/file.ts"},"session_id":"test","cwd":"/tmp"}' \
-  | node dist/cli/index.js hook
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat src/cli/index.ts"},"session_id":"test","cwd":"'"$PWD"'"}' \
+  | CORK_AI_HOME=/tmp/cork-dev npx tsx src/cli/index.ts hook
 ```
+
+## Telemetry
+
+Opt-in, anonymous, documented in `docs/TELEMETRY.md`. When you add an event or a property, update that file and the tests that assert no path or session id leaks (`tests/unit/hook.test.ts`, `tests/unit/telemetry.test.ts`).
 
 ## Commit convention
 

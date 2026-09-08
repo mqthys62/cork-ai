@@ -763,3 +763,48 @@ export function sessionReReadTurns(sessionId: string): ReReadTurns {
   }
   return out
 }
+
+// ─── Last user prompt (what the user is talking about) ──────────────────────
+
+// Extracts the last REAL user prompt from the transcript (skipping user-role
+// entries that only carry tool_result blocks — those are agentic plumbing).
+// Used to avoid compressing a file the user explicitly asked about.
+export function lastUserPromptFromTranscript(transcriptPath?: string): string | undefined {
+  if (!transcriptPath) return undefined
+  try {
+    const stat = fs.statSync(transcriptPath)
+    const TAIL_BYTES = 256 * 1024
+    const start = Math.max(0, stat.size - TAIL_BYTES)
+    const fd = fs.openSync(transcriptPath, 'r')
+    const buf = Buffer.alloc(stat.size - start)
+    fs.readSync(fd, buf, 0, buf.length, start)
+    fs.closeSync(fd)
+
+    const lines = buf.toString('utf-8').split('\n')
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i]
+      if (!line.includes('"user"')) continue
+      try {
+        const entry = JSON.parse(line) as {
+          type?: string
+          isSidechain?: boolean
+          message?: { role?: string; content?: unknown }
+        }
+        if (entry.type !== 'user' || entry.isSidechain) continue
+        const content = entry.message?.content
+        let text = ''
+        if (typeof content === 'string') {
+          text = content
+        } else if (Array.isArray(content)) {
+          text = content
+            .filter((b): b is { type: string; text: string } =>
+              typeof b === 'object' && b !== null && (b as { type?: string }).type === 'text')
+            .map(b => b.text)
+            .join('\n')
+        }
+        if (text.trim().length > 0) return text
+      } catch { /* partial line at the tail cut — skip */ }
+    }
+  } catch { /* transcript unreadable */ }
+  return undefined
+}

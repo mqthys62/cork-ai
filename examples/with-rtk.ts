@@ -7,7 +7,7 @@
  * Voir la documentation pour l'intégration complète.
  */
 
-import { CtxForge } from '../src/index.js'
+import { CtxForge } from '../src/sdk/index.js'
 import type { Message, FullStats } from '../src/types/index.js'
 
 // Simulation d'une longue session avec du code et des tool_results

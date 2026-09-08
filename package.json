@@ -1,41 +1,31 @@
 {
   "name": "cork-ai",
-  "version": "0.7.0",
-  "description": "Surgical context optimization for Claude Code — 60–75% token reduction on long sessions",
-  "main": "./dist/index.js",
-  "module": "./dist/index.mjs",
-  "types": "./dist/index.d.ts",
+  "version": "0.8.0",
+  "description": "Claude Code cost tool \u2014 outlines whole-file reads when it pays off, and shows what your context size really costs",
   "bin": {
     "cork-ai": "./dist/cli/index.js"
   },
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs",
-      "require": "./dist/index.js"
-    }
-  },
   "scripts": {
-    "build": "tsup src/index.ts src/cli/index.ts --format cjs,esm --dts --clean",
-    "dev": "tsup src/index.ts src/cli/index.ts --format cjs,esm --dts --watch",
+    "build": "tsup --entry.cli/index src/cli/index.ts --format cjs --clean",
+    "dev": "tsup --entry.cli/index src/cli/index.ts --format cjs --watch",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "benchmark": "node --loader tsx/esm benchmarks/cost-comparison.ts",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "build:sdk": "tsup src/sdk/index.ts --format cjs,esm --dts --out-dir dist/sdk"
   },
   "keywords": [
     "claude",
     "claude-code",
     "anthropic",
     "context",
-    "optimization",
     "tokens",
-    "compression",
-    "llm",
-    "ai",
-    "cost"
+    "cost",
+    "hooks",
+    "compaction",
+    "ai"
   ],
   "license": "MIT",
   "engines": {
@@ -49,14 +39,6 @@
     "CHANGELOG.md",
     "LICENSE"
   ],
-  "peerDependencies": {
-    "@anthropic-ai/sdk": ">=0.20.0"
-  },
-  "peerDependenciesMeta": {
-    "@anthropic-ai/sdk": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@types/node": "^20.0.0",

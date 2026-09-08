@@ -3,7 +3,6 @@
  * cork-ai CLI — stats, savings report, project setup, and Claude Code hooks.
  *
  * Commands:
- *   cork-ai init                  Auto-integrate cork-ai into the current project
  *   cork-ai gain                  Show current session + all-time savings
  *   cork-ai gain --all            Show all-time totals
  *   cork-ai gain --history        Show all recorded sessions
@@ -22,20 +21,21 @@
  *   cork-ai context               Context-size cost report; --set-autocompact <tokens>
  *   cork-ai statusline            Status-line segment
  *   cork-ai hook                  Internal: handle Claude Code hook events (stdin/stdout)
- *   cork-ai reset                 Reset all stats
+ *   cork-ai reset [--all]         Clear stats / learned policy / skip-list / caches
+ *   cork-ai config                Read and edit ~/.cork-ai/config.json
+ *   cork-ai update                Replace the standalone binary with the latest release
  *   cork-ai --version             Show version
  *   cork-ai --help                Show help
  */
 
 import fs from 'fs'
-import { spawn, spawnSync } from 'child_process'
+import { spawnSync } from 'child_process'
 import os from 'os'
 import path from 'path'
 import readline from 'readline'
 import {
   readGlobalStats,
   resetGlobalStats,
-  accumulateInSession,
   readLiveSession,
   clearLiveSession,
   getStatsByProject,
@@ -48,129 +48,24 @@ import {
   type ModelUsage,
 } from './persistent-stats.js'
 import { inputPriceForModel, costOfAvoidedTokens } from '../pricing/index.js'
-import { scanAllTranscripts, sessionAmplification, lastMainTurnUsage, contextReport, listTranscriptFiles, sessionReReadTurns } from './transcript-usage.js'
-import { parseBashRead, parseBashEdit } from './bash-read.js'
-import { outline } from './outline.js'
-import { gate, recordCompression, recordReRead, recordRangeRead, recordEditAfter, policySummary } from './policy.js'
-import { evaluateGuard, guardHookOutput, type ContextGuardConfig } from './context-guard.js'
-import { eligibility } from './file-eligibility.js'
-import { isSkipped, markSkipped, skippedCount } from './skip-list.js'
+import { scanAllTranscripts, sessionAmplification, contextReport, listTranscriptFiles, sessionReReadTurns } from './transcript-usage.js'
+import { policySummary, POLICY_FILE } from './policy.js'
+import { skippedCount, SKIP_FILE } from './skip-list.js'
+import { handleHookEvent } from './hook.js'
+import { VERSION } from './version.js'
+import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
+import { readHeartbeat } from './heartbeat.js'
+import { sendTelemetry, runSendTelemetry } from './telemetry.js'
 import {
   CALIBRATION_FILE,
   countTokensRaw,
-  estimateTokensFast,
   modelFamily,
   saveCalibrationFactor,
 } from '../core/tokenizer.js'
+import { SPEND_CACHE_FILE } from './transcript-usage.js'
 
-const VERSION = '0.7.0'
 const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
-const CORK_HOME = process.env.CORK_AI_HOME ?? path.join(os.homedir(), '.cork-ai')
-const CONFIG_FILE = path.join(CORK_HOME, 'config.json')
 
-const TELEMETRY_ENDPOINT = 'https://corktelemetry.essenly.fr/telemetry-server.php'
-
-// ─── Config (~/.cork-ai/config.json) ─────────────────────────────────────────
-
-interface CorkConfig {
-  telemetry?: boolean   // undefined = never asked, true = opted in, false = opted out
-  detectedModel?: string  // last model seen in a hook event — used for cost estimates
-  /** Median cache reads per token written, measured by `gain --all`; feeds the EV gate. */
-  measuredAmplification?: number
-  contextGuard?: ContextGuardConfig
-}
-
-// Pricing lives in src/pricing (single source of truth, shared with the
-// library) — per-model, four billing tiers, date-dependent introductory rates.
-
-// Extracts the last REAL user prompt from the transcript (skipping user-role
-// entries that only carry tool_result blocks — those are agentic plumbing).
-// Used to avoid compressing a file the user explicitly asked about.
-function lastUserPromptFromTranscript(transcriptPath?: string): string | undefined {
-  if (!transcriptPath) return undefined
-  try {
-    const stat = fs.statSync(transcriptPath)
-    const TAIL_BYTES = 256 * 1024
-    const start = Math.max(0, stat.size - TAIL_BYTES)
-    const fd = fs.openSync(transcriptPath, 'r')
-    const buf = Buffer.alloc(stat.size - start)
-    fs.readSync(fd, buf, 0, buf.length, start)
-    fs.closeSync(fd)
-
-    const lines = buf.toString('utf-8').split('\n')
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i]
-      if (!line.includes('"user"')) continue
-      try {
-        const entry = JSON.parse(line) as {
-          type?: string
-          isSidechain?: boolean
-          message?: { role?: string; content?: unknown }
-        }
-        if (entry.type !== 'user' || entry.isSidechain) continue
-        const content = entry.message?.content
-        let text = ''
-        if (typeof content === 'string') {
-          text = content
-        } else if (Array.isArray(content)) {
-          text = content
-            .filter((b): b is { type: string; text: string } =>
-              typeof b === 'object' && b !== null && (b as { type?: string }).type === 'text')
-            .map(b => b.text)
-            .join('\n')
-        }
-        if (text.trim().length > 0) return text
-      } catch { /* partial line at the tail cut — skip */ }
-    }
-  } catch { /* transcript unreadable */ }
-  return undefined
-}
-
-function loadConfig(): CorkConfig {
-  try { return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8')) as CorkConfig } catch { return {} }
-}
-
-function saveConfig(cfg: CorkConfig): void {
-  try {
-    fs.mkdirSync(path.dirname(CONFIG_FILE), { recursive: true })
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), 'utf-8')
-  } catch { /* non-critical */ }
-}
-
-function isTelemetryEnabled(): boolean {
-  if (process.env.CORK_AI_TELEMETRY === '0' || process.env.DO_NOT_TRACK === '1') return false
-  return loadConfig().telemetry === true
-}
-
-// ─── Telemetry (fire-and-forget, anonymous) ───────────────────────────────────
-
-interface TelemetryPayload {
-  v: string
-  os: string
-  arch: string
-  savings_pct: number
-  file_ext: string
-  compress_type: string
-  skipped: boolean
-}
-
-function sendTelemetry(payload: TelemetryPayload): void {
-  if (TELEMETRY_ENDPOINT.includes('YOUR_DOMAIN')) return
-  try {
-    const body = JSON.stringify(payload)
-    const url = new URL(TELEMETRY_ENDPOINT)
-    // Spawn a detached child so the request survives process.exit() and never delays the hook.
-    const script = [
-      "const https=require('https'),b=process.argv[1];",
-      `const req=https.request({hostname:${JSON.stringify(url.hostname)},path:${JSON.stringify(url.pathname)},method:'POST',headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(b)},timeout:4000},()=>process.exit(0));`,
-      "req.on('error',()=>process.exit(0));",
-      "req.on('timeout',()=>{req.destroy();process.exit(0)});",
-      "req.end(b);",
-    ].join('')
-    const child = spawn(process.execPath, ['-e', script, body], { detached: true, stdio: 'ignore' })
-    child.unref()
-  } catch { /* never blocks execution */ }
-}
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 
 function fmt(n: number): string { return n.toLocaleString('en-US') }
@@ -362,8 +257,8 @@ function showHelp(): void {
 ${C.bold('cork-ai')} v${VERSION} — Context optimization for Claude Code
 
 ${C.bold('Quick start:')}
-  cork-ai init              Auto-integrate into the current project
-  cork-ai hooks install     Add hooks so Claude Code uses cork-ai directly
+  cork-ai hooks install     Install/upgrade the Claude Code hooks (asks about auto-compaction)
+  cork-ai doctor            Check that everything is wired and being called
 
 ${C.bold('Stats:')}
   cork-ai gain              Current session + all-time savings
@@ -385,8 +280,8 @@ ${C.bold('Claude Code integration:')}
   cork-ai hooks install     Install/upgrade the hooks (Read + Bash reads, edits, context guard)
   cork-ai hooks remove      Remove cork-ai hooks
   cork-ai hooks status      Show hook configuration
-  cork-ai doctor            Check the install: binary, hooks, self-test, coverage of recent sessions
-  cork-ai context           Where the money goes: context size per turn, what auto-compaction would save
+  cork-ai doctor [--json]   Check the install: binary, hooks, self-test, coverage of recent sessions
+  cork-ai context [--json]  Where the money goes: context size per turn, what auto-compaction would save
   cork-ai context --set-autocompact 200k   Set Claude Code's autoCompactWindow
   cork-ai context guard [on|off]           Toggle the live context notices
   cork-ai statusline        Status-line segment (reads Claude Code's status JSON on stdin)
@@ -395,11 +290,11 @@ ${C.bold('Precision:')}
   cork-ai calibrate [model] Measure real token factors via the count_tokens API
                             (needs ANTHROPIC_API_KEY — makes every count model-exact)
 
-${C.bold('Other:')}
-  cork-ai reset             Reset all stats
-  cork-ai telemetry on      Enable anonymous usage stats (opt-in)
-  cork-ai telemetry off     Disable telemetry
-  cork-ai telemetry status  Show telemetry state
+${C.bold('Maintenance:')}
+  cork-ai update            Replace the binary with the latest release (--check to only look)
+  cork-ai config            List settings · config get|set|unset <key> [value]
+  cork-ai reset             Clear stats (--policy, --skip-list, --spend-cache, --digests, --all)
+  cork-ai telemetry on|off  Anonymous usage stats, opt-in (docs/TELEMETRY.md)
   cork-ai --version         Show version
 
 ${C.bold('Stats file:')} ${STATS_FILE}
@@ -1005,6 +900,7 @@ interface HookGroup {
  *   PreToolUse Bash       same for `cat file` & co — auto mode reads through Bash
  *   PostToolUse Edit…     failed-edit detection, edited-file tracking, context guard
  *   UserPromptSubmit/Stop context guard (band notices to the user and the model)
+ *   SessionEnd            session digest (~/.cork-ai/digests, telemetry)
  */
 const CORK_HOOKS: Array<{ event: string; matcher?: string; legacyMatchers?: string[] }> = [
   { event: 'PreToolUse', matcher: 'Read' },
@@ -1012,6 +908,7 @@ const CORK_HOOKS: Array<{ event: string; matcher?: string; legacyMatchers?: stri
   { event: 'PostToolUse', matcher: 'Edit|MultiEdit|Write', legacyMatchers: ['Edit|MultiEdit'] },
   { event: 'UserPromptSubmit' },
   { event: 'Stop' },
+  { event: 'SessionEnd' },
 ]
 const CORK_HOOK_FALLBACK = 'cork-ai hook'
 
@@ -1123,6 +1020,7 @@ async function hooksInstall(): Promise<void> {
 
   if (changed.length === 0) {
     console.log(`\n${C.green('✔')}  cork-ai hooks already installed in ${C.cyan(CLAUDE_SETTINGS)}\n`)
+    await askAutoCompact(settings)
     return
   }
 
@@ -1138,53 +1036,79 @@ async function hooksInstall(): Promise<void> {
   console.log(`   ${C.dim('Check:')} ${C.cyan('cork-ai doctor')}   ${C.dim('Report:')} ${C.cyan('cork-ai context')}`)
   console.log()
 
-  if (cfg.telemetry === undefined) await askTelemetryConsent(cfg)
+  if (cfg.telemetry === undefined) await askTelemetryConsent()
+  await askAutoCompact(settings)
+  sendTelemetry({ event: 'install', properties: { hooks: changed.length, upgrade: changed.length < CORK_HOOKS.length, autocompact: loadClaudeSettings().autoCompactWindow ?? null } })
 
   console.log(`   Restart Claude Code for the hooks to take effect.`)
   console.log(`   Run ${C.cyan('cork-ai gain')} after sessions to see savings.\n`)
 }
 
-async function askTelemetryConsent(cfg: CorkConfig): Promise<void> {
-  const prompt = `   ${C.dim('Help improve cork-ai? Send anonymous compression stats (no file paths, no content).')} [y/N]: `
-
-  // Attempt 1: interactive stdin
+/**
+ * Asks a yes/no question on the real terminal. Works from `curl | sh` (stdin
+ * is the pipe, so /dev/tty is read directly). Returns undefined when nothing
+ * interactive is available (CI, container) — callers pick the safe default.
+ */
+async function askYesNo(prompt: string): Promise<boolean | undefined> {
+  const parse = (a: string) => { const v = a.trim().toLowerCase(); return v === 'y' || v === 'yes' ? true : v === 'n' || v === 'no' || v === '' ? false : undefined }
   if (process.stdin.isTTY) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout })
-    const answer = await new Promise<string>(resolve => {
-      rl.question(prompt, a => { rl.close(); resolve(a.trim().toLowerCase()) })
-    })
-    applyTelemetryChoice(cfg, answer)
-    return
+    const answer = await new Promise<string>(resolve => rl.question(prompt, a => { rl.close(); resolve(a) }))
+    return parse(answer)
   }
-
-  // Attempt 2: /dev/tty (works when stdin is piped, e.g. curl | sh)
   if (process.platform !== 'win32') {
     try {
       const tty = fs.openSync('/dev/tty', 'r+')
-
-      // Write prompt directly to terminal
       fs.writeSync(tty, '\n' + prompt)
       const buf = Buffer.alloc(64)
       const n = fs.readSync(tty, buf, 0, 63, null)
       fs.closeSync(tty)
-      const answer = buf.subarray(0, n).toString().trim().toLowerCase()
-      applyTelemetryChoice(cfg, answer)
-      return
-    } catch { /* /dev/tty unavailable (CI, container) */ }
+      return parse(buf.subarray(0, n).toString())
+    } catch { /* /dev/tty unavailable */ }
   }
-
-  // No interactivity: telemetry disabled by default
-  saveConfig({ ...loadConfig(), telemetry: false })
-  console.log(`   ${C.dim('Telemetry off by default. Enable later: cork-ai telemetry on')}`)
+  return undefined
 }
 
-function applyTelemetryChoice(cfg: CorkConfig, answer: string): void {
-  const opted = answer === 'y' || answer === 'yes'
-  saveConfig({ ...loadConfig(), ...cfg, telemetry: opted })
-  if (opted) {
+async function askTelemetryConsent(): Promise<void> {
+  const answer = await askYesNo(`   ${C.dim('Help improve cork-ai? Send anonymous usage stats (no file paths, no names, no content — docs/TELEMETRY.md).')} [y/N]: `)
+  if (answer === undefined) {
+    updateConfig({ telemetry: false })
+    console.log(`   ${C.dim('Telemetry off by default. Enable later: cork-ai telemetry on')}`)
+    return
+  }
+  updateConfig({ telemetry: answer })
+  if (answer) {
+    sendTelemetry({ event: 'telemetry_toggled', properties: { enabled: true, at: 'install' } })
     console.log(`   ${C.green('✔')}  Telemetry enabled — thank you! Run ${C.cyan('cork-ai telemetry off')} to disable.`)
   } else {
     console.log(`   ${C.dim('Telemetry off. Enable later with: cork-ai telemetry on')}`)
+  }
+  console.log()
+}
+
+/**
+ * The one setting that moves the bill: Claude Code's auto-compaction window.
+ * Measured on real history, contexts left to grow towards 1M cost 2× what the
+ * same work costs compacted at 200k. Asked once; `cork-ai context` explains.
+ */
+async function askAutoCompact(settings: ClaudeSettings): Promise<void> {
+  const cfg = loadConfig()
+  if (cfg.autoCompactAnswered || settings.autoCompactWindow) return
+  console.log(`   ${C.bold('Auto-compaction.')} Every tool call re-sends the whole context. Left to grow towards 1M tokens,`)
+  console.log(`   that is most of the bill; compacting at 200k roughly halves it on long sessions (${C.cyan('cork-ai context')} shows yours).`)
+  const answer = await askYesNo(`   Set Claude Code's autoCompactWindow to 200k tokens now? [y/N]: `)
+  if (answer === undefined) {
+    console.log(`   ${C.dim('Skipped (non-interactive). Later: cork-ai context --set-autocompact 200k')}`)
+    return
+  }
+  updateConfig({ autoCompactAnswered: true })
+  if (answer) {
+    const fresh = loadClaudeSettings()
+    fresh.autoCompactWindow = 200_000
+    saveClaudeSettings(fresh)
+    console.log(`   ${C.green('✔')}  autoCompactWindow = 200k in ${C.dim(CLAUDE_SETTINGS)} ${C.dim('(/autocompact auto in Claude Code restores the default)')}`)
+  } else {
+    console.log(`   ${C.dim('Kept as is. Later: cork-ai context --set-autocompact 200k')}`)
   }
   console.log()
 }
@@ -1232,416 +1156,20 @@ function hooksStatus(): void {
   console.log()
 }
 
-// ─── hook (PreToolUse handler called by Claude Code) ─────────────────────────
+// ─── hook (called by Claude Code on every hook event) ────────────────────────
 
-// Shared calibrated estimator (chars-based fast path, same unit as the
-// library's tiktoken path thanks to ~/.cork-ai/calibration.json).
-function estimateTokens(text: string): number {
-  return estimateTokensFast(text)
-}
-
-// ─── Per-session read tracking (re-read = compression harmed the model) ──────
-
-interface SessionReads {
-  /** filePath → times served compressed this session */
-  files: Record<string, number>
-  /** filePath → ISO time of the last edit seen this session (Edit/Write tool, sed -i, redirection) */
-  edited?: Record<string, string>
-}
-
-function readsFileFor(sessionId: string): string {
-  const safe = sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)
-  return path.join(LIVE_DIR, `reads-${safe}.json`)
-}
-
-function loadSessionReads(sessionId: string): SessionReads {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(readsFileFor(sessionId), 'utf-8')) as SessionReads
-    return parsed && typeof parsed.files === 'object' ? parsed : { files: {} }
-  } catch {
-    return { files: {} }
-  }
-}
-
-function saveSessionReads(sessionId: string, reads: SessionReads): void {
-  try {
-    fs.mkdirSync(LIVE_DIR, { recursive: true })
-    fs.writeFileSync(readsFileFor(sessionId), JSON.stringify(reads), 'utf-8')
-  } catch { /* non-critical */ }
-}
-
-function markEdited(sessionId: string, filePath: string): void {
-  if (!sessionId || !filePath) return
-  const reads = loadSessionReads(sessionId)
-  reads.edited ??= {}
-  reads.edited[filePath] = new Date().toISOString()
-  // A file that was served compressed and then edited: the model needed the
-  // real content after all. Learn it for the extension.
-  if (reads.files[filePath]) recordEditAfter(filePath)
-  saveSessionReads(sessionId, reads)
-}
-
-// ─── Heartbeat (proof that Claude Code still calls us) ───────────────────────
-
-export const HEARTBEAT_FILE = path.join(CORK_HOME, 'heartbeat.json')
-
-interface Heartbeat {
-  at: string
-  sessionId: string
-  event: string
-  toolName?: string
-  permissionMode?: string
-  claudeVersion?: string
-  corkVersion: string
-}
-
-function readHeartbeat(): Heartbeat | undefined {
-  try { return JSON.parse(fs.readFileSync(HEARTBEAT_FILE, 'utf-8')) as Heartbeat } catch { return undefined }
-}
-
-/** Claude Code stamps every transcript line with its own `version`. */
-function claudeVersionFromTranscript(transcriptPath?: string): string | undefined {
-  if (!transcriptPath) return undefined
-  try {
-    const stat = fs.statSync(transcriptPath)
-    const start = Math.max(0, stat.size - 64 * 1024)
-    const fd = fs.openSync(transcriptPath, 'r')
-    const buf = Buffer.alloc(stat.size - start)
-    fs.readSync(fd, buf, 0, buf.length, start)
-    fs.closeSync(fd)
-    const m = /"version":"(\d+\.\d+\.\d+)"/.exec(buf.toString('utf-8'))
-    return m?.[1]
-  } catch {
-    return undefined
-  }
-}
-
-/**
- * Written on every hook event, at most once a minute per session. `gain` and
- * `doctor` compare it with the transcripts: sessions that ran without a
- * heartbeat mean Claude Code is no longer calling the hook — the failure mode
- * that stayed invisible for weeks when auto mode moved reads to Bash.
- */
-function writeHeartbeat(event: Record<string, unknown>): void {
-  try {
-    const sessionId = (event.session_id as string) || ''
-    const prev = readHeartbeat()
-    if (prev && prev.sessionId === sessionId && Date.now() - new Date(prev.at).getTime() < 60_000) return
-    const beat: Heartbeat = {
-      at: new Date().toISOString(),
-      sessionId,
-      event: (event.hook_event_name as string) ?? '',
-      toolName: event.tool_name as string | undefined,
-      permissionMode: event.permission_mode as string | undefined,
-      claudeVersion: claudeVersionFromTranscript(event.transcript_path as string | undefined) ?? prev?.claudeVersion,
-      corkVersion: VERSION,
-    }
-    fs.mkdirSync(CORK_HOME, { recursive: true })
-    fs.writeFileSync(HEARTBEAT_FILE, JSON.stringify(beat), 'utf-8')
-  } catch { /* non-critical */ }
-}
-
-// ─── Hook output ─────────────────────────────────────────────────────────────
-
-/**
- * Deny the tool call and hand the compressed view back as the reason. Claude
- * Code shows `permissionDecisionReason` to the model in place of the tool
- * result. The legacy top-level `decision: "block"` is kept for older versions;
- * when both are present `hookSpecificOutput` takes precedence.
- */
-function denyWith(reason: string): void {
-  console.log(JSON.stringify({
-    decision: 'block',
-    reason,
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'deny',
-      permissionDecisionReason: reason,
-    },
-  }))
-}
-
-// PostToolUse on Edit: an Edit that fails on a file we only ever served
-// compressed means the model's old_string came from the outline, not the real
-// file — direct compression harm. Count it and auto-whitelist the file.
-// Failure detection is best-effort (matches Claude Code's known Edit errors);
-// if the payload shape differs, this is a silent no-op.
-const EDIT_FAILURE_MARKERS =
-  /String to replace not found|matches of the string to replace|has not been read yet|"is_error"\s*:\s*true/i
-
-function handlePostToolUseEdit(event: Record<string, unknown>): void {
-  const toolName = (event.tool_name as string) ?? ''
-  if (toolName !== 'Edit' && toolName !== 'MultiEdit' && toolName !== 'Write') return
-  const toolInput = (event.tool_input as Record<string, unknown>) ?? {}
-  const filePath = toolInput.file_path as string
-  const sessionId = (event.session_id as string) || ''
-  if (!filePath || !sessionId) return
-
-  const reads = loadSessionReads(sessionId)
-  const wasCompressed = Boolean(reads.files[filePath])
-  markEdited(sessionId, filePath)
-  if (!wasCompressed) return  // file was never served compressed — not our fault
-
-  let respText = ''
-  try { respText = JSON.stringify(event.tool_response ?? '') } catch { return }
-  if (!EDIT_FAILURE_MARKERS.test(respText)) return
-
-  // Whitelist: the next Read of this file is served raw so the retry can work
-  // from the real content — permanently, not just for this session. A failed
-  // Edit is the strongest possible evidence that the outline was not enough.
-  const fresh = loadSessionReads(sessionId)
-  fresh.files[filePath] = (fresh.files[filePath] ?? 0) + 1
-  saveSessionReads(sessionId, fresh)
-  markSkipped(filePath, 'edit-failure')
-
-  try {
-    accumulateInSession({
-      projectPath: (event.cwd as string) || process.cwd(),
-      originalTokens: 0,
-      compressedTokens: 0,
-      savedTokens: 0,
-      estimatedCostSaved: 0,
-      byModule: {},
-      model: loadConfig().detectedModel,
-      sessionId,
-      editFailure: true,
-    })
-  } catch { /* non-critical */ }
-}
-
-// ─── Read handling (Read tool and Bash equivalents share one path) ───────────
-
-interface ReadContext {
-  event: Record<string, unknown>
-  filePath: string
-  /** 'Read' or the shell command word ('cat', …) — for the byModule breakdown. */
-  source: string
-}
-
-/** Books the induced cost of a re-read against the session and learns from it. */
-function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, detectedModel?: string): void {
-  markSkipped(ctx.filePath, 're-read')
-  recordReRead(ctx.filePath)
-  try {
-    accumulateInSession({
-      projectPath: (ctx.event.cwd as string) || process.cwd(),
-      originalTokens: 0,
-      compressedTokens: 0,
-      savedTokens: 0,
-      // The second read only exists because the first one was compressed —
-      // its full raw cost is induced by us. Deduct it.
-      estimatedCostSaved: -(rawTokens / 1_000_000) * inputPriceForModel(detectedModel),
-      byModule: {},
-      model: detectedModel,
-      sessionId,
-      reRead: true,
-      reReadTokensServed: rawTokens,
-    })
-  } catch { /* non-critical */ }
-}
-
-/**
- * A targeted read (sed -n, head, tail, Read with offset/limit) of a file that
- * was served compressed this session: the outline pointed the model at a
- * region and it read just that. This is the intended follow-up, so it is
- * recorded for the record but does *not* count against the extension — only
- * a full re-read does. The file stays whitelisted for the session either way:
- * the model has shown it is working on it.
- */
-function noteRangeRead(event: Record<string, unknown>, filePath: string): void {
-  const sessionId = (event.session_id as string) || ''
-  if (!sessionId) return
-  const reads = loadSessionReads(sessionId)
-  if (reads.files[filePath] !== 1) return   // not compressed this session, or already noted
-  reads.files[filePath] = 2
-  saveSessionReads(sessionId, reads)
-  recordRangeRead(filePath)
-}
-
-function handleRead(ctx: ReadContext): void {
-  const { event, filePath } = ctx
-
-  // Never compress the file the user is explicitly asking about — the model
-  // almost certainly needs its real content, and a compressed view forces a
-  // re-read round-trip that costs more than the compression saves.
-  const userPrompt = lastUserPromptFromTranscript(event.transcript_path as string | undefined)
-  if (userPrompt && userPrompt.toLowerCase().includes(path.basename(filePath).toLowerCase())) return
-
-  // A file that already proved it needs its real content is served raw for
-  // good — the lesson outlives the session that learned it.
-  if (isSkipped(filePath)) return
-
-  const sessionId = (event.session_id as string) || ''
-  const reads = sessionId ? loadSessionReads(sessionId) : null
-
-  // A file the model is editing in this session is served raw: every measured
-  // edit flow (59% of compressed files, 97% of .tsx) ended in a full re-read.
-  if (reads?.edited?.[filePath]) return
-
-  // Read bytes, not a utf-8 string. `readFileSync(png, 'utf-8')` does not
-  // throw: it returns mojibake that passes every downstream check, which is
-  // how images ended up being "compressed" into binary garbage.
-  let buf: Buffer
-  try { buf = fs.readFileSync(filePath) } catch { return }
-
-  const verdict = eligibility(filePath, buf)
-  if (!verdict.compress) return
-
-  const content = buf.toString('utf-8')
-  const lines = content.split('\n')
-  const slice = lines.slice(0, 2000).join('\n')
-
-  const ext = path.extname(filePath).toLowerCase() || 'none'
-  const originalTokens = estimateTokens(slice)
-
-  const cfg = loadConfig()
-  const turn = lastMainTurnUsage(event.transcript_path as string | undefined)
-  const detectedModel = turn?.model || (event.model as string) || cfg.detectedModel
-
-  // Re-read of a file we already compressed this session: the compressed view
-  // wasn't enough for the model. Serve it raw, auto-whitelist it, and account
-  // the induced cost against our savings.
-  if (reads && reads.files[filePath]) {
-    reads.files[filePath] += 1
-    saveSessionReads(sessionId, reads)
-    accountReRead(ctx, sessionId, originalTokens, detectedModel)
-    return  // passthrough: Claude gets the raw file
-  }
-
-  const telemetrySkip = (compressType: string) => {
-    if (isTelemetryEnabled()) sendTelemetry({ v: VERSION, os: process.platform, arch: process.arch, savings_pct: 0, file_ext: ext, compress_type: compressType, skipped: true })
-  }
-
-  const view = outline(slice, filePath, verdict.kind)
-  const compressedTokens = estimateTokens(view.text)
-  if (compressedTokens >= originalTokens * 0.85) { telemetrySkip(verdict.kind); return }
-
-  // The expected-value gate: is this compression worth the re-read risk, given
-  // the live context size and what this extension has done before?
-  const decision = gate({
-    filePath,
-    originalTokens,
-    compressedTokens,
-    contextTokens: turn?.contextTokens ?? 0,
-    model: detectedModel,
-    amplification: cfg.measuredAmplification,
-  })
-  if (!decision.compress) { telemetrySkip(verdict.kind); return }
-
-  const saved = originalTokens - compressedTokens
-  const savingsPct = Math.round((saved / originalTokens) * 1000) / 10
-
-  // Remember we served this file compressed — a re-read in the same session
-  // will be served raw (auto-whitelist) and counted as compression harm.
-  if (reads && sessionId) {
-    reads.files[filePath] = 1
-    saveSessionReads(sessionId, reads)
-  }
-  recordCompression(filePath)
-
-  try {
-    if (detectedModel && cfg.detectedModel !== detectedModel) saveConfig({ ...cfg, detectedModel })
-    const moduleName = ctx.source === 'Read' ? 'hookReadCompressor' : 'hookBashReadCompressor'
-    accumulateInSession({
-      projectPath: (event.cwd as string) || process.cwd(),
-      originalTokens,
-      compressedTokens,
-      savedTokens: saved,
-      estimatedCostSaved: (saved / 1_000_000) * inputPriceForModel(detectedModel),
-      byModule: { [moduleName]: saved },
-      model: detectedModel,
-      sessionId: sessionId || undefined,
-    })
-  } catch { /* non-critical */ }
-
-  if (isTelemetryEnabled()) {
-    sendTelemetry({ v: VERSION, os: process.platform, arch: process.arch, savings_pct: savingsPct, file_ext: ext, compress_type: verdict.kind, skipped: false })
-  }
-
-  denyWith(view.text)
-}
-
-function handleBash(event: Record<string, unknown>): void {
-  const command = ((event.tool_input as Record<string, unknown>)?.command as string) ?? ''
-  const cwd = (event.cwd as string) || process.cwd()
-  const sessionId = (event.session_id as string) || ''
-
-  const edit = parseBashEdit(command, cwd)
-  if (edit) { markEdited(sessionId, edit.file); return }
-
-  const read = parseBashRead(command, cwd)
-  if (!read) return
-  if (read.kind === 'range') { noteRangeRead(event, read.file); return }
-  handleRead({ event, filePath: read.file, source: read.tool })
-}
-
-function runGuard(event: Record<string, unknown>, hookEvent: 'UserPromptSubmit' | 'PostToolUse' | 'Stop' | 'SessionStart'): void {
-  const cfg = loadConfig()
-  const notice = evaluateGuard({
-    sessionId: (event.session_id as string) || '',
-    transcriptPath: event.transcript_path as string | undefined,
-    event: hookEvent,
-    config: cfg.contextGuard,
-  })
-  if (notice) console.log(JSON.stringify(guardHookOutput(notice, hookEvent, cfg.contextGuard?.nudgeModel !== false)))
-}
-
+// All the logic lives in src/cli/hook.ts (pure, unit-tested). This is the I/O shell.
 async function runHook(): Promise<void> {
   let input = ''
   for await (const chunk of process.stdin) input += chunk
-  if (!input.trim()) process.exit(0)
-
+  if (!input.trim()) return
   let event: Record<string, unknown>
-  try { event = JSON.parse(input) as Record<string, unknown> } catch { process.exit(0) }
-
-  const toolName = (event.tool_name as string) ?? ''
-  const toolInput = (event.tool_input as Record<string, unknown>) ?? {}
-  const hookEvent = (event.hook_event_name as string) ?? ''
-
-  writeHeartbeat(event)
-
-  if (hookEvent === 'PostToolUse') {
-    handlePostToolUseEdit(event)
-    runGuard(event, 'PostToolUse')
-    process.exit(0)
-  }
-  if (hookEvent === 'UserPromptSubmit' || hookEvent === 'Stop' || hookEvent === 'SessionStart') {
-    runGuard(event, hookEvent)
-    process.exit(0)
-  }
-  if (hookEvent !== 'PreToolUse') process.exit(0)
-
-  if (toolName === 'Bash') {
-    handleBash(event)
-    process.exit(0)
-  }
-  if (toolName !== 'Read') process.exit(0)
-
-  const filePath = toolInput.file_path as string
-  if (!filePath) process.exit(0)
-
-  // Explicit offset/limit = the model is targeting a precise zone (often to
-  // recover content hidden by a previous compression). Never compress those.
-  if (toolInput.offset !== undefined || toolInput.limit !== undefined) {
-    noteRangeRead(event, filePath)
-    process.exit(0)
-  }
-
-  handleRead({ event, filePath, source: 'Read' })
+  try { event = JSON.parse(input) as Record<string, unknown> } catch { return }
+  const output = handleHookEvent(event)
+  if (output) console.log(JSON.stringify(output))
 }
 
 // ─── context (the report that explains the bill) ─────────────────────────────
-
-/** `200k`, `1M`, `200` (thousands) or a plain token count → tokens. */
-function parseTokenCount(raw: string | undefined): number | undefined {
-  if (!raw) return undefined
-  const m = /^(\d+(?:\.\d+)?)\s*([kKmM])?$/.exec(raw.trim())
-  if (!m) return undefined
-  const n = Number(m[1])
-  if (m[2]?.toLowerCase() === 'k') return Math.round(n * 1_000)
-  if (m[2]?.toLowerCase() === 'm') return Math.round(n * 1_000_000)
-  return n <= 1000 ? Math.round(n * 1_000) : Math.round(n)
-}
 
 function flagValue(args: string[], name: string): string | undefined {
   const i = args.indexOf(name)
@@ -1667,18 +1195,28 @@ function setAutoCompactWindow(tokens: number): void {
 function showContext(args: string[]): void {
   const setRaw = flagValue(args, '--set-autocompact')
   if (setRaw !== undefined) {
-    const tokens = parseTokenCount(setRaw)
+    const tokens = parseTokens(setRaw)
     if (!tokens) { console.error(`\nUsage: cork-ai context --set-autocompact 200k\n`); process.exit(1) }
     setAutoCompactWindow(tokens)
     return
   }
 
   const days = Number(flagValue(args, '--days') ?? 30)
-  const ceiling = parseTokenCount(flagValue(args, '--ceiling')) ?? 200_000
+  const ceiling = parseTokens(flagValue(args, '--ceiling')) ?? 200_000
   const ceilings = [...new Set([150_000, 200_000, 300_000, ceiling])].sort((a, b) => a - b)
   const since = new Date(Date.now() - days * 86_400_000)
   const report = contextReport({ since, ceilings, minTurns: 20 })
   const settings = loadClaudeSettings()
+
+  if (args.includes('--json')) {
+    console.log(JSON.stringify({
+      days, ceiling, ceilings,
+      totals: { sessions: report.sessions.length, turns: report.turns, costUSD: report.costUSD, cacheReadCostUSD: report.cacheReadCostUSD, avgContextTokens: report.avgContextTokens, cappedCostUSD: report.cappedCostUSD },
+      settings: { autoCompactWindow: settings.autoCompactWindow ?? null, model: settings.model ?? null },
+      sessions: report.sessions,
+    }, null, 2))
+    return
+  }
 
   console.log(`\n${C.bold('cork-ai — Context')} ${C.dim(`(Claude Code transcripts · last ${days} days · sessions ≥ 20 turns)`)}`)
   console.log(divider())
@@ -1827,38 +1365,46 @@ function selfTestHook(binary: string): { ok: boolean; detail: string } {
   }
 }
 
-function runDoctor(): void {
-  const okMark = C.green('✔')
-  const badMark = C.red('✗')
-  const warnMark = C.yellow('!')
-  let problems = 0
+interface DoctorCheck {
+  name: string
+  status: 'ok' | 'warn' | 'fail' | 'info'
+  summary: string
+  /** Extra lines under the check (text mode) */
+  lines?: string[]
+  data?: Record<string, unknown>
+}
 
-  console.log(`\n${C.bold('cork-ai doctor')} v${VERSION}`)
-  console.log(divider())
+async function runDoctor(args: string[]): Promise<void> {
+  const json = args.includes('--json')
+  const checks: DoctorCheck[] = []
+  const push = (c: DoctorCheck) => { checks.push(c); return c }
 
   // 1. Binary
   const binary = resolveHookBinary()
   if (binary) {
     let executable = true
     try { fs.accessSync(binary, fs.constants.X_OK) } catch { executable = false }
-    console.log(`  ${executable ? okMark : badMark} Binary        ${C.dim(binary)}${executable ? '' : C.red('  not executable')}`)
-    if (!executable) problems++
+    push({ name: 'binary', status: executable ? 'ok' : 'fail', summary: `${binary}${executable ? '' : '  not executable'}`, data: { path: binary, executable, version: VERSION } })
   } else {
-    console.log(`  ${warnMark} Binary        not found in the usual locations — hooks fall back to PATH lookup (fragile)`)
-    problems++
+    push({ name: 'binary', status: 'warn', summary: 'not found in the usual locations — hooks fall back to PATH lookup (fragile)', data: { path: null, version: VERSION } })
   }
 
   // 2. Hooks in settings
   const settings = loadClaudeSettings()
   const hooks = installedCorkHooks(settings)
   const missing = hooks.filter(h => !h.present)
-  console.log(`  ${missing.length === 0 ? okMark : badMark} Hooks         ${hooks.length - missing.length}/${hooks.length} installed in ${C.dim(CLAUDE_SETTINGS)}`)
-  for (const h of missing) console.log(`      ${C.yellow('missing')} ${h.event}${h.matcher ? ` (${h.matcher})` : ''}`)
-  if (missing.length > 0) { problems++; console.log(`      → ${C.cyan('cork-ai hooks install')}`) }
   const stale = hooks.filter(h => h.present && h.command && h.command !== CORK_HOOK_FALLBACK && binary && !h.command.includes(binary))
-  if (stale.length > 0) {
-    console.log(`      ${C.yellow('!')} ${stale.length} hook(s) point at another binary path than ${C.dim(binary)} — ${C.cyan('cork-ai hooks install')} re-targets them`)
-  }
+  push({
+    name: 'hooks',
+    status: missing.length === 0 ? 'ok' : 'fail',
+    summary: `${hooks.length - missing.length}/${hooks.length} installed in ${CLAUDE_SETTINGS}`,
+    lines: [
+      ...missing.map(h => `${C.yellow('missing')} ${h.event}${h.matcher ? ` (${h.matcher})` : ''}`),
+      ...(missing.length > 0 ? [`→ ${C.cyan('cork-ai hooks install')}`] : []),
+      ...(stale.length > 0 ? [`${C.yellow('!')} ${stale.length} hook(s) point at another binary path — ${C.cyan('cork-ai hooks install')} re-targets them`] : []),
+    ],
+    data: { installed: hooks.filter(h => h.present).map(h => `${h.event}${h.matcher ? `:${h.matcher}` : ''}`), missing: missing.map(h => `${h.event}${h.matcher ? `:${h.matcher}` : ''}`), stale: stale.length },
+  })
 
   // 3. Other hooks on the same matchers
   for (const spec of CORK_HOOKS.filter(h => h.event === 'PreToolUse')) {
@@ -1866,16 +1412,19 @@ function runDoctor(): void {
       .filter(g => g.matcher === spec.matcher)
       .flatMap(g => g.hooks.filter(h => !isCorkCmd(h.command)).map(h => h.command))
     if (others.length > 0) {
-      console.log(`  ${warnMark} Neighbours    ${others.length} other PreToolUse hook(s) on ${spec.matcher}: ${C.dim(others.map(o => o.split(' ').slice(-1)[0]).join(', '))}`)
-      console.log(`      ${C.dim('If one of them blocks reads (e.g. a read cache), both views may be sent; not a cork-ai failure, but worth knowing.')}`)
+      push({
+        name: `neighbours:${spec.matcher}`, status: 'warn',
+        summary: `${others.length} other PreToolUse hook(s) on ${spec.matcher}: ${others.map(o => o.split(' ').slice(-1)[0]).join(', ')}`,
+        lines: [C.dim('If one of them blocks reads (e.g. a read cache), both views may be sent; not a cork-ai failure, but worth knowing.')],
+        data: { matcher: spec.matcher, count: others.length },
+      })
     }
   }
 
   // 4. Self-test
   if (binary) {
     const test = selfTestHook(binary)
-    console.log(`  ${test.ok ? okMark : badMark} Self-test     ${test.detail}`)
-    if (!test.ok) problems++
+    push({ name: 'self-test', status: test.ok ? 'ok' : 'fail', summary: test.detail, data: { ok: test.ok } })
   }
 
   // 5. Heartbeat
@@ -1883,9 +1432,9 @@ function runDoctor(): void {
   if (beat) {
     const ageMin = Math.round((Date.now() - new Date(beat.at).getTime()) / 60_000)
     const age = ageMin < 60 ? `${ageMin} min ago` : ageMin < 60 * 48 ? `${Math.round(ageMin / 60)} h ago` : `${Math.round(ageMin / 1440)} days ago`
-    console.log(`  ${okMark} Heartbeat     last hook event ${age} ${C.dim(`(${beat.event}${beat.toolName ? ' ' + beat.toolName : ''} · Claude Code ${beat.claudeVersion ?? '?'}${beat.permissionMode ? ' · ' + beat.permissionMode + ' mode' : ''} · cork-ai ${beat.corkVersion})`)}`)
+    push({ name: 'heartbeat', status: 'ok', summary: `last hook event ${age} (${beat.event}${beat.toolName ? ' ' + beat.toolName : ''} · Claude Code ${beat.claudeVersion ?? '?'}${beat.permissionMode ? ' · ' + beat.permissionMode + ' mode' : ''} · cork-ai ${beat.corkVersion})`, data: { ...beat, ageMinutes: ageMin } })
   } else {
-    console.log(`  ${warnMark} Heartbeat     no hook event recorded yet ${C.dim('(this file appears after the first Read/Bash/Edit in a session started after install)')}`)
+    push({ name: 'heartbeat', status: 'warn', summary: 'no hook event recorded yet (appears after the first Read/Bash/Edit in a session started after install)', data: {} })
   }
 
   // 6. Coverage
@@ -1894,40 +1443,75 @@ function runDoctor(): void {
   const totalReads = rows.reduce((s, r) => s + r.reads, 0)
   const totalBash = rows.reduce((s, r) => s + r.bashReads, 0)
   if (rows.length === 0) {
-    console.log(`  ${C.dim('·')} Coverage      no Claude Code session with 5+ turns in the last 14 days`)
+    push({ name: 'coverage', status: 'info', summary: 'no Claude Code session with 5+ turns in the last 14 days', data: { sessions: 0 } })
   } else {
-    const mark = unseen.length === 0 ? okMark : unseen.length === rows.length ? badMark : warnMark
-    console.log(`  ${mark} Coverage      ${rows.length - unseen.length}/${rows.length} sessions (14 days) produced cork-ai events · reads: ${fmt(totalReads)} via Read, ${fmt(totalBash)} via Bash (cat/sed/head)`)
-    for (const r of rows.slice(0, 8)) {
+    const lines = rows.slice(0, 8).map(r => {
       const date = r.startedAt ? new Date(r.startedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '?'
       const project = r.project.replace(/^-home-[^-]+-projects-/, '').replace(/^-/, '').slice(0, 22)
-      console.log(`      ${r.seen ? C.green('●') : C.red('○')} ${date.padEnd(7)} ${project.padEnd(23)} ${fmt(r.turns).padStart(5)} turns  ${fmt(r.reads).padStart(4)} Read  ${fmt(r.bashReads).padStart(4)} Bash-read  ${C.dim(`${r.claudeVersion ?? ''}${r.permissionMode ? ' ' + r.permissionMode : ''}`)}`)
-    }
-    if (unseen.length === rows.length) problems++
+      return `${r.seen ? C.green('●') : C.red('○')} ${date.padEnd(7)} ${project.padEnd(23)} ${fmt(r.turns).padStart(5)} turns  ${fmt(r.reads).padStart(4)} Read  ${fmt(r.bashReads).padStart(4)} Bash-read  ${C.dim(`${r.claudeVersion ?? ''}${r.permissionMode ? ' ' + r.permissionMode : ''}`)}`
+    })
     if (totalBash > totalReads && !hooks.find(h => h.matcher === 'Bash')?.present) {
-      console.log(`      ${C.red('→')} the model reads through Bash (auto mode) and the Bash hook is missing: ${C.cyan('cork-ai hooks install')}`)
+      lines.push(`${C.red('→')} the model reads through Bash (auto mode) and the Bash hook is missing: ${C.cyan('cork-ai hooks install')}`)
     }
+    push({
+      name: 'coverage',
+      status: unseen.length === 0 ? 'ok' : unseen.length === rows.length ? 'fail' : 'warn',
+      summary: `${rows.length - unseen.length}/${rows.length} sessions (14 days) produced cork-ai events · reads: ${fmt(totalReads)} via Read, ${fmt(totalBash)} via Bash (cat/sed/head)`,
+      lines,
+      data: { sessions: rows.length, seen: rows.length - unseen.length, reads: totalReads, bashReads: totalBash, rows: rows.map(r => ({ sessionId: r.sessionId, startedAt: r.startedAt, turns: r.turns, reads: r.reads, bashReads: r.bashReads, seen: r.seen, claudeVersion: r.claudeVersion, permissionMode: r.permissionMode })) },
+    })
   }
 
   // 7. Context settings
   const acw = settings.autoCompactWindow
   const model = String(settings.model ?? '')
-  if (acw) console.log(`  ${okMark} Compaction    autoCompactWindow = ${fmtTokens(acw)} tokens`)
-  else console.log(`  ${warnMark} Compaction    autoCompactWindow unset${/\[1m\]/.test(model) ? ` and model is ${model} — contexts can reach 1M` : ''}: ${C.cyan('cork-ai context')} shows what that costs`)
+  push(acw
+    ? { name: 'compaction', status: 'ok', summary: `autoCompactWindow = ${fmtTokens(acw)} tokens`, data: { autoCompactWindow: acw, model } }
+    : { name: 'compaction', status: 'warn', summary: `autoCompactWindow unset${/\[1m\]/.test(model) ? ` and model is ${model} — contexts can reach 1M` : ''}: ${C.cyan('cork-ai context')} shows what that costs`, data: { autoCompactWindow: null, model } })
   const guard = loadConfig().contextGuard
-  console.log(`  ${guard?.enabled === false ? warnMark : okMark} Guard         context guard ${guard?.enabled === false ? C.yellow('off') : C.green('on')} ${C.dim(`(bands ${(guard?.bands ?? [150_000, 300_000, 500_000, 750_000]).map(fmtTokens).join(' / ')})`)}`)
+  push({ name: 'guard', status: guard?.enabled === false ? 'warn' : 'ok', summary: `context guard ${guard?.enabled === false ? 'off' : 'on'} (bands ${(guard?.bands ?? [150_000, 300_000, 500_000, 750_000]).map(fmtTokens).join(' / ')})`, data: { enabled: guard?.enabled !== false, bands: guard?.bands ?? [150_000, 300_000, 500_000, 750_000] } })
 
   // 8. Policy
   const policy = policySummary()
   const onProbation = policy.filter(p => p.probation)
   if (policy.length > 0) {
-    console.log(`  ${okMark} Policy        ${policy.length} extension(s) learned` + (onProbation.length > 0 ? `, ${onProbation.length} on probation: ${C.dim(onProbation.map(p => `${p.ext} ${Math.round(p.reReadRate * 100)}%`).join(', '))}` : ''))
+    push({ name: 'policy', status: 'ok', summary: `${policy.length} extension(s) learned` + (onProbation.length > 0 ? `, ${onProbation.length} on probation: ${onProbation.map(p => `${p.ext} ${Math.round(p.reReadRate * 100)}%`).join(', ')}` : ''), data: { extensions: policy } })
   }
 
+  // 9. Version check (best effort, 6 s budget)
+  const latest = await fetchLatestRelease()
+  if (latest) {
+    const behind = compareVersions(latest.version, VERSION) > 0
+    push({ name: 'version', status: behind ? 'warn' : 'ok', summary: behind ? `v${VERSION} installed, ${latest.tag} available → ${C.cyan('cork-ai update')}` : `v${VERSION} is the latest release`, data: { installed: VERSION, latest: latest.version } })
+  } else {
+    push({ name: 'version', status: 'info', summary: `v${VERSION} (could not check GitHub for a newer release)`, data: { installed: VERSION, latest: null } })
+  }
+
+  const problems = checks.filter(c => c.status === 'fail').length
+  const telemetry = isTelemetryEnabled()
+
+  if (json) {
+    console.log(JSON.stringify({ version: VERSION, ok: problems === 0, problems, telemetry, checks: checks.map(c => ({ name: c.name, status: c.status, summary: stripAnsi(c.summary), ...c.data })) }, null, 2))
+    if (problems > 0) process.exitCode = 1
+    return
+  }
+
+  const marks = { ok: C.green('✔'), warn: C.yellow('!'), fail: C.red('✗'), info: C.dim('·') }
+  console.log(`\n${C.bold('cork-ai doctor')} v${VERSION}`)
   console.log(divider())
-  if (problems === 0) console.log(`  ${C.green('All good.')} cork-ai is wired and being called.\n`)
+  for (const c of checks) {
+    const label = c.name.replace(/:.*$/, '').replace(/^\w/, ch => ch.toUpperCase())
+    console.log(`  ${marks[c.status]} ${label.padEnd(13)} ${c.summary}`)
+    for (const l of c.lines ?? []) console.log(`      ${l}`)
+  }
+  console.log(divider())
+  if (problems === 0) console.log(`  ${C.green('All good.')} cork-ai is wired and being called.${telemetry ? '' : C.dim('  (telemetry off — cork-ai telemetry on helps improve it)')}\n`)
   else console.log(`  ${C.yellow(`${problems} problem(s) found.`)} Fix them above, restart Claude Code, then run ${C.cyan('cork-ai doctor')} again.\n`)
   if (problems > 0) process.exitCode = 1
+}
+
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '')
 }
 
 // ─── statusline (a segment for statusLine.command) ───────────────────────────
@@ -2079,178 +1663,202 @@ async function runCalibrate(modelArg?: string): Promise<void> {
   console.log(`  ${C.dim('All future counts (library + hook) use these factors for this model.')}\n`)
 }
 
-// ─── Init command ─────────────────────────────────────────────────────────────
-
-function findFiles(dir: string, exts: string[], ignore: string[]): string[] {
-  const results: string[] = []
-  let entries: fs.Dirent[]
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return results }
-  for (const e of entries) {
-    if (ignore.includes(e.name)) continue
-    const full = path.join(dir, e.name)
-    if (e.isDirectory()) results.push(...findFiles(full, exts, ignore))
-    else if (exts.some(x => e.name.endsWith(x))) results.push(full)
-  }
-  return results
-}
-
-function detectIsTypeScript(cwd: string): boolean {
-  return fs.existsSync(path.join(cwd, 'tsconfig.json'))
-}
-
-function readPkg(cwd: string): Record<string, unknown> | null {
-  const p = path.join(cwd, 'package.json')
-  try { return JSON.parse(fs.readFileSync(p, 'utf8')) as Record<string, unknown> } catch { return null }
-}
-
-function hasSdkDep(pkg: Record<string, unknown> | null): boolean {
-  if (!pkg) return false
-  const deps = { ...(pkg.dependencies as object | undefined), ...(pkg.devDependencies as object | undefined) }
-  return '@anthropic-ai/sdk' in deps
-}
-
-function patchFile(_filePath: string, content: string): string | null {
-  if (content.includes('wrapClient') || content.includes('cork-ai')) return null
-  const newAnthropicRe = /new Anthropic\s*\([^)]*\)/g
-  if (!newAnthropicRe.test(content)) return null
-
-  const importLine = content.includes("from '@anthropic-ai/sdk'")
-    ? `from '@anthropic-ai/sdk'` : `from "@anthropic-ai/sdk"`
-  const withImport = content.replace(
-    new RegExp(`(import[^\\n]*${importLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`),
-    `$1\nimport { wrapClient } from 'cork-ai'`,
-  )
-  const patched = withImport.replace(/new Anthropic(\s*\([^)]*\))/g, 'wrapClient(new Anthropic$1)')
-  return patched === content ? null : patched
-}
-
-function generateWrapperFile(isTs: boolean): string {
-  const imp = isTs
-    ? `import Anthropic from '@anthropic-ai/sdk'\nimport { wrapClient } from 'cork-ai'`
-    : `const Anthropic = require('@anthropic-ai/sdk')\nconst { wrapClient } = require('cork-ai')`
-  const exp = isTs ? 'export const claude' : 'module.exports.claude'
-  return `${imp}
-
-${exp} = wrapClient(new Anthropic(), {
-  maxContextTokens: 150_000,
-  aggressiveness: 0.6,
-  onStats: (stats) => {
-    if (stats.request.savingsPercent > 5) {
-      process.stderr.write(\`[cork-ai] \${stats.request.savingsPercent}% saved\\n\`)
-    }
-  },
-})
-// Replace all \`new Anthropic()\` imports with this file.
-// Usage: import { claude } from './cork-ai-client'
-`
-}
-
-function runInit(): void {
-  const cwd = process.cwd()
-  const pkg = readPkg(cwd)
-  const isTs = detectIsTypeScript(cwd)
-
-  console.log(`\n${C.bold('cork-ai init')} — Auto-integrating into ${C.cyan(cwd)}\n`)
-
-  if (!hasSdkDep(pkg)) {
-    console.log(`${C.yellow('⚠')}  @anthropic-ai/sdk not found in package.json.`)
-    console.log(`   Run: ${C.cyan('npm install @anthropic-ai/sdk')}\n`)
-  }
-
-  const IGNORE = ['node_modules', '.git', 'dist', 'build', '.next', 'out', 'coverage', '.cork-ai']
-  const EXTS = isTs ? ['.ts', '.tsx'] : ['.js', '.mjs', '.cjs', '.jsx']
-  const SDK_IMPORT_RE = /^(?:import|const|var|let)\s+\w[\s\S]{0,60}['"]@anthropic-ai\/sdk['"]/m
-  const files = findFiles(cwd, EXTS, IGNORE)
-  const matches = files.filter(f => {
-    try {
-      const c = fs.readFileSync(f, 'utf8')
-      return c.includes('new Anthropic(') && SDK_IMPORT_RE.test(c)
-    } catch { return false }
-  })
-
-  if (matches.length === 0) {
-    const wrapperName = `cork-ai-client.${isTs ? 'ts' : 'js'}`
-    const wrapperDir = path.join(cwd, 'src')
-    const dest = fs.existsSync(wrapperDir) ? path.join(wrapperDir, wrapperName) : path.join(cwd, wrapperName)
-    fs.writeFileSync(dest, generateWrapperFile(isTs), 'utf8')
-    const rel = path.relative(cwd, dest)
-
-    console.log(`${C.green('✔')}  No existing Anthropic client found.`)
-    console.log(`   Generated wrapper: ${C.cyan(rel)}\n`)
-    console.log(`   Import it: ${C.dim(`import { claude } from './${rel.replace(/\\/g, '/').replace(/\.(ts|js)$/, '')}'`)}`)
-    console.log(`\n   Then run ${C.cyan('cork-ai gain')} after a session.\n`)
-    return
-  }
-
-  if (matches.length === 1) {
-    const file = matches[0]
-    const rel = path.relative(cwd, file)
-    const content = fs.readFileSync(file, 'utf8')
-    const patched = patchFile(file, content)
-
-    if (!patched) {
-      console.log(`${C.green('✔')}  ${C.cyan(rel)} — already integrated.`)
-      console.log(`   Run ${C.cyan('cork-ai gain')} after a session.\n`)
-      return
-    }
-
-    fs.writeFileSync(file, patched, 'utf8')
-    console.log(`${C.green('✔')}  Patched ${C.cyan(rel)}`)
-    console.log(`   Added: ${C.dim("import { wrapClient } from 'cork-ai'")}`)
-    console.log(`   Wrapped: ${C.dim('new Anthropic(...)  →  wrapClient(new Anthropic(...))')}`)
-    console.log(`\n   Run ${C.cyan('cork-ai gain')} after a session.\n`)
-    return
-  }
-
-  console.log(`${C.yellow('!')}  Found ${matches.length} files with Anthropic client:`)
-  for (const f of matches) console.log(`   ${C.cyan(path.relative(cwd, f))}`)
-  console.log()
-  console.log(`   Add to the file that calls the API:`)
-  console.log(`   ${C.dim("import { wrapClient } from 'cork-ai'")}`)
-  console.log(`   ${C.dim('const client = wrapClient(new Anthropic(), { maxContextTokens: 150_000 })')}`)
-  console.log()
-  console.log(`   Or run ${C.cyan('cork-ai hooks install')} to optimize Claude Code directly.\n`)
-}
-
-// ─── reset ────────────────────────────────────────────────────────────────────
-
 // ─── Telemetry commands ───────────────────────────────────────────────────────
 
 function telemetryOn(): void {
-  saveConfig({ ...loadConfig(), telemetry: true })
-  console.log(`\n${C.green('✔')}  Telemetry enabled. Anonymous compression stats will be sent after each session.`)
-  console.log(`   ${C.dim('What is sent: cork-ai version, OS, compression %, module breakdown. Never file paths or content.')}`)
-  console.log(`   Run ${C.cyan('cork-ai telemetry off')} to disable.\n`)
+  updateConfig({ telemetry: true })
+  sendTelemetry({ event: 'telemetry_toggled', properties: { enabled: true } })
+  console.log(`\n${C.green('✔')}  Telemetry enabled. Thank you — anonymous usage events go to PostHog (EU).`)
+  console.log(`   ${C.dim('What is sent: version, OS, model family, token buckets, hook decisions. Never paths, names or content.')}`)
+  console.log(`   ${C.dim('Details: docs/TELEMETRY.md')}   Run ${C.cyan('cork-ai telemetry off')} to disable.\n`)
 }
 
 function telemetryOff(): void {
-  saveConfig({ ...loadConfig(), telemetry: false })
+  // Sent before the switch so the opt-out itself is visible in the numbers.
+  sendTelemetry({ event: 'telemetry_toggled', properties: { enabled: false } })
+  updateConfig({ telemetry: false })
   console.log(`\n${C.green('✔')}  Telemetry disabled. No data will be sent.\n`)
 }
 
 function telemetryStatus(): void {
   const enabled = isTelemetryEnabled()
   const cfg = loadConfig()
-  const price = inputPriceForModel(cfg.detectedModel)
   console.log()
   console.log(`  Telemetry: ${enabled ? C.green('● enabled') : C.yellow('○ disabled')}`)
   if (cfg.telemetry === undefined) console.log(`  ${C.dim('(never configured — run cork-ai telemetry on to enable)')}`)
   if (process.env.DO_NOT_TRACK === '1') console.log(`  ${C.dim('(overridden by DO_NOT_TRACK=1)')}`)
   if (process.env.CORK_AI_TELEMETRY === '0') console.log(`  ${C.dim('(overridden by CORK_AI_TELEMETRY=0)')}`)
-  console.log(`  Model:     ${C.cyan(cfg.detectedModel ?? C.dim('not yet detected — will update on next Read'))}`)
-  console.log(`  Pricing:   ${C.cyan(`$${price.toFixed(2)}/M input tokens`)}${cfg.detectedModel ? '' : C.dim(' (Sonnet fallback)')}`)
+  if (cfg.installId) console.log(`  Install id: ${C.dim(cfg.installId)} ${C.dim('(random, not derived from this machine)')}`)
+  console.log(`  Endpoint:   ${C.dim('https://eu.i.posthog.com (PostHog Cloud EU)')}`)
   console.log()
 }
 
-function resetStats(): void {
-  const stats = readGlobalStats()
-  if (!stats || stats.allTime.totalRequests === 0) {
-    const live = readLiveSession()
-    if (!live) { console.log('Nothing to reset.'); return }
+// ─── config ──────────────────────────────────────────────────────────────────
+
+function runConfig(args: string[]): void {
+  const [sub, key, ...rest] = args
+  const cfg = loadConfig()
+  if (!sub || sub === 'list') {
+    console.log(`\n${C.bold('cork-ai config')} ${C.dim(CONFIG_FILE)}`)
+    console.log(divider())
+    for (const [k, meta] of Object.entries(CONFIG_KEYS)) {
+      const v = getConfigValue(cfg, k)
+      console.log(`  ${k.padEnd(30)} ${C.cyan(v === undefined ? C.dim('(default)') : JSON.stringify(v)).padEnd(24)} ${C.dim(meta.description)}`)
+    }
+    console.log(`  ${'detectedModel'.padEnd(30)} ${C.cyan(cfg.detectedModel ?? C.dim('(none yet)'))}`)
+    console.log(divider())
+    console.log(`  ${C.dim('cork-ai config get <key> · cork-ai config set <key> <value> · cork-ai config unset <key>')}\n`)
+    return
   }
-  resetGlobalStats()
-  clearLiveSession()
-  console.log(`\n${C.green('Stats reset.')} All data cleared from ${STATS_FILE}\n`)
+  if (sub === 'get') {
+    if (!key) { console.error('\nUsage: cork-ai config get <key>\n'); process.exit(1) }
+    const v = getConfigValue(cfg, key)
+    console.log(v === undefined ? '' : JSON.stringify(v))
+    return
+  }
+  if (sub === 'set') {
+    const meta = key ? CONFIG_KEYS[key] : undefined
+    if (!key || !meta || rest.length === 0) {
+      console.error(`\nUsage: cork-ai config set <key> <value>\nKeys: ${Object.keys(CONFIG_KEYS).join(', ')}\n`)
+      process.exit(1)
+    }
+    const value = meta.parse(rest.join(' '))
+    saveConfig(setConfigValue(cfg, key, value))
+    console.log(`\n${C.green('✔')}  ${key} = ${JSON.stringify(value)}\n`)
+    return
+  }
+  if (sub === 'unset') {
+    if (!key) { console.error('\nUsage: cork-ai config unset <key>\n'); process.exit(1) }
+    saveConfig(setConfigValue(cfg, key, undefined))
+    console.log(`\n${C.green('✔')}  ${key} reset to default\n`)
+    return
+  }
+  console.error(`\nUsage: cork-ai config [list|get <key>|set <key> <value>|unset <key>]\n`)
+  process.exit(1)
+}
+
+// ─── reset ────────────────────────────────────────────────────────────────────
+
+function runReset(args: string[]): void {
+  const what = args[0] ?? '--stats'
+  const targets: Record<string, { label: string; run: () => void }> = {
+    '--stats': {
+      label: 'stats.json and live sessions',
+      run: () => { resetGlobalStats(); clearLiveSession() },
+    },
+    '--policy': {
+      label: 'learned re-read rates (policy.json)',
+      run: () => { try { fs.unlinkSync(POLICY_FILE) } catch { /* none */ } },
+    },
+    '--skip-list': {
+      label: 'files served raw for good (skip-list.json)',
+      run: () => { try { fs.unlinkSync(SKIP_FILE) } catch { /* none */ } },
+    },
+    '--spend-cache': {
+      label: 'durable copy of transcript spend (spend-cache.json)',
+      run: () => { try { fs.unlinkSync(SPEND_CACHE_FILE) } catch { /* none */ } },
+    },
+    '--digests': {
+      label: 'session digests',
+      run: () => { try { fs.rmSync(path.join(CORK_HOME, 'digests'), { recursive: true, force: true }) } catch { /* none */ } },
+    },
+  }
+  const chosen = what === '--all' ? Object.keys(targets) : [what]
+  const unknown = chosen.filter(c => !targets[c])
+  if (unknown.length > 0) {
+    console.error(`\nUsage: cork-ai reset [--stats|--policy|--skip-list|--spend-cache|--digests|--all]\n`)
+    process.exit(1)
+  }
+  console.log()
+  for (const c of chosen) {
+    targets[c].run()
+    console.log(`  ${C.green('✔')}  cleared ${targets[c].label}`)
+  }
+  console.log(`  ${C.dim(`Config (${CONFIG_FILE}) and the heartbeat are kept.`)}\n`)
+}
+
+// ─── update (replace the standalone binary with the latest release) ───────────
+
+const RELEASE_REPO = 'mqthys62/cork-ai'
+
+interface LatestRelease { tag: string; version: string; assets: Record<string, string> }
+
+async function fetchLatestRelease(timeoutMs = 6_000): Promise<LatestRelease | undefined> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `cork-ai/${VERSION}` },
+      signal: controller.signal,
+    })
+    if (!res.ok) return undefined
+    const json = await res.json() as { tag_name?: string; assets?: Array<{ name: string; browser_download_url: string }> }
+    if (!json.tag_name) return undefined
+    const assets: Record<string, string> = {}
+    for (const a of json.assets ?? []) assets[a.name] = a.browser_download_url
+    return { tag: json.tag_name, version: json.tag_name.replace(/^v/, ''), assets }
+  } catch {
+    return undefined
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
+  for (let i = 0; i < 3; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
+    if (d !== 0) return d
+  }
+  return 0
+}
+
+function releaseAssetName(): string {
+  const platform = process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux'
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
+  return `cork-ai-${platform}-${arch}${platform === 'windows' ? '.exe' : ''}`
+}
+
+async function runUpdate(args: string[]): Promise<void> {
+  const checkOnly = args.includes('--check')
+  const latest = await fetchLatestRelease()
+  if (!latest) {
+    console.error(`\n${C.yellow('Could not reach GitHub releases.')} Check https://github.com/${RELEASE_REPO}/releases\n`)
+    process.exit(1)
+  }
+  const cmp = compareVersions(latest.version, VERSION)
+  console.log(`\n  Installed ${C.cyan(`v${VERSION}`)} · latest ${C.cyan(latest.tag)}`)
+  if (cmp <= 0) { console.log(`  ${C.green('✔')}  Up to date.\n`); return }
+  if (checkOnly) { console.log(`  ${C.yellow('!')}  Update available: ${C.cyan('cork-ai update')}\n`); return }
+
+  const binary = resolveHookBinary()
+  const compiled = binary && binary === process.execPath
+  if (!compiled) {
+    console.log(`  ${C.yellow('!')}  This cork-ai runs from node/npm, not the standalone binary. Update with your package manager, or reinstall:`)
+    console.log(`     ${C.cyan(`curl -fsSL https://raw.githubusercontent.com/${RELEASE_REPO}/main/scripts/install.sh | sh`)}\n`)
+    return
+  }
+  const asset = releaseAssetName()
+  const url = latest.assets[asset]
+  if (!url) { console.error(`  ${C.red('✗')}  No asset ${asset} in ${latest.tag}.\n`); process.exit(1) }
+
+  console.log(`  Downloading ${C.dim(asset)}…`)
+  const res = await fetch(url, { headers: { 'User-Agent': `cork-ai/${VERSION}` } })
+  if (!res.ok) { console.error(`  ${C.red('✗')}  Download failed (${res.status}).\n`); process.exit(1) }
+  const bytes = Buffer.from(await res.arrayBuffer())
+  const tmp = `${binary}.new`
+  fs.writeFileSync(tmp, bytes)
+  try { fs.chmodSync(tmp, 0o755) } catch { /* windows */ }
+
+  if (process.platform === 'win32') {
+    // A running .exe cannot be replaced on Windows: leave the new file next to it.
+    console.log(`  ${C.green('✔')}  Saved to ${C.dim(tmp)}. Close Claude Code, then replace the binary:`)
+    console.log(`     ${C.cyan(`move /Y "${tmp}" "${binary}"`)}\n`)
+    return
+  }
+  fs.renameSync(tmp, binary)  // atomic on POSIX; the running process keeps its old inode
+  console.log(`  ${C.green('✔')}  Updated to ${latest.tag}. Hooks keep pointing at ${C.dim(binary)} — nothing else to do.`)
+  console.log(`  ${C.dim('Run cork-ai doctor to confirm.')}\n`)
 }
 
 // ─── Main dispatcher ──────────────────────────────────────────────────────────
@@ -2260,19 +1868,22 @@ function resetStats(): void {
   const cmd = args[0]
   const sub = args[1]
 
+  // Usage telemetry for the CLI itself (never for the hook, which is called per tool use).
+  if (cmd && cmd !== 'hook' && cmd !== '__send-telemetry') sendTelemetry({ event: 'command', properties: { command: cmd, sub: sub?.startsWith('--') || ['install', 'remove', 'status', 'on', 'off', 'guard', 'list', 'get', 'set'].includes(sub ?? '') ? sub : undefined } })
+
   if (!cmd || cmd === '--help' || cmd === '-h') {
     showHelp()
   } else if (cmd === '--version' || cmd === '-v') {
     showVersion()
   } else if (cmd === 'hook') {
-    await runHook().catch(() => process.exit(0))
+    await runHook().catch(() => { /* a hook must never fail a tool call */ })
+  } else if (cmd === '__send-telemetry') {
+    await runSendTelemetry(sub)
   } else if (cmd === 'calibrate') {
     await runCalibrate(sub).catch(err => {
       console.error(`\n${C.yellow('Calibration failed:')} ${err instanceof Error ? err.message : String(err)}\n`)
       process.exit(1)
     })
-  } else if (cmd === 'init') {
-    runInit()
   } else if (cmd === 'hooks') {
     if (sub === 'install') await hooksInstall()
     else if (sub === 'remove' || sub === 'uninstall') hooksRemove()
@@ -2283,6 +1894,10 @@ function resetStats(): void {
     else if (sub === 'off') telemetryOff()
     else if (sub === 'status' || !sub) telemetryStatus()
     else { console.error(`\nUsage: cork-ai telemetry [on|off|status]\n`); process.exit(1) }
+  } else if (cmd === 'config') {
+    runConfig(args.slice(1))
+  } else if (cmd === 'update') {
+    await runUpdate(args.slice(1))
   } else if (cmd === 'gain') {
     if (sub === '--all') showAllTime()
     else if (sub === '--history') showHistory()
@@ -2300,9 +1915,9 @@ function resetStats(): void {
     else if (sub === '--json') reportJson()
     else reportFull()
   } else if (cmd === 'reset') {
-    resetStats()
+    runReset(args.slice(1))
   } else if (cmd === 'doctor') {
-    runDoctor()
+    await runDoctor(args.slice(1))
   } else if (cmd === 'context') {
     if (sub === 'guard') {
       const cfg = loadConfig()

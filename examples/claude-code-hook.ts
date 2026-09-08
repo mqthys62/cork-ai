@@ -11,7 +11,7 @@
  * Exécuter : tsx examples/claude-code-hook.ts
  */
 
-import { wrapClient } from '../src/index.js'
+import { wrapClient } from '../src/sdk/index.js'
 
 // ─── Configuration recommandée pour Claude Code ───────────────────────────────
 

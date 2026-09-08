@@ -3,7 +3,7 @@
  * Exécuter : tsx benchmarks/cost-comparison.ts
  */
 
-import { CtxForge } from '../src/index.js'
+import { CtxForge } from '../src/sdk/index.js'
 import { countMessageTokens } from '../src/core/tokenizer.js'
 import type { Message } from '../src/types/index.js'
 

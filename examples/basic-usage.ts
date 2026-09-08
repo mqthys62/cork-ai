@@ -3,7 +3,7 @@
  * Exécuter : tsx examples/basic-usage.ts
  */
 
-import { CtxForge } from '../src/index.js'
+import { CtxForge } from '../src/sdk/index.js'
 import type { Message } from '../src/types/index.js'
 
 // Historique de conversation simulé
