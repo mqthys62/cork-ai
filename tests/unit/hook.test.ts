@@ -8,7 +8,7 @@ import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CONFIG_FILE, saveConfig } from '../../src/cli/config.js'
-import { HEARTBEAT_FILE } from '../../src/cli/heartbeat.js'
+import { HEARTBEAT_FILE, SESSIONS_SEEN_FILE } from '../../src/cli/heartbeat.js'
 import { DIGEST_DIR, handleHookEvent, loadSessionReads } from '../../src/cli/hook.js'
 import { LIVE_DIR, readActiveLiveSessions } from '../../src/cli/persistent-stats.js'
 import { POLICY_FILE, loadPolicy } from '../../src/cli/policy.js'
@@ -47,7 +47,15 @@ function pre(tool: 'Read' | 'Bash', input: Record<string, unknown>, extra: Recor
   return { session_id: sessionId, transcript_path: transcript, cwd: dir, permission_mode: 'auto', hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input, ...extra }
 }
 
-const deps = () => ({ telemetry: (e: TelemetryEvent) => { events.push(e) }, now: () => new Date('2026-09-09T10:00:00Z') })
+let snapshots: string[] = []
+// `session_start` fires on the first event of every session: the tests below look past it.
+const deps = () => ({
+  telemetry: (e: TelemetryEvent) => { if (e.event !== 'session_start') events.push(e) },
+  snapshot: (reason: string) => { snapshots.push(reason) },
+  now: () => new Date('2026-09-09T10:00:00Z'),
+})
+const allEvents: TelemetryEvent[] = []
+const rawDeps = () => ({ telemetry: (e: TelemetryEvent) => { allEvents.push(e) }, snapshot: (reason: string) => { snapshots.push(reason) }, now: () => new Date('2026-09-09T10:00:00Z') })
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cork-hook-'))
@@ -57,8 +65,10 @@ beforeEach(() => {
   fs.writeFileSync(bigFile, bigTs())
   fs.writeFileSync(transcript, transcriptLines(40_000))
   events = []
+  snapshots = []
+  allEvents.length = 0
   sessionId = `hook-test-${++sessionCounter}-${Date.now()}`
-  for (const f of [POLICY_FILE, SKIP_FILE, HEARTBEAT_FILE, CONFIG_FILE]) { try { fs.unlinkSync(f) } catch { /* none */ } }
+  for (const f of [POLICY_FILE, SKIP_FILE, HEARTBEAT_FILE, CONFIG_FILE, SESSIONS_SEEN_FILE]) { try { fs.unlinkSync(f) } catch { /* none */ } }
   saveConfig({ telemetry: false, contextGuard: { enabled: true } })
 })
 
@@ -213,8 +223,40 @@ describe('SessionEnd', () => {
     expect(digest).toMatchObject({ sessionId, reason: 'exit', turns: 1, compressions: 1, model: 'claude-opus-5', permissionMode: 'auto' })
     expect(digest.avgContextTokens).toBe(41_010)
     expect(events).toHaveLength(1)
-    expect(events[0]).toMatchObject({ event: 'session_digest', properties: { model: 'opus-5', turns: 1, avg_context: '<50k', compressions: 1, reason: 'exit' } })
+    expect(events[0]).toMatchObject({ event: 'session_digest', properties: { model: 'opus-5', turns: 1, avg_context: '<50k', compressions: 1, reason: 'exit', duration_min: 0 } })
+    expect(events[0].properties.saved_tokens).toBeGreaterThan(1000)
     expect(JSON.stringify(events[0])).not.toContain(sessionId)
+  })
+
+  it('déclenche le snapshot quotidien seulement si la télémétrie est active et qu’aucun n’est parti depuis 24 h', () => {
+    const end = { session_id: sessionId, transcript_path: transcript, cwd: dir, hook_event_name: 'SessionEnd', reason: 'exit' }
+    handleHookEvent(end, deps())
+    expect(snapshots).toEqual([]) // telemetry off
+    saveConfig({ telemetry: true, contextGuard: { enabled: true } })
+    handleHookEvent(end, deps())
+    expect(snapshots).toEqual(['session_end'])
+    saveConfig({ telemetry: true, contextGuard: { enabled: true }, lastSnapshotAt: '2026-09-09T02:00:00Z' })
+    handleHookEvent(end, deps())
+    expect(snapshots).toEqual(['session_end']) // 8 hours ago: not due
+    saveConfig({ telemetry: true, contextGuard: { enabled: true }, lastSnapshotAt: '2026-09-08T02:00:00Z' })
+    handleHookEvent(end, deps())
+    expect(snapshots).toEqual(['session_end', 'session_end'])
+  })
+})
+
+describe('session_start', () => {
+  it('part une seule fois par session, sur le premier événement, sans identifiant de session', () => {
+    handleHookEvent(pre('Bash', { command: 'ls' }), rawDeps())
+    handleHookEvent(pre('Bash', { command: 'git status' }), rawDeps())
+    handleHookEvent({ session_id: sessionId, transcript_path: transcript, cwd: dir, hook_event_name: 'Stop' }, rawDeps())
+    const starts = allEvents.filter(e => e.event === 'session_start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0].properties).toMatchObject({ on: 'PreToolUse', permission_mode: 'auto', subagent: false })
+    expect(JSON.stringify(starts[0])).not.toContain(sessionId)
+    expect(JSON.parse(fs.readFileSync(SESSIONS_SEEN_FILE, 'utf-8'))[sessionId]).toBe('2026-09-09T10:00:00.000Z')
+    // A different session is a new start.
+    handleHookEvent({ ...pre('Bash', { command: 'ls' }), session_id: `${sessionId}-other` }, rawDeps())
+    expect(allEvents.filter(e => e.event === 'session_start')).toHaveLength(2)
   })
 })
 

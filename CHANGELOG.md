@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] — 2026-09-08
+
+Telemetry that can answer questions — and be shown.
+
+### Added
+- `savings_snapshot` event: one daily aggregate per install of what cork-ai measured — tokens kept out of context, USD saved (first pass, lifetime, penalties, net), re-read rate, median amplification, 30-day context picture (spend bucketed), setup (autoCompactWindow, guard, hooks). Sent by a detached child after a session ends or on `cork-ai gain`; never inside a hook.
+- `session_start` event on the first hook event of a session, so sessions are counted even when SessionEnd never fires.
+- PostHog person profiles (`$set` / `$set_once`): version, OS, runtime, Claude Code version, telemetry, guard, lifetime totals, first version / first seen. Every event now carries `claude_version` and `runtime`.
+- `cork-ai telemetry preview [--json]`: the exact daily payload and where it is built from. `telemetry status` shows the last snapshot.
+- `session_digest` gains `saved_tokens` and `duration_min`.
+- `scripts/posthog-setup.mjs` (maintainers): idempotent setup of the PostHog project — IP anonymisation, a transformation that keeps GeoIP at country level (no city, postal code or coordinates), event/property descriptions, four dashboards (Overview, Savings, Context, Adoption) with 44 insights.
+- `scripts/adoption.mjs --push` and `.github/workflows/adoption.yml`: GitHub release download counts pushed daily to PostHog as `release_downloads`, the adoption denominator.
+- `scripts/stats.mjs` and `.github/workflows/stats.yml`: weekly community stats → `docs/stats.json`, shields.io badges, README block (only once 5 installs share data).
+
+### Changed
+- Transcript scans are memoised by file size and mtime (`spend-cache.json`) and the per-session analyses (amplification, re-read turns) are cached in `analysis-cache.json`: `gain --all` goes from ~9 s to well under a second on a 750 MB history. `reset --spend-cache` clears both.
+- The savings maths moved from the CLI entry point to `src/cli/savings.ts`; Claude settings helpers to `src/cli/claude-settings.ts`.
+
 ## [0.8.0] - 2026-09-08
 
 **cork-ai est désormais l'outil Claude Code, et seulement lui.** La bibliothèque de compression de conversation (`wrapClient`, `CtxForge`, les sept stratégies) dont le projet est parti est dépréciée : elle reste dans le dépôt (`src/sdk/`, tests dans `tests/sdk/`, `npm run build:sdk`) mais n'est plus exportée par le paquet npm ni maintenue comme produit. Mesurée sur deux mois d'historique réel, la compression des lectures pèse ~1 % de la facture ; la gouvernance du contexte, 50 % et plus. Le README cesse de promettre « 60–75 % » et dit ce que l'outil fait. Détails et migration : `docs/SDK.md`.

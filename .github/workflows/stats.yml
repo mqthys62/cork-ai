@@ -1,0 +1,43 @@
+name: Community stats
+
+# Weekly: reads the community aggregates from PostHog and commits
+# docs/stats.json, the shields.io badge files and the README block.
+# Needs the POSTHOG_PERSONAL_API_KEY repository secret (read access is enough).
+
+on:
+  schedule:
+    - cron: '23 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Refresh download counts first
+        run: node scripts/adoption.mjs --push
+      - name: Build stats, badges and README block
+        env:
+          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}
+        run: |
+          if [ -z "$POSTHOG_PERSONAL_API_KEY" ]; then
+            echo "POSTHOG_PERSONAL_API_KEY secret is not set — skipping." && exit 0
+          fi
+          node scripts/stats.mjs
+      - name: Commit if anything changed
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add docs/stats.json docs/badges README.md
+          if git diff --cached --quiet; then
+            echo "No change."
+          else
+            git commit -m "docs: refresh community stats [skip ci]"
+            git push
+          fi

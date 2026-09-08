@@ -27,6 +27,8 @@ export interface CorkConfig {
   contextGuard?: ContextGuardConfig
   /** Set when the user answered the auto-compaction question at install (true, false, or the value chosen). */
   autoCompactAnswered?: boolean
+  /** ISO time of the last `savings_snapshot` telemetry event (one per day at most). */
+  lastSnapshotAt?: string
 }
 
 /** Keys `cork-ai config set` accepts, with a one-line description and a parser. */

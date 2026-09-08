@@ -166,6 +166,7 @@ cork-ai update            # sustituye el binario por la última release (--check
 cork-ai config            # ajustes de ~/.cork-ai/config.json
 cork-ai reset             # borra estadísticas · --policy · --skip-list · --all
 cork-ai telemetry on      # eventos de uso anónimos, opt-in — qué se envía: docs/TELEMETRY.md
+cork-ai telemetry preview # el payload diario exacto, byte a byte, antes de decidir
 ```
 
 ---

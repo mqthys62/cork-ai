@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/mqthys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mqthys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tokens kept out of context](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmqthys62%2Fcork-ai%2Fmain%2Fdocs%2Fbadges%2Ftokens-saved.json)](docs/stats.json)
+[![Net saved](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmqthys62%2Fcork-ai%2Fmain%2Fdocs%2Fbadges%2Fusd-saved.json)](docs/stats.json)
 
 > See what your Claude Code sessions really cost, and cut the part that matters — without changing how you code.
 
@@ -30,6 +32,9 @@ and what every further tool call costs — /compact or /autocompact fixes that
 ```
 
 > **Where the money really goes.** On a real 2-month history (16k turns, $4.3k), **78% of the spend was cache reads of the conversation prefix** — the whole context re-sent on every tool call, 400k tokens on average, on sessions that ran to the 1M window. Replayed with auto-compaction at 200k, the same work costs **57% less**. Read compression moves ~1%. `cork-ai context` shows this for your own history; `cork-ai context --set-autocompact 200k` applies the fix.
+
+<!-- cork-ai:stats -->
+<!-- /cork-ai:stats -->
 
 ---
 
@@ -146,7 +151,12 @@ cork-ai update            # replace the standalone binary with the latest releas
 cork-ai config            # list settings in ~/.cork-ai/config.json · config set contextGuard.bands 150k,400k
 cork-ai reset             # clear stats · --policy (learned re-read rates) · --skip-list · --all
 cork-ai telemetry on      # anonymous usage events, opt-in — what is sent: docs/TELEMETRY.md
+cork-ai telemetry preview # the exact daily payload, byte for byte, before you decide
 ```
+
+### Share your numbers
+
+Telemetry is **off by default**. Turned on, cork-ai sends anonymous events to [PostHog Cloud EU](https://eu.posthog.com) — never a path, a file name, a project name, a prompt or a line of code — plus one daily aggregate of what it saved you: tokens kept out of context, what they were worth, re-read rate, how much auto-compaction would save. Those aggregates are what the community numbers above and the Savings dashboard are built from, and what decides where the tool goes next. `cork-ai telemetry preview` prints the payload; [docs/TELEMETRY.md](docs/TELEMETRY.md) lists every event.
 
 ### `cork-ai calibrate`
 

@@ -44,27 +44,25 @@ import {
   getForecast,
   STATS_FILE,
   LIVE_DIR,
-  type SessionRecord,
-  type ModelUsage,
 } from './persistent-stats.js'
-import { inputPriceForModel, costOfAvoidedTokens } from '../pricing/index.js'
-import { scanAllTranscripts, sessionAmplification, contextReport, listTranscriptFiles, sessionReReadTurns } from './transcript-usage.js'
+import { inputPriceForModel } from '../pricing/index.js'
+import { scanAllTranscripts, contextReport, listTranscriptFiles } from './transcript-usage.js'
+import { lifetimeSavings, reReadPenalty, buildSavingsSnapshot, runSendSnapshot, snapshotDue, snapshotInputs } from './savings.js'
+import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, type ClaudeSettings, type HookGroup } from './claude-settings.js'
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
 import { handleHookEvent } from './hook.js'
 import { VERSION } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat } from './heartbeat.js'
-import { sendTelemetry, runSendTelemetry } from './telemetry.js'
+import { sendTelemetry, runSendTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST } from './telemetry.js'
 import {
   CALIBRATION_FILE,
   countTokensRaw,
   modelFamily,
   saveCalibrationFactor,
 } from '../core/tokenizer.js'
-import { SPEND_CACHE_FILE } from './transcript-usage.js'
-
-const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
+import { SPEND_CACHE_FILE, ANALYSIS_CACHE_FILE } from './transcript-usage.js'
 
 // ─── Formatting helpers ───────────────────────────────────────────────────────
 
@@ -99,144 +97,6 @@ function miniBar(percent: number, width = 15): string {
 }
 
 function divider(char = '─', len = 66): string { return char.repeat(len) }
-
-/**
- * USD already deducted from the displayed savings by re-reads.
- *
- * `estimatedCostSaved` is stored net: every re-read subtracted
- * `rawTokens × inputPrice(model)` at the time it happened. Only the token
- * volume survives in the stats file, so the penalty is reconstructed per
- * session at that session's own model price — sessions are effectively
- * single-model, which keeps this faithful to what was originally deducted.
- */
-interface LifetimeSavings {
-  /** What cork-ai reported before: every saved token valued once at 1× input. */
-  firstPass: number
-  /** Cache write + one cache read per subsequent turn, per the transcripts. */
-  lifetime: number
-  /** Re-read cost, valued on the same lifetime basis (raw tokens re-injected). */
-  penalty: number
-  /** Real cost of the assistant turns that issued a re-read: the extra API round trip each one is. */
-  extraTurnPenalty: number
-  /** Re-read turns found in the transcripts. */
-  extraTurns: number
-  /** Sessions whose transcript was found, over sessions considered. */
-  measured: number
-  total: number
-  /** Median amplification across measured sessions — the headline multiplier. */
-  medianAmplification: number
-  compactions: number
-}
-
-/**
- * Values saved tokens over their life in context rather than on first send.
- *
- * The hook cannot do this at write time: when it fires, the session is still
- * running and the number of turns that will re-read the context is unknowable.
- * The transcript knows after the fact, and `SessionRecord.sessionId` is the
- * transcript's filename, so the two join with no stored schema change.
- *
- * Sessions with no transcript fall back to the first-pass value and are
- * excluded from `measured` so partial coverage stays visible.
- */
-function lifetimeSavings(
-  sessions: Array<{ sessionId: string; byModel?: Record<string, ModelUsage>; reReadTokensServed?: number }>,
-): LifetimeSavings {
-  const out: LifetimeSavings = {
-    firstPass: 0,
-    lifetime: 0,
-    penalty: 0,
-    extraTurnPenalty: 0,
-    extraTurns: 0,
-    measured: 0,
-    total: 0,
-    medianAmplification: 0,
-    compactions: 0,
-  }
-  // cork-ai flushes a SessionRecord per activity window, so one Claude Code
-  // session can produce several records. Amplification and compaction counts
-  // are properties of the transcript, so they are gathered once per session id
-  // — counting a 1000-turn session nine times would drag the median with it.
-  const ampBySession = new Map<string, number>()
-  const cache = new Map<string, ReturnType<typeof sessionAmplification>>()
-  const seenSessions = new Set<string>()
-
-  for (const session of sessions) {
-    const models = Object.entries(session.byModel ?? {})
-    if (models.length === 0) continue
-    seenSessions.add(session.sessionId)
-
-    let amp = cache.get(session.sessionId)
-    if (!amp) {
-      amp = sessionAmplification(session.sessionId)
-      cache.set(session.sessionId, amp)
-      if (amp.found && amp.cacheWriteTokens > 0) {
-        out.compactions += amp.compactions
-        ampBySession.set(session.sessionId, amp.amplification)
-      }
-      // The turn that re-reads a compressed file exists only because of the
-      // compression: bill it at its real, transcript-recorded cost. The
-      // token-based penalty below never saw this — it counted the raw file
-      // being re-sent, not the whole context being re-read once more.
-      const turns = sessionReReadTurns(session.sessionId)
-      if (turns.found) {
-        out.extraTurnPenalty += turns.extraTurnCostUSD
-        out.extraTurns += turns.reReads
-      }
-    }
-    // No transcript → amplification 0, which collapses costOfAvoidedTokens()
-    // to the cache-write tier: close to the old 1× figure, never inflated.
-    const factor = amp.found ? amp.amplification : 0
-
-    let saved = 0
-    let weightedPrice = 0
-    let totalTokens = 0
-    for (const [, usage] of models) totalTokens += usage.savedTokens
-
-    for (const [model, usage] of models) {
-      out.firstPass += (usage.savedTokens / 1_000_000) * inputPriceForModel(model)
-      saved += costOfAvoidedTokens(usage.savedTokens, model, factor)
-      if (totalTokens > 0) {
-        weightedPrice += inputPriceForModel(model) * (usage.savedTokens / totalTokens)
-      }
-    }
-    out.lifetime += saved
-
-    // Symmetric treatment: a re-read puts raw content back into the context and
-    // is re-billed every subsequent turn exactly like anything else. Valuing it
-    // at 1× while savings run at the lifetime rate would bias the net in
-    // cork-ai's favour.
-    const reRead = session.reReadTokensServed ?? 0
-    if (reRead > 0 && weightedPrice > 0) {
-      const model = models.sort((a, b) => b[1].savedTokens - a[1].savedTokens)[0][0]
-      out.penalty += costOfAvoidedTokens(reRead, model, factor)
-    }
-  }
-
-  out.measured = ampBySession.size
-  out.total = seenSessions.size
-
-  const sorted = [...ampBySession.values()].sort((a, b) => a - b)
-  if (sorted.length > 0) {
-    const mid = Math.floor(sorted.length / 2)
-    out.medianAmplification =
-      sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]
-  }
-  return out
-}
-
-function reReadPenalty(stats: { sessions: SessionRecord[] } | null | undefined): number {
-  if (!stats) return 0
-  let total = 0
-  for (const session of stats.sessions) {
-    const served = session.reReadTokensServed ?? 0
-    if (served <= 0) continue
-    const model = Object.entries(session.byModel ?? {})
-      .sort((a, b) => b[1].requests - a[1].requests)[0]?.[0]
-    total += (served / 1_000_000) * inputPriceForModel(model)
-  }
-  return total
-}
 
 // ─── Colors (no deps — raw ANSI) ─────────────────────────────────────────────
 
@@ -295,6 +155,7 @@ ${C.bold('Maintenance:')}
   cork-ai config            List settings · config get|set|unset <key> [value]
   cork-ai reset             Clear stats (--policy, --skip-list, --spend-cache, --digests, --all)
   cork-ai telemetry on|off  Anonymous usage stats, opt-in (docs/TELEMETRY.md)
+  cork-ai telemetry preview Show exactly what the daily snapshot would send
   cork-ai --version         Show version
 
 ${C.bold('Stats file:')} ${STATS_FILE}
@@ -880,71 +741,6 @@ function reportJson(): void {
 
 // ─── hooks install / remove / status ─────────────────────────────────────────
 
-interface ClaudeSettings {
-  hooks?: Record<string, HookGroup[] | undefined>
-  autoCompactWindow?: number
-  model?: string
-  [key: string]: unknown
-}
-
-interface HookGroup {
-  matcher?: string
-  hooks: { type: string; command: string; timeout?: number }[]
-}
-
-/**
- * Every hook cork-ai installs. One binary, one `hook` subcommand: the payload's
- * `hook_event_name` and `tool_name` decide what happens.
- *
- *   PreToolUse Read       compress whole-file reads (the original hook)
- *   PreToolUse Bash       same for `cat file` & co — auto mode reads through Bash
- *   PostToolUse Edit…     failed-edit detection, edited-file tracking, context guard
- *   UserPromptSubmit/Stop context guard (band notices to the user and the model)
- *   SessionEnd            session digest (~/.cork-ai/digests, telemetry)
- */
-const CORK_HOOKS: Array<{ event: string; matcher?: string; legacyMatchers?: string[] }> = [
-  { event: 'PreToolUse', matcher: 'Read' },
-  { event: 'PreToolUse', matcher: 'Bash' },
-  { event: 'PostToolUse', matcher: 'Edit|MultiEdit|Write', legacyMatchers: ['Edit|MultiEdit'] },
-  { event: 'UserPromptSubmit' },
-  { event: 'Stop' },
-  { event: 'SessionEnd' },
-]
-const CORK_HOOK_FALLBACK = 'cork-ai hook'
-
-function loadClaudeSettings(): ClaudeSettings {
-  try { return JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf-8')) as ClaudeSettings }
-  catch { return {} }
-}
-
-function saveClaudeSettings(settings: ClaudeSettings): void {
-  fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true })
-  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf-8')
-}
-
-function isCorkCmd(command: string): boolean {
-  return command.includes('cork-ai') && command.trim().endsWith('hook')
-}
-
-function isCorkHookInstalled(settings: ClaudeSettings): boolean {
-  const pre = settings.hooks?.PreToolUse ?? []
-  return pre.some(g => g.hooks?.some(h => isCorkCmd(h.command)))
-}
-
-/** Which of CORK_HOOKS are present (matcher-exact, or via a legacy matcher). */
-function installedCorkHooks(settings: ClaudeSettings): Array<{ event: string; matcher?: string; present: boolean; command?: string }> {
-  return CORK_HOOKS.map(spec => {
-    const groups = settings.hooks?.[spec.event] ?? []
-    const accepted = [spec.matcher, ...(spec.legacyMatchers ?? [])]
-    for (const g of groups) {
-      const h = g.hooks?.find(h => isCorkCmd(h.command))
-      if (!h) continue
-      if (spec.matcher === undefined || accepted.includes(g.matcher)) return { ...spec, present: true, command: h.command }
-    }
-    return { ...spec, present: false }
-  })
-}
-
 // Resolves the absolute path to the cork-ai binary so the hook
 // works even when Claude Code does not inherit the shell PATH (Mac, Electron).
 function resolveHookBinary(): string {
@@ -1039,6 +835,7 @@ async function hooksInstall(): Promise<void> {
   if (cfg.telemetry === undefined) await askTelemetryConsent()
   await askAutoCompact(settings)
   sendTelemetry({ event: 'install', properties: { hooks: changed.length, upgrade: changed.length < CORK_HOOKS.length, autocompact: loadClaudeSettings().autoCompactWindow ?? null } })
+  sendSnapshotDetached('install', true)
 
   console.log(`   Restart Claude Code for the hooks to take effect.`)
   console.log(`   Run ${C.cyan('cork-ai gain')} after sessions to see savings.\n`)
@@ -1668,8 +1465,10 @@ async function runCalibrate(modelArg?: string): Promise<void> {
 function telemetryOn(): void {
   updateConfig({ telemetry: true })
   sendTelemetry({ event: 'telemetry_toggled', properties: { enabled: true } })
+  sendSnapshotDetached('telemetry_on', true)
   console.log(`\n${C.green('✔')}  Telemetry enabled. Thank you — anonymous usage events go to PostHog (EU).`)
-  console.log(`   ${C.dim('What is sent: version, OS, model family, token buckets, hook decisions. Never paths, names or content.')}`)
+  console.log(`   ${C.dim('What is sent: version, OS, model family, token buckets, hook decisions, aggregate savings. Never paths, names or content.')}`)
+  console.log(`   ${C.dim('See exactly what leaves this machine:')} ${C.cyan('cork-ai telemetry preview')}`)
   console.log(`   ${C.dim('Details: docs/TELEMETRY.md')}   Run ${C.cyan('cork-ai telemetry off')} to disable.\n`)
 }
 
@@ -1689,7 +1488,31 @@ function telemetryStatus(): void {
   if (process.env.DO_NOT_TRACK === '1') console.log(`  ${C.dim('(overridden by DO_NOT_TRACK=1)')}`)
   if (process.env.CORK_AI_TELEMETRY === '0') console.log(`  ${C.dim('(overridden by CORK_AI_TELEMETRY=0)')}`)
   if (cfg.installId) console.log(`  Install id: ${C.dim(cfg.installId)} ${C.dim('(random, not derived from this machine)')}`)
-  console.log(`  Endpoint:   ${C.dim('https://eu.i.posthog.com (PostHog Cloud EU)')}`)
+  console.log(`  Endpoint:   ${C.dim(`${POSTHOG_HOST} (PostHog Cloud EU)`)}`)
+  if (enabled) console.log(`  Last daily snapshot: ${C.dim(cfg.lastSnapshotAt ? fmtDate(cfg.lastSnapshotAt) : 'not yet — sent after the next session ends, or on cork-ai gain')}`)
+  console.log(`  ${C.dim('Preview the exact payloads:')} ${C.cyan('cork-ai telemetry preview')}`)
+  console.log()
+}
+
+/**
+ * Prints, byte for byte, what the daily snapshot would send right now — plus
+ * the person profile every event refreshes. Trust is easier to earn when the
+ * payload is one command away.
+ */
+function telemetryPreview(json: boolean): void {
+  const cfg = loadConfig()
+  const distinctId = cfg.installId ?? '<random uuid minted when telemetry is enabled>'
+  const payload = capturePayload(buildSavingsSnapshot('preview'), distinctId)
+  if (json) { console.log(JSON.stringify(payload, null, 2)); return }
+  console.log()
+  console.log(`  ${C.bold('savings_snapshot')} — sent once a day at most, when a session ends or on ${C.cyan('cork-ai gain')}`)
+  console.log(`  ${C.dim('Built locally from:')}`)
+  for (const src of snapshotInputs()) console.log(`    ${C.dim('·')} ${C.dim(src)}`)
+  console.log()
+  console.log(JSON.stringify(payload, null, 2).split('\n').map(l => `  ${l}`).join('\n'))
+  console.log()
+  console.log(`  ${C.dim('Not in there, and never sent: file paths or names, project names, prompts, file content, command lines, session ids, exact spend.')}`)
+  console.log(`  ${C.dim('Telemetry is')} ${isTelemetryEnabled() ? C.green('on') : C.yellow('off')}${isTelemetryEnabled() ? '' : C.dim(' — nothing is sent until cork-ai telemetry on')}`)
   console.log()
 }
 
@@ -1755,8 +1578,8 @@ function runReset(args: string[]): void {
       run: () => { try { fs.unlinkSync(SKIP_FILE) } catch { /* none */ } },
     },
     '--spend-cache': {
-      label: 'durable copy of transcript spend (spend-cache.json)',
-      run: () => { try { fs.unlinkSync(SPEND_CACHE_FILE) } catch { /* none */ } },
+      label: 'transcript caches (spend-cache.json, analysis-cache.json)',
+      run: () => { for (const f of [SPEND_CACHE_FILE, ANALYSIS_CACHE_FILE]) { try { fs.unlinkSync(f) } catch { /* none */ } } },
     },
     '--digests': {
       label: 'session digests',
@@ -1879,6 +1702,8 @@ async function runUpdate(args: string[]): Promise<void> {
     await runHook().catch(() => { /* a hook must never fail a tool call */ })
   } else if (cmd === '__send-telemetry') {
     await runSendTelemetry(sub)
+  } else if (cmd === '__send-snapshot') {
+    await runSendSnapshot(sub, args.includes('--force'))
   } else if (cmd === 'calibrate') {
     await runCalibrate(sub).catch(err => {
       console.error(`\n${C.yellow('Calibration failed:')} ${err instanceof Error ? err.message : String(err)}\n`)
@@ -1893,7 +1718,8 @@ async function runUpdate(args: string[]): Promise<void> {
     if (sub === 'on') telemetryOn()
     else if (sub === 'off') telemetryOff()
     else if (sub === 'status' || !sub) telemetryStatus()
-    else { console.error(`\nUsage: cork-ai telemetry [on|off|status]\n`); process.exit(1) }
+    else if (sub === 'preview') telemetryPreview(args.includes('--json'))
+    else { console.error(`\nUsage: cork-ai telemetry [on|off|status|preview [--json]]\n`); process.exit(1) }
   } else if (cmd === 'config') {
     runConfig(args.slice(1))
   } else if (cmd === 'update') {
@@ -1903,6 +1729,7 @@ async function runUpdate(args: string[]): Promise<void> {
     else if (sub === '--history') showHistory()
     else if (sub === '--models') showModels()
     else showLastSession()
+    if (snapshotDue()) sendSnapshotDetached('gain')
   } else if (cmd === 'models') {
     showModels()
   } else if (cmd === 'report') {

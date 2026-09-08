@@ -147,6 +147,7 @@ cork-ai update            # remplace le binaire par la dernière release (--chec
 cork-ai config            # liste les réglages de ~/.cork-ai/config.json · config set contextGuard.bands 150k,400k
 cork-ai reset             # efface les stats · --policy (taux de relecture appris) · --skip-list · --all
 cork-ai telemetry on      # événements d'usage anonymes, opt-in — ce qui est envoyé : docs/TELEMETRY.md
+cork-ai telemetry preview # le payload quotidien exact, octet par octet, avant de décider
 ```
 
 ### `cork-ai calibrate`

@@ -44,7 +44,11 @@ interface CachedFile {
   sidechain: boolean
   /** ISO time of the file's last modification when it was scanned. */
   endedAt: string
-  usage: TranscriptUsage
+  /** Size and mtime at scan time: when both still match, the file is not parsed again. */
+  size?: number
+  mtimeMs?: number
+  /** Absent when only the context profile has been computed so far (`cork-ai context`). */
+  usage?: TranscriptUsage
   /** Main-thread files only; ceilings as computed at scan time. */
   context?: ContextProfile
 }
@@ -67,6 +71,70 @@ function saveSpendCache(cache: SpendCache): void {
     fs.mkdirSync(CORK_HOME, { recursive: true })
     fs.writeFileSync(SPEND_CACHE_FILE, JSON.stringify(cache), 'utf-8')
   } catch { /* best effort */ }
+}
+
+// ─── Per-transcript analysis cache ───────────────────────────────────────────
+//
+// `sessionAmplification()` and `sessionReReadTurns()` each parse a whole
+// transcript. `gain --all` calls both for every recorded session, and the
+// daily telemetry snapshot needs the same numbers — so the result is memoised
+// per file, keyed on size and mtime. A session that is still running changes
+// on every turn and is simply recomputed; finished ones hit the cache forever.
+
+export const ANALYSIS_CACHE_FILE = path.join(CORK_HOME, 'analysis-cache.json')
+
+interface AnalysisEntry {
+  size: number
+  mtimeMs: number
+  amplification?: SessionAmplification
+  reReadTurns?: ReReadTurns
+}
+
+interface AnalysisCache {
+  version: 1
+  files: Record<string, AnalysisEntry>
+}
+
+let analysisCache: AnalysisCache | undefined
+
+function loadAnalysisCache(): AnalysisCache {
+  if (analysisCache) return analysisCache
+  try {
+    const parsed = JSON.parse(fs.readFileSync(ANALYSIS_CACHE_FILE, 'utf-8')) as AnalysisCache
+    if (parsed && parsed.files && typeof parsed.files === 'object') return (analysisCache = parsed)
+  } catch { /* first run */ }
+  return (analysisCache = { version: 1, files: {} })
+}
+
+function readAnalysisCache(file: string): AnalysisEntry | undefined {
+  try {
+    const stat = fs.statSync(file)
+    const entry = loadAnalysisCache().files[file]
+    if (entry && entry.size === stat.size && entry.mtimeMs === stat.mtimeMs) return entry
+  } catch { /* no file */ }
+  return undefined
+}
+
+function writeAnalysisCache(file: string, patch: Omit<AnalysisEntry, 'size' | 'mtimeMs'>): void {
+  try {
+    const stat = fs.statSync(file)
+    const cache = loadAnalysisCache()
+    const prev = cache.files[file]
+    const same = prev && prev.size === stat.size && prev.mtimeMs === stat.mtimeMs
+    cache.files[file] = { ...(same ? prev : {}), ...patch, size: stat.size, mtimeMs: stat.mtimeMs }
+    // Drop entries whose transcript is gone (Claude Code purges after 30 days).
+    for (const key of Object.keys(cache.files)) if (!fs.existsSync(key)) delete cache.files[key]
+    fs.mkdirSync(CORK_HOME, { recursive: true })
+    fs.writeFileSync(ANALYSIS_CACHE_FILE, JSON.stringify(cache), 'utf-8')
+  } catch { /* best effort */ }
+}
+
+/** Test hook: forget the in-memory copy so a fresh CORK_AI_HOME is honoured. */
+export function resetAnalysisCacheForTests(): void { analysisCache = undefined }
+
+/** True when the cached scan was made on exactly this version of the file. */
+function isFresh(entry: { size?: number; mtimeMs?: number }, file: TranscriptFile): boolean {
+  return entry.size === file.size && entry.mtimeMs === file.mtimeMs
 }
 
 function mergeUsage(acc: TranscriptUsage, add: TranscriptUsage): void {
@@ -260,7 +328,14 @@ function findTranscript(sessionId: string): string | undefined {
 export function sessionAmplification(sessionId: string): SessionAmplification {
   const file = findTranscript(sessionId)
   if (!file) return emptyAmplification()
+  const cached = readAnalysisCache(file)
+  if (cached?.amplification) return { ...cached.amplification }
+  const result = computeAmplification(file)
+  if (result.found) writeAnalysisCache(file, { amplification: result })
+  return result
+}
 
+function computeAmplification(file: string): SessionAmplification {
   let raw: string
   try {
     raw = fs.readFileSync(file, 'utf-8')
@@ -317,6 +392,8 @@ export interface TranscriptFile {
   /** true for `<session>/subagents/**.jsonl` files (Agent tool, workflows). */
   sidechain: boolean
   mtimeMs: number
+  /** Bytes; with `mtimeMs` it decides whether a cached scan is still valid. */
+  size: number
 }
 
 function walkJsonl(dir: string, out: string[]): void {
@@ -363,18 +440,18 @@ export function listTranscriptFiles(since?: Date): TranscriptFile[] {
     for (const entry of entries) {
       if (entry.isFile() && entry.name.endsWith('.jsonl')) {
         const file = path.join(dir, entry.name)
-        let mtimeMs: number
-        try { mtimeMs = fs.statSync(file).mtimeMs } catch { continue }
-        if (cutoff !== undefined && mtimeMs < cutoff) continue
-        out.push({ path: file, sessionId: entry.name.slice(0, -'.jsonl'.length), project, sidechain: false, mtimeMs })
+        let stat: fs.Stats
+        try { stat = fs.statSync(file) } catch { continue }
+        if (cutoff !== undefined && stat.mtimeMs < cutoff) continue
+        out.push({ path: file, sessionId: entry.name.slice(0, -'.jsonl'.length), project, sidechain: false, mtimeMs: stat.mtimeMs, size: stat.size })
       } else if (entry.isDirectory()) {
         const nested: string[] = []
         walkJsonl(path.join(dir, entry.name), nested)
         for (const file of nested) {
-          let mtimeMs: number
-          try { mtimeMs = fs.statSync(file).mtimeMs } catch { continue }
-          if (cutoff !== undefined && mtimeMs < cutoff) continue
-          out.push({ path: file, sessionId: entry.name, project, sidechain: true, mtimeMs })
+          let stat: fs.Stats
+          try { stat = fs.statSync(file) } catch { continue }
+          if (cutoff !== undefined && stat.mtimeMs < cutoff) continue
+          out.push({ path: file, sessionId: entry.name, project, sidechain: true, mtimeMs: stat.mtimeMs, size: stat.size })
         }
       }
     }
@@ -397,24 +474,32 @@ export function scanAllTranscripts(since?: Date): TranscriptUsage {
 
   for (const file of listTranscriptFiles(since)) {
     live.add(file.path)
+    const prev = cache.files[file.path]
+    const fresh = prev !== undefined && isFresh(prev, file)
+    if (fresh && prev.usage) {
+      mergeUsage(acc, prev.usage)
+      continue
+    }
     const fileAcc = emptyUsage()
     accumulateFile(file.path, fileAcc, seen)
     mergeUsage(acc, fileAcc)
-    const prev = cache.files[file.path]
     cache.files[file.path] = {
       sessionId: file.sessionId,
       project: file.project,
       sidechain: file.sidechain,
       endedAt: new Date(file.mtimeMs).toISOString(),
+      size: file.size,
+      mtimeMs: file.mtimeMs,
       usage: fileAcc,
-      context: prev?.context,
+      // A profile computed on an older version of the file is stale too.
+      context: fresh ? prev.context : undefined,
     }
   }
 
   // Files Claude Code has deleted since they were last scanned.
   const cutoff = since?.getTime()
   for (const [file, entry] of Object.entries(cache.files)) {
-    if (live.has(file) || fs.existsSync(file)) continue
+    if (!entry.usage || live.has(file) || fs.existsSync(file)) continue
     if (cutoff !== undefined && new Date(entry.endedAt).getTime() < cutoff) continue
     mergeUsage(acc, entry.usage)
   }
@@ -626,10 +711,25 @@ export function contextReport(opts: { since?: Date; ceilings?: number[]; minTurn
   for (const file of listTranscriptFiles(opts.since)) {
     if (file.sidechain) continue
     live.add(file.path)
-    const profile = sessionContextProfile(file.path, ceilings)
-    if (!profile) continue
     const entry = cache.files[file.path]
-    if (entry) entry.context = profile
+    const fresh = entry !== undefined && isFresh(entry, file)
+    const cachedProfile = fresh && entry.context && ceilings.every(c => entry.context!.cappedCostUSD[c] !== undefined)
+      ? entry.context
+      : undefined
+    const profile = cachedProfile ?? sessionContextProfile(file.path, ceilings)
+    if (!profile) continue
+    if (fresh) entry.context = profile
+    else {
+      cache.files[file.path] = {
+        sessionId: file.sessionId,
+        project: file.project,
+        sidechain: false,
+        endedAt: new Date(file.mtimeMs).toISOString(),
+        size: file.size,
+        mtimeMs: file.mtimeMs,
+        context: profile,
+      }
+    }
     if (profile.turns >= minTurns) sessions.push(profile)
   }
   // Purged transcripts: reuse the cached profile when it covers the ceilings asked for.
@@ -692,9 +792,17 @@ export interface ReReadTurns {
  * compression that backfired.
  */
 export function sessionReReadTurns(sessionId: string): ReReadTurns {
-  const out: ReReadTurns = { found: false, compressions: 0, reReads: 0, extraTurnCostUSD: 0 }
   const file = findTranscript(sessionId)
-  if (!file) return out
+  if (!file) return { found: false, compressions: 0, reReads: 0, extraTurnCostUSD: 0 }
+  const cached = readAnalysisCache(file)
+  if (cached?.reReadTurns) return { ...cached.reReadTurns }
+  const result = computeReReadTurns(file)
+  if (result.found) writeAnalysisCache(file, { reReadTurns: result })
+  return result
+}
+
+function computeReReadTurns(file: string): ReReadTurns {
+  const out: ReReadTurns = { found: false, compressions: 0, reReads: 0, extraTurnCostUSD: 0 }
   let raw: string
   try {
     raw = fs.readFileSync(file, 'utf-8')

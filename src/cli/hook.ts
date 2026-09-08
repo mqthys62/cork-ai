@@ -22,12 +22,13 @@ import { parseBashEdit, parseBashRead } from './bash-read.js'
 import { CORK_HOME, loadConfig, updateConfig } from './config.js'
 import { evaluateGuard, guardHookOutput } from './context-guard.js'
 import { eligibility } from './file-eligibility.js'
-import { writeHeartbeat } from './heartbeat.js'
+import { noteSessionSeen, readSessionsSeen, writeHeartbeat } from './heartbeat.js'
 import { outline } from './outline.js'
 import { LIVE_DIR, accumulateInSession, readActiveLiveSessions } from './persistent-stats.js'
 import { gate, recordCompression, recordEditAfter, recordRangeRead, recordReRead } from './policy.js'
 import { isSkipped, markSkipped } from './skip-list.js'
-import { contextBucket, costBucket, modelFamily, sendTelemetry, tokenBucket, type TelemetryEvent } from './telemetry.js'
+import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
+import { snapshotDue, type SnapshotReason } from './savings.js'
 import { lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile } from './transcript-usage.js'
 
 export type HookOutput = Record<string, unknown> | undefined
@@ -35,6 +36,8 @@ export type HookOutput = Record<string, unknown> | undefined
 export interface HookDeps {
   /** Telemetry sink; defaults to the real one (which is a no-op unless opted in). */
   telemetry?: (e: TelemetryEvent) => void
+  /** Daily savings snapshot trigger; defaults to a detached `cork-ai __send-snapshot`. */
+  snapshot?: (reason: SnapshotReason) => void
   now?: () => Date
 }
 
@@ -374,11 +377,14 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
     fs.writeFileSync(path.join(DIGEST_DIR, `${sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)}.json`), JSON.stringify(digest, null, 2), 'utf-8')
   } catch { /* non-critical */ }
 
+  const startedAt = readSessionsSeen()[sessionId]
   deps.telemetry({
     event: 'session_digest',
     properties: {
       model: modelFamily(profile.model),
       permission_mode: digest.permissionMode,
+      duration_min: startedAt ? Math.max(0, Math.round((deps.now().getTime() - new Date(startedAt).getTime()) / 60_000)) : undefined,
+      saved_tokens: digest.savedTokens,
       turns: profile.turns,
       avg_context: contextBucket(profile.avgContextTokens),
       max_context: contextBucket(profile.maxContextTokens),
@@ -392,17 +398,29 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
       reason: digest.reason,
     },
   })
+  if (snapshotDue(deps.now())) deps.snapshot('session_end')
 }
 
 // ─── Dispatcher ──────────────────────────────────────────────────────────────
 
 export function handleHookEvent(event: Record<string, unknown>, partialDeps: HookDeps = {}): HookOutput {
-  const deps: Required<HookDeps> = { telemetry: partialDeps.telemetry ?? sendTelemetry, now: partialDeps.now ?? (() => new Date()) }
+  const deps: Required<HookDeps> = {
+    telemetry: partialDeps.telemetry ?? sendTelemetry,
+    snapshot: partialDeps.snapshot ?? (reason => sendSnapshotDetached(reason)),
+    now: partialDeps.now ?? (() => new Date()),
+  }
   const toolName = (event.tool_name as string) ?? ''
   const toolInput = (event.tool_input as Record<string, unknown>) ?? {}
   const hookEvent = (event.hook_event_name as string) ?? ''
 
   writeHeartbeat(event, deps.now())
+  const sessionId = (event.session_id as string) || ''
+  if (sessionId && noteSessionSeen(sessionId, deps.now()).first) {
+    deps.telemetry({
+      event: 'session_start',
+      properties: { on: hookEvent, permission_mode: event.permission_mode as string | undefined, subagent: Boolean(event.agent_id || event.agent_type) },
+    })
+  }
 
   switch (hookEvent) {
     case 'PostToolUse':

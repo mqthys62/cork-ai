@@ -1,0 +1,24 @@
+name: Adoption
+
+# Pushes the GitHub release download counts to PostHog once a day, so the
+# Adoption dashboard can show downloads next to installs with telemetry on.
+# Uses the write-only project token embedded in scripts/adoption.mjs — no secret.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  push-downloads:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Push release download counts
+        run: node scripts/adoption.mjs --push

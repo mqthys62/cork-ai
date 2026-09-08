@@ -66,3 +66,39 @@ export function writeHeartbeat(event: Record<string, unknown>, now: Date = new D
     return undefined
   }
 }
+
+// ─── Sessions seen (first hook event of a session) ───────────────────────────
+
+export const SESSIONS_SEEN_FILE = path.join(CORK_HOME, 'sessions-seen.json')
+
+/** Keep a week of ids: enough to survive a long-lived `--resume`, small enough to read on every event. */
+const SESSIONS_SEEN_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+export function readSessionsSeen(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(SESSIONS_SEEN_FILE, 'utf-8')) as Record<string, string>
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch { return {} }
+}
+
+/**
+ * Records that a session produced a hook event. Returns the moment it was
+ * first seen, and whether this call was the first — the `session_start` signal
+ * that a SessionEnd can never replace (Claude Code killed or crashed never
+ * fires one).
+ */
+export function noteSessionSeen(sessionId: string, now: Date = new Date()): { first: boolean; startedAt: string } {
+  if (!sessionId) return { first: false, startedAt: now.toISOString() }
+  const seen = readSessionsSeen()
+  const existing = seen[sessionId]
+  if (existing) return { first: false, startedAt: existing }
+  const startedAt = now.toISOString()
+  seen[sessionId] = startedAt
+  try {
+    const cutoff = now.getTime() - SESSIONS_SEEN_TTL_MS
+    for (const [id, at] of Object.entries(seen)) if (new Date(at).getTime() < cutoff) delete seen[id]
+    fs.mkdirSync(CORK_HOME, { recursive: true })
+    fs.writeFileSync(SESSIONS_SEEN_FILE, JSON.stringify(seen), 'utf-8')
+  } catch { /* best effort */ }
+  return { first: true, startedAt }
+}
