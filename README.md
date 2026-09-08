@@ -13,19 +13,23 @@
 
 Every time Claude Code makes an API call, it sends the **entire conversation history** — including every file it has read, every bash output, every repeated header. On a 2-hour session, that's easily **100,000+ tokens per request**, most of it redundant.
 
-cork-ai sits between Claude Code and the Anthropic API. It compresses what's redundant before each call. **Your workflow doesn't change. The results don't change. The bill does.**
+cork-ai hooks into Claude Code and does two things. It keeps whole-file reads out of the context when that pays off, and — the part that moves the bill — it shows you what your context size costs and helps you keep it in check. **Your workflow doesn't change. The results don't change. The bill does.**
 
 ```
-Claude Code reads a file
+Claude Code reads a file — `Read` tool, or `cat file` through Bash (auto mode)
         ↓
-cork-ai hook intercepts (PreToolUse Read)
+cork-ai hook intercepts (PreToolUse Read / Bash)
         ↓
-Compresses: extracts signatures, truncates boilerplate
+Worth it? (expected-value gate: file size × context size × learned re-read rate)
         ↓
-Claude receives the compressed digest instead of the full file
+Claude gets a numbered outline (L12 export function …) instead of the whole file,
+and reads the exact region it needs with offset/limit or sed -n
         ↓
-60–90% fewer tokens per Read — automatically, every session
+Meanwhile the context guard tells you when the context crosses 150k / 300k / 500k tokens
+and what every further tool call costs — /compact or /autocompact fixes that
 ```
+
+> **Where the money really goes.** On a real 2-month history (16k turns, $4.3k), **78% of the spend was cache reads of the conversation prefix** — the whole context re-sent on every tool call, 400k tokens on average, on sessions that ran to the 1M window. Replayed with auto-compaction at 200k, the same work costs **57% less**. Read compression moves ~1%. `cork-ai context` shows this for your own history; `cork-ai context --set-autocompact 200k` applies the fix.
 
 ---
 
@@ -67,6 +71,15 @@ cork-ai hooks install
 
 That's it. Restart Claude Code — compression is active for every session on every project.
 
+### After a `claude update`
+
+Claude Code updates don't touch `~/.claude/settings.json`, so the hooks survive. What *does* change is how the model reads files: since auto mode, Claude reads through Bash (`cat`, `sed -n`) rather than the `Read` tool, which is why installs older than 0.7.0 went silent. If `cork-ai gain` looks stale:
+
+```bash
+cork-ai doctor          # binary, hooks, self-test, and which recent sessions produced events
+cork-ai hooks install   # adds any hook an older install lacks
+```
+
 ---
 
 ## How it works — 7 compression strategies
@@ -102,20 +115,59 @@ Combined with [RTK](https://github.com/rtk-ai/rtk): realistic **75–85% total r
 
 ### `cork-ai hooks install`
 
-Registers cork-ai as a Claude Code hook globally in `~/.claude/settings.json`. Active for every session on every project with no per-project setup.
+Registers cork-ai's hooks globally in `~/.claude/settings.json`. Active for every session on every project with no per-project setup. Re-run it after upgrading: it adds the hooks an older install lacks and re-targets the binary path.
 
 ```bash
-cork-ai hooks install   # enable
-cork-ai hooks status    # check if active
+cork-ai hooks install   # enable / upgrade
+cork-ai hooks status    # which of the 5 hooks are active
 cork-ai hooks remove    # disable
 ```
 
-The hook compresses large file reads to signatures — but never at the model's expense. Four guardrails make sure compression helps instead of hurting:
+| Hook | What it does |
+|------|--------------|
+| `PreToolUse` **Read** | Whole-file reads get a numbered outline when the expected-value gate says it pays off |
+| `PreToolUse` **Bash** | Same for `cat file`, `nl`, `bat`, `rtk proxy cat` — Claude Code's auto mode reads through Bash, not `Read`. Targeted reads (`sed -n`, `head`, `tail`) always pass, and `sed -i` / redirections mark the file as being edited |
+| `PostToolUse` **Edit / Write** | Failed edits on outlined files, edited-file tracking, context guard |
+| `UserPromptSubmit`, `Stop` | Context guard notices |
 
+The hook never compresses at the model's expense. The guardrails, all measured on real transcripts:
+
+- **An expected-value gate decides per read** — `saved tokens × amplification × cache-read price` against `P(re-read) × (dead outline + one extra turn over the current context + output)`. Small files, huge contexts and extensions that keep backfiring are served raw. `P(re-read)` is learned per extension on your machine (`~/.cork-ai/policy.json`); an extension above 35% re-reads goes on probation and is probed one read in ten.
+- **The outline is navigable** — every entry carries its line number (`L127  export async function fetchAll(...)`), so the follow-up is `Read offset=127 limit=40` or `sed -n '127,166p'`, not a full re-read.
 - **Explicit `offset`/`limit` reads are never compressed** — the model is targeting a precise zone.
-- **Re-reads are served raw** — if Claude re-reads a file it only saw compressed, it gets the full content (auto-whitelisted for the session), and the induced cost is *deducted* from the reported savings.
-- **The file the user is asking about is never compressed** — if your last message mentions `interceptor.ts`, its Read passes through untouched.
-- **Failed edits are detected** — a `PostToolUse` hook spots `Edit` calls that fail on files only seen compressed (the `old_string` came from signatures), whitelists the file, and reports the harm in `cork-ai gain`.
+- **Re-reads are served raw** — a file re-read after an outline gets the full content, is remembered across sessions (`skip-list.json`), and its cost — the raw tokens *and* the extra API turn — is deducted in `cork-ai gain`.
+- **Files being edited are served raw** — 59% of outlined files were edited afterwards (97% of `.tsx`); an `Edit`, `Write`, `sed -i` or redirection on a file switches it to raw for the session.
+- **The file the user is asking about is never compressed** — if your last message mentions `interceptor.ts`, its read passes through untouched.
+- **Failed edits are detected** — an `Edit` that fails on a file only seen outlined whitelists the file and reports the harm.
+
+### `cork-ai context`
+
+Where the money goes, from Claude Code's own transcripts: per session, the average and maximum context, the cost per turn, the share of cache reads, and what the same turns would have cost with auto-compaction at 150k / 200k / 300k.
+
+```bash
+cork-ai context                        # last 30 days
+cork-ai context --days 90 --ceiling 150k
+cork-ai context --set-autocompact 200k # writes autoCompactWindow to ~/.claude/settings.json
+cork-ai context guard off              # silence the live notices (on by default)
+```
+
+The **context guard** fires once per band (150k / 300k / 500k / 750k tokens) per session: a notice to you with the per-call cost and the compacted alternative, and a short nudge to the model (batch commands, read ranges, suggest `/compact` at the next stopping point). It never blocks anything.
+
+### `cork-ai doctor`
+
+Is cork-ai actually being called? Checks the binary, the five hooks, runs the hook on a synthetic payload, reads the heartbeat left by the last real event (Claude Code version, permission mode), and compares the last 14 days of Claude Code sessions with the sessions cork-ai saw — with the Read vs Bash-read split that explains any gap. Run it after `claude update` or whenever `cork-ai gain` looks stale.
+
+```bash
+cork-ai doctor
+```
+
+### `cork-ai statusline`
+
+A status-line segment: context size, cache-read cost of the next call, session cost, and a `/compact?` hint past 150k. Reads Claude Code's status JSON on stdin, so it plugs into an existing script:
+
+```json
+{ "statusLine": { "type": "command", "command": "cork-ai statusline" } }
+```
 
 ### `cork-ai calibrate`
 
@@ -174,9 +226,11 @@ cork-ai — Last Session
 
 ```bash
 cork-ai gain              # last session
-cork-ai gain --all        # all-time totals
+cork-ai gain --all        # all-time totals, real spend, context block, hook liveness
 cork-ai gain --history    # all recorded sessions
 ```
+
+`gain --all` reads Claude Code's transcripts for the **real spend** (every turn's `usage`, subagents included), keeps a durable per-session copy in `~/.cork-ai/spend-cache.json` so the history survives Claude Code's 30-day transcript cleanup, and values savings over their life in context. The net deducts both re-read penalties: the raw tokens re-sent, and the real cost of the extra turns that only existed to re-read an outlined file.
 
 ### `cork-ai models`
 

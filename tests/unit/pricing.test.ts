@@ -49,17 +49,39 @@ describe('resolvePricing', () => {
     expect(p.output).toBe(75)
   })
 
+  it('Sonnet 5 : $2/$10 (tarif intro devenu permanent — la hausse du 2026-09-01 est annulée)', () => {
+    const p = resolvePricing('claude-sonnet-5', new Date('2026-12-01'))
+    expect(p.input).toBe(2.0)
+    expect(p.output).toBe(10.0)
+    expect(p.cacheRead).toBeCloseTo(0.2)
+  })
+
+  it('Fable 5.1 / Mythos 5.1 : cache read à 0.025× ($0.25/M), les autres paliers comme Fable 5', () => {
+    for (const id of ['claude-fable-5-1', 'claude-mythos-5-1']) {
+      const p = resolvePricing(id)
+      expect(p.input).toBe(10.0)
+      expect(p.output).toBe(50.0)
+      expect(p.cacheWrite5m).toBeCloseTo(12.5)
+      expect(p.cacheWrite1h).toBeCloseTo(20.0)
+      expect(p.cacheRead).toBeCloseTo(0.25)
+    }
+    // Fable 5 keeps the standard 0.1× multiplier
+    expect(resolvePricing('claude-fable-5').cacheRead).toBeCloseTo(1.0)
+  })
+
+  it('fast mode : usage.speed === "fast" facture Opus 5 à $10/$50, ignoré sur les autres modèles', () => {
+    const usage = { input_tokens: 1_000_000, output_tokens: 1_000_000, cache_read_input_tokens: 0, speed: 'fast' }
+    expect(costOfUsage(usage, 'claude-opus-5')).toBeCloseTo(60)
+    expect(costOfUsage({ ...usage, speed: 'standard' }, 'claude-opus-5')).toBeCloseTo(30)
+    expect(costOfUsage(usage, 'claude-sonnet-5')).toBeCloseTo(12)
+  })
+
   it('Sonnet 5 : tarif intro $2/$10 avant le 2026-08-31', () => {
     const p = resolvePricing('claude-sonnet-5', new Date('2026-07-15'))
     expect(p.input).toBe(2)
     expect(p.output).toBe(10)
   })
 
-  it('Sonnet 5 : tarif plein $3/$15 après le 2026-08-31', () => {
-    const p = resolvePricing('claude-sonnet-5', new Date('2026-09-01'))
-    expect(p.input).toBe(3)
-    expect(p.output).toBe(15)
-  })
 
   it('Sonnet 4.6 : $3/$15 sans période intro', () => {
     const p = resolvePricing('claude-sonnet-4-6', new Date('2026-07-15'))

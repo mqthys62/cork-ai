@@ -12,8 +12,8 @@
  * Pricing source: anthropic.com/pricing
  */
 
-/** Date the table below was last verified against anthropic.com/pricing. */
-export const PRICING_UPDATED_AT = '2026-07-02'
+/** Date the table below was last verified against platform.claude.com/docs/en/about-claude/pricing. */
+export const PRICING_UPDATED_AT = '2026-09-08'
 
 /** Warn/fail threshold: pricing tables older than this are considered stale. */
 export const PRICING_MAX_AGE_DAYS = 183
@@ -31,14 +31,19 @@ export interface ModelPricing {
   cacheRead: number
 }
 
-/** Anthropic's cache multipliers are uniform across models. */
-function mk(input: number, output: number): ModelPricing {
+/**
+ * Anthropic's cache-write multipliers are uniform across models (1.25× / 2×).
+ * The cache-read multiplier is 0.1× everywhere except Claude Fable 5.1 and
+ * Claude Mythos 5.1, which bill cache hits at 0.025× ($0.25/MTok). Cache reads
+ * are the bulk of an agent loop's bill, so that override is not a detail.
+ */
+function mk(input: number, output: number, cacheReadMultiplier = 0.1): ModelPricing {
   return {
     input,
     output,
     cacheWrite5m: input * 1.25,
     cacheWrite1h: input * 2,
-    cacheRead: input * 0.1,
+    cacheRead: input * cacheReadMultiplier,
   }
 }
 
@@ -51,14 +56,18 @@ interface PricingRule {
 
 // First matching pattern wins — keep specific patterns before generic ones.
 const RULES: PricingRule[] = [
+  // Fable 5.1 / Mythos 5.1: same $10/$50 as Fable 5, but cache hits at 0.025×.
+  // Must come before the generic fable/mythos rule.
+  { pattern: /(fable|mythos)-5-[1-9]/i, base: mk(10.0, 50.0, 0.025) },
   { pattern: /fable|mythos/i, base: mk(10.0, 50.0) },
+  { pattern: /haiku-4-5/i, base: mk(1.0, 5.0) },
+  { pattern: /haiku-3-5/i, base: mk(0.8, 4.0) },
   { pattern: /haiku/i, base: mk(1.0, 5.0) },
-  {
-    // Sonnet 5 — introductory pricing $2/$10 through 2026-08-31, then $3/$15
-    pattern: /sonnet-5/i,
-    base: mk(3.0, 15.0),
-    periods: [{ until: '2026-08-31', pricing: mk(2.0, 10.0) }],
-  },
+  // Sonnet 5 launched at $2/$10 as "introductory pricing through 2026-08-31".
+  // Anthropic later made that the standard price: the scheduled increase to
+  // $3/$15 on 2026-09-01 was cancelled (pricing page, note
+  // "claude-sonnet-5-introductory-pricing"). No period rule any more.
+  { pattern: /sonnet-5/i, base: mk(2.0, 10.0) },
   { pattern: /sonnet/i, base: mk(3.0, 15.0) },
   // Opus 5 and later ("claude-opus-5", "claude-opus-6", …). Must come before
   // the opus-4 rule: "opus-[5-9]" cannot match "opus-4-5" (the char after the
@@ -155,7 +164,17 @@ export interface ApiUsage {
     ephemeral_5m_input_tokens?: number
     ephemeral_1h_input_tokens?: number
   }
+  /**
+   * "fast" when the request ran in fast mode (Claude Opus 5 / Opus 4.8,
+   * research preview): input and output are then billed at $10/$50 per MTok
+   * instead of $5/$25, with the cache multipliers applied on top.
+   */
+  speed?: string
 }
+
+/** Fast-mode base pricing (Opus 5 / Opus 4.8 only; other models ignore `speed`). */
+const FAST_MODE_PRICING = mk(10.0, 50.0)
+const FAST_MODE_MODELS = /opus-5|opus-4-8/i
 
 /**
  * Real cost in USD of a request, from the API's own `usage` object.
@@ -165,7 +184,10 @@ export interface ApiUsage {
  * be 5-minute writes (an underestimate for any 1-hour cache).
  */
 export function costOfUsage(usage: ApiUsage, modelId?: string, date?: Date): number {
-  const p = resolvePricing(modelId, date)
+  const p =
+    usage.speed === 'fast' && modelId && FAST_MODE_MODELS.test(modelId)
+      ? FAST_MODE_PRICING
+      : resolvePricing(modelId, date)
 
   const split = usage.cache_creation
   const write5m = split?.ephemeral_5m_input_tokens

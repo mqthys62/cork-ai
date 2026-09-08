@@ -325,9 +325,21 @@ function isExpired(live: LiveSession): boolean {
   return Date.now() - new Date(live.lastActivityAt).getTime() > SESSION_TIMEOUT_MS
 }
 
+/**
+ * Other per-session state that lives next to the live sessions, under a
+ * prefix: `reads-<id>.json` (re-read tracking, index.ts) and `guard-<id>.json`
+ * (context guard bands, context-guard.ts). Neither is a LiveSession. Both
+ * crashed `gain` once by being parsed as one (0.4.1, 0.7.0) — hence the list
+ * *and* the shape check in `readLiveFile()`, so the next prefix cannot.
+ */
+const NON_SESSION_PREFIXES = ['reads-', 'guard-']
+
+/** Parses a live-session file; null when it is not a LiveSession (corrupt, or another shape). */
 function readLiveFile(file: string): LiveSession | null {
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf-8')) as LiveSession
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as Partial<LiveSession>
+    if (!parsed || typeof parsed.lastActivityAt !== 'string' || typeof parsed.startedAt !== 'string') return null
+    return parsed as LiveSession
   } catch {
     return null
   }
@@ -338,9 +350,9 @@ function listLiveFiles(): string[] {
   const files: string[] = []
   try {
     for (const entry of fs.readdirSync(LIVE_DIR)) {
-      // "reads-<sessionId>.json" tracks re-reads (see index.ts SessionReads) —
-      // a different shape, not a LiveSession; skip it here.
-      if (entry.endsWith('.json') && !entry.startsWith('reads-')) files.push(path.join(LIVE_DIR, entry))
+      if (!entry.endsWith('.json')) continue
+      if (NON_SESSION_PREFIXES.some(prefix => entry.startsWith(prefix))) continue
+      files.push(path.join(LIVE_DIR, entry))
     }
   } catch { /* no live dir yet */ }
   if (fs.existsSync(LIVE_SESSION_FILE)) files.push(LIVE_SESSION_FILE)
@@ -351,7 +363,10 @@ function listLiveFiles(): string[] {
 function flushExpiredLiveSessions(): void {
   for (const file of listLiveFiles()) {
     const live = readLiveFile(file)
-    if (!live) { try { fs.unlinkSync(file) } catch { /* already gone */ } ; continue }
+    // Not a live session (corrupt, or a shape we don't know): leave it alone.
+    // Deleting here used to be a cleanup nicety; it is not worth destroying
+    // another module's state by mistake.
+    if (!live) continue
     if (isExpired(live)) {
       flushLiveSessionToHistory(live)
       try { fs.unlinkSync(file) } catch { /* already gone */ }

@@ -185,9 +185,13 @@ describe('getStatsByPeriod', () => {
   })
 
   it('trie par label croissant', () => {
+    // Relative dates: the lookback window is anchored on "now", so fixed
+    // dates silently fall out of it a few months later (this test started
+    // failing on 2026-08-18 with May dates and a 100-day window).
+    const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString()
     const sessions = [
-      makeSession({ startedAt: new Date('2026-05-20T10:00:00Z').toISOString() }),
-      makeSession({ startedAt: new Date('2026-05-10T10:00:00Z').toISOString() }),
+      makeSession({ startedAt: daysAgo(5) }),
+      makeSession({ startedAt: daysAgo(15) }),
     ]
     const result = getStatsByPeriod(makeStats(sessions), 'day', 100)
     expect(result[0].label < result[1].label).toBe(true)

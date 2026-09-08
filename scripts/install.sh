@@ -183,13 +183,20 @@ fi
 
 # ─── Done ─────────────────────────────────────────────────────────────────────
 
+# ─── Doctor ───────────────────────────────────────────────────────────────────
+# Binary, hooks, self-test and coverage of recent sessions — the check that
+# would have caught the silent "no events since auto mode" failure.
+
+printf "\n"
+"$CORK_AI" doctor 2>/dev/null || true
+
 printf "\n"
 printf '%s\n' "────────────────────────────────────────────────────"
 printf "  ${BOLD}${GREEN}Done.${RESET} Restart Claude Code to activate.\n"
 printf "\n"
 printf "  ${CYAN}cork-ai gain${RESET}              see token savings\n"
-printf "  ${CYAN}cork-ai report${RESET}            full enterprise report\n"
-printf "  ${CYAN}cork-ai report --forecast${RESET}  annual projection\n"
+printf "  ${CYAN}cork-ai context${RESET}           where the money goes (context size per turn)\n"
+printf "  ${CYAN}cork-ai doctor${RESET}            check the install after a claude update\n"
 printf "\n"
 printf "  To integrate into your own code:\n"
 printf "  cd your-project && ${CYAN}cork-ai init${RESET}\n"

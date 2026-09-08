@@ -90,6 +90,11 @@ try {
     Write-Host "cork-ai hooks install" -ForegroundColor Cyan
 }
 
+# ─── Doctor ───────────────────────────────────────────────────────────────────
+
+Write-Host ""
+try { & $dest doctor } catch { }
+
 # ─── Done ─────────────────────────────────────────────────────────────────────
 
 Write-Host ""
@@ -98,8 +103,8 @@ Write-Host "  Done." -ForegroundColor Green -NoNewline
 Write-Host " Restart Claude Code and your terminal to activate."
 Write-Host ""
 Write-Host "  cork-ai gain              " -NoNewline; Write-Host "see token savings" -ForegroundColor DarkGray
-Write-Host "  cork-ai report            " -NoNewline; Write-Host "full enterprise report" -ForegroundColor DarkGray
-Write-Host "  cork-ai report --forecast " -NoNewline; Write-Host "annual projection" -ForegroundColor DarkGray
+Write-Host "  cork-ai context           " -NoNewline; Write-Host "where the money goes (context size per turn)" -ForegroundColor DarkGray
+Write-Host "  cork-ai doctor            " -NoNewline; Write-Host "check the install after a claude update" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  To integrate into your own code:"
 Write-Host "  cd your-project && " -NoNewline

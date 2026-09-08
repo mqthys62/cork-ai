@@ -3,8 +3,9 @@ dist/
 coverage/
 .cork-ai/
 # Working plan — local only, never committed
-PLAN.md
+PLAN*.md
 *.log
 .env
 .DS_Store
 Thumbs.db
+release/
