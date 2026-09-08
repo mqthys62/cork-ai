@@ -5,6 +5,7 @@
  * Commands:
  *   cork-ai gain                  Show current session + all-time savings
  *   cork-ai gain --all            Show all-time totals
+ *   cork-ai gain --sessions [N]   The last N finished sessions (digests)
  *   cork-ai gain --history        Show all recorded sessions
  *   cork-ai models                Per-model usage, frequency & cost breakdown
  *   cork-ai report                Full enterprise report (trends + projects + forecast)
@@ -47,6 +48,7 @@ import {
 } from './persistent-stats.js'
 import { inputPriceForModel } from '../pricing/index.js'
 import { scanAllTranscripts, contextReport, listTranscriptFiles } from './transcript-usage.js'
+import { DIGEST_DIR, DIGEST_MAX_AGE_DAYS, latestDigest, listDigests, type SessionDigest } from './digests.js'
 import { lifetimeSavings, reReadPenalty, buildSavingsSnapshot, runSendSnapshot, snapshotDue, snapshotInputs } from './savings.js'
 import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, corkHookEntry, ensureHookGroup, renderHookEntry, isShellFormOnWindows, type ClaudeSettings } from './claude-settings.js'
 import { policySummary, POLICY_FILE } from './policy.js'
@@ -123,6 +125,7 @@ ${C.bold('Quick start:')}
 ${C.bold('Stats:')}
   cork-ai gain              Current session + all-time savings
   cork-ai gain --all        All-time totals only
+  cork-ai gain --sessions   Last 10 finished sessions: turns, context, cost, saving at 200k (--sessions 30, --json)
   cork-ai gain --history    All recorded sessions
   cork-ai models            Per-model usage, frequency & cost breakdown
 
@@ -235,6 +238,12 @@ function showLastSession(): void {
     console.log()
   }
 
+  // ── Section 1b: the last finished session's digest (SessionEnd hook) ──
+  if (!live) {
+    const digest = latestDigest()
+    if (digest) printDigest(digest)
+  }
+
   // ── Section 2: global totals (live session included if active) ──
   if (stats) {
     const liveSaved  = live?.savedTokens ?? 0
@@ -258,6 +267,48 @@ function showLastSession(): void {
     }
     console.log()
   }
+}
+
+function fmtDuration(min: number | undefined): string {
+  if (min === undefined) return '?'
+  return min < 60 ? `${min} min` : `${Math.floor(min / 60)} h ${String(min % 60).padStart(2, '0')}`
+}
+
+/** One finished session, as the SessionEnd hook saw it. */
+function printDigest(d: SessionDigest): void {
+  const saving200k = d.costUSD > 0 ? Math.round(((d.costUSD - d.cappedCost200kUSD) / d.costUSD) * 100) : 0
+  console.log(`${C.bold('cork-ai — Last Finished Session')} ${C.dim(`(${fmtDate(d.endedAt)}${d.project ? ' · ' + d.project : ''}${d.reason ? ' · ' + d.reason : ''})`)}`)
+  console.log(divider())
+  console.log(`  ${C.dim('Turns')}       ${fmt(d.turns)}   ${C.dim('Duration')} ${fmtDuration(d.durationMin)}   ${C.dim('Model')} ${C.cyan(d.model ?? '?')}${d.permissionMode ? C.dim(` · ${d.permissionMode} mode`) : ''}`)
+  console.log(`  ${C.dim('Context')}     avg ${fmtTokens(d.avgContextTokens)} · max ${fmtTokens(d.maxContextTokens)} tokens   ${C.dim('Compactions')} ${d.compactions}`)
+  console.log(`  ${C.dim('Cost')}        ${fmtUsdLong(d.costUSD)}   ${C.dim('with auto-compact at 200k')} ${fmtUsdLong(d.cappedCost200kUSD)} ${saving200k > 0 ? C.green(`(−${saving200k}%)`) : C.dim('(same)')}`)
+  console.log(`  ${C.dim('cork-ai')}     ${d.compressions} outline${d.compressions === 1 ? '' : 's'} · ${C.green(fmt(d.savedTokens))} tokens saved · ${d.reReads ? C.yellow(`${d.reReads} re-read${d.reReads > 1 ? 's' : ''}`) : '0 re-reads'} · ${d.editFailures ? C.red(`${d.editFailures} edit failure${d.editFailures > 1 ? 's' : ''}`) : '0 edit failures'}${d.guardBands.length ? `   ${C.dim('Guard')} ${d.guardBands.map(fmtTokens).join(', ')}` : ''}`)
+  console.log()
+}
+
+/** `cork-ai gain --sessions [N] [--json]`: the last N finished sessions. */
+function showSessions(args: string[]): void {
+  const json = args.includes('--json')
+  const n = Number(args.find(a => /^\d+$/.test(a)) ?? 10)
+  const digests = listDigests().slice(0, n)
+  if (json) { console.log(JSON.stringify(digests, null, 2)); return }
+  if (digests.length === 0) {
+    console.log(`\n${C.yellow('No finished session recorded yet.')} ${C.dim('Digests are written by the SessionEnd hook (Claude Code ≥ 2.0.60) — end a session and come back.')}\n`)
+    return
+  }
+  console.log(`\n${C.bold(`cork-ai — Last ${digests.length} finished session${digests.length > 1 ? 's' : ''}`)}  ${C.dim(`(${DIGEST_DIR}, kept ${DIGEST_MAX_AGE_DAYS} days)`)}`)
+  console.log(divider('─', 110))
+  console.log(C.dim(`  ${'Ended'.padEnd(7)} ${'Project'.padEnd(20)} ${'Turns'.padStart(5)} ${'Time'.padStart(7)} ${'Ctx avg'.padStart(8)} ${'Ctx max'.padStart(8)} ${'Cost'.padStart(8)} ${'@200k'.padStart(6)} ${'Cmp'.padStart(3)} ${'Outl'.padStart(5)} ${'Saved'.padStart(8)} ${'ReRd'.padStart(4)} ${'Fail'.padStart(4)}  Model`))
+  let cost = 0, capped = 0, saved = 0, turns = 0
+  for (const d of digests) {
+    const saving200k = d.costUSD > 0 ? Math.round(((d.costUSD - d.cappedCost200kUSD) / d.costUSD) * 100) : 0
+    cost += d.costUSD; capped += d.cappedCost200kUSD; saved += d.savedTokens; turns += d.turns
+    console.log(`  ${new Date(d.endedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).padEnd(7)} ${(d.project ?? '').slice(0, 20).padEnd(20)} ${fmt(d.turns).padStart(5)} ${fmtDuration(d.durationMin).padStart(7)} ${fmtTokens(d.avgContextTokens).padStart(8)} ${fmtTokens(d.maxContextTokens).padStart(8)} ${fmtUsdLong(d.costUSD).padStart(8)} ${(saving200k > 0 ? `−${saving200k}%` : '—').padStart(6)} ${String(d.compactions).padStart(3)} ${String(d.compressions).padStart(5)} ${fmtTokens(d.savedTokens).padStart(8)} ${(d.reReads ? C.yellow(String(d.reReads).padStart(4)) : String(d.reReads).padStart(4))} ${(d.editFailures ? C.red(String(d.editFailures).padStart(4)) : String(d.editFailures).padStart(4))}  ${C.dim(d.model ?? '?')}`)
+  }
+  console.log(divider('─', 110))
+  const total200k = cost > 0 ? Math.round(((cost - capped) / cost) * 100) : 0
+  console.log(`  ${C.dim('Total')}   ${fmt(turns)} turns · ${fmtUsdLong(cost)} spent · ${fmtUsdLong(capped)} with auto-compact at 200k ${total200k > 0 ? C.green(`(−${total200k}%)`) : ''} · ${C.green(fmtTokens(saved))} tokens kept out of context by cork-ai`)
+  console.log(`  ${C.dim('Cmp = compactions · Outl = outlines served · ReRd = full re-reads after an outline · Fail = failed edits on outlined files')}\n`)
 }
 
 function showAllTime(): void {
@@ -1708,6 +1759,7 @@ async function runUpdate(args: string[]): Promise<void> {
     await runUpdate(args.slice(1))
   } else if (cmd === 'gain') {
     if (sub === '--all') showAllTime()
+    else if (sub === '--sessions') showSessions(args.slice(2))
     else if (sub === '--history') showHistory()
     else if (sub === '--models') showModels()
     else showLastSession()

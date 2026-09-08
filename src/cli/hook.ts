@@ -21,7 +21,8 @@ import path from 'path'
 import { estimateTokensFast } from '../core/tokenizer.js'
 import { inputPriceForModel, resolvePricing } from '../pricing/index.js'
 import { parseBashEdit, parseBashRead } from './bash-read.js'
-import { CORK_HOME, loadConfig, updateConfig } from './config.js'
+import { loadConfig, updateConfig } from './config.js'
+import { writeDigest, type SessionDigest } from './digests.js'
 import { evaluateGuard, guardHookOutput } from './context-guard.js'
 import { eligibility } from './file-eligibility.js'
 import { noteSessionSeen, readSessionsSeen, writeHeartbeat } from './heartbeat.js'
@@ -475,28 +476,7 @@ function runGuard(event: Record<string, unknown>, hookEvent: 'UserPromptSubmit' 
 
 // ─── Session digest (SessionEnd) ─────────────────────────────────────────────
 
-export const DIGEST_DIR = path.join(CORK_HOME, 'digests')
-
-export interface SessionDigest {
-  sessionId: string
-  endedAt: string
-  reason?: string
-  model?: string
-  permissionMode?: string
-  turns: number
-  avgContextTokens: number
-  maxContextTokens: number
-  costUSD: number
-  /** What the same session would have cost with auto-compaction at 200k. */
-  cappedCost200kUSD: number
-  compactions: number
-  /** Outlines served / full re-reads / edit failures, from the live session record. */
-  compressions: number
-  reReads: number
-  editFailures: number
-  savedTokens: number
-  guardBands: number[]
-}
+export { DIGEST_DIR, type SessionDigest } from './digests.js'
 
 function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDeps>): void {
   const sessionId = (event.session_id as string) || ''
@@ -512,9 +492,14 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
     guardBands = (JSON.parse(fs.readFileSync(path.join(LIVE_DIR, `guard-${safe}.json`), 'utf-8')) as { notified?: number[] }).notified ?? []
   } catch { /* no guard state */ }
 
+  const startedAt = readSessionsSeen()[sessionId]
+  const durationMin = startedAt ? Math.max(0, Math.round((deps.now().getTime() - new Date(startedAt).getTime()) / 60_000)) : undefined
   const digest: SessionDigest = {
     sessionId,
     endedAt: deps.now().toISOString(),
+    startedAt,
+    durationMin,
+    project: typeof event.cwd === 'string' && event.cwd ? path.basename(event.cwd) : undefined,
     reason: event.reason as string | undefined,
     model: profile.model,
     permissionMode: event.permission_mode as string | undefined,
@@ -530,18 +515,14 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
     savedTokens: live?.savedTokens ?? 0,
     guardBands,
   }
-  try {
-    fs.mkdirSync(DIGEST_DIR, { recursive: true })
-    fs.writeFileSync(path.join(DIGEST_DIR, `${sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)}.json`), JSON.stringify(digest, null, 2), 'utf-8')
-  } catch { /* non-critical */ }
+  writeDigest(digest, deps.now())
 
-  const startedAt = readSessionsSeen()[sessionId]
   deps.telemetry({
     event: 'session_digest',
     properties: {
       model: modelFamily(profile.model),
       permission_mode: digest.permissionMode,
-      duration_min: startedAt ? Math.max(0, Math.round((deps.now().getTime() - new Date(startedAt).getTime()) / 60_000)) : undefined,
+      duration_min: durationMin,
       saved_tokens: digest.savedTokens,
       turns: profile.turns,
       avg_context: contextBucket(profile.avgContextTokens),

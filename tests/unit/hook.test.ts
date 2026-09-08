@@ -220,8 +220,10 @@ describe('SessionEnd', () => {
     handleHookEvent({ session_id: sessionId, transcript_path: transcript, cwd: dir, hook_event_name: 'SessionEnd', reason: 'exit', permission_mode: 'auto' }, deps())
     const file = path.join(DIGEST_DIR, `${sessionId}.json`)
     const digest = JSON.parse(fs.readFileSync(file, 'utf-8'))
-    expect(digest).toMatchObject({ sessionId, reason: 'exit', turns: 1, compressions: 1, model: 'claude-opus-5', permissionMode: 'auto' })
+    expect(digest).toMatchObject({ sessionId, reason: 'exit', turns: 1, compressions: 1, model: 'claude-opus-5', permissionMode: 'auto', project: path.basename(dir), durationMin: 0, startedAt: '2026-09-09T10:00:00.000Z' })
     expect(digest.avgContextTokens).toBe(41_010)
+    // the project name stays local
+    expect(JSON.stringify(events)).not.toContain(path.basename(dir))
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ event: 'session_digest', properties: { model: 'opus-5', turns: 1, avg_context: '<50k', compressions: 1, reason: 'exit', duration_min: 0 } })
     expect(events[0].properties.saved_tokens).toBeGreaterThan(1000)
