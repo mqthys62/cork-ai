@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.1] — 2026-09-08
+
+Release candidate for 1.0: three features measured on real transcripts, then stabilisation. Beta testers and the Windows checklist decide what becomes 1.0.0.
+
+### Added
+- **Re-read cache.** A file served raw earlier in the session, unchanged since (mtime, size and a content hash agree) and not lost to a compaction, is answered with an 80-token reminder — `already read N turns ago, unchanged since (L1–L340): the full content is still in your context above` — instead of the file. Measured on real sessions: 18 % of whole-file reads are re-reads of an unchanged file, about 5k tokens per session. Never cached: files edited since, files named in the last prompt, skip-listed files, ranged reads, reads by another agent. Compactions are detected from the transcript (`compact_boundary` / compaction summary after the first read). One wrong call — the model re-reads anyway — serves the file raw for the rest of the session and feeds the `cache:` re-read rate in `policy.json`, which starts from a lower prior (0.3) and its own 800-token bar. `policy.reReadCache` config key (default true).
+- **Policy by agent class.** Reads are classed `main` (the conversation), `readonly` (Explore, Plan, claude-code-guide, statusline-setup) or `editing` (general-purpose, forks, custom agents — unknown means editing). Read-only agents are outlined from 800 saved tokens instead of 1,500 and skip the edited-file rule; learned re-read rates are kept per class (`ro:` keys). Read state is per agent: what a subagent read never counts as a re-read for the conversation. `policy.readonlyAgentsAggressive` config key (default true).
+- **Session digests in `gain`.** `cork-ai gain` shows the last finished session (duration, turns, average/max context, cost, saving at 200k, compactions, outlines, re-reads, edit failures, guard bands) when no session is live; `cork-ai gain --sessions [N] [--json]` lists the last N digests with totals. Digests are pruned after 30 days, like Claude Code's transcripts.
+- **PowerShell reads.** `Get-Content` / `gc` / `type` / `cat` under Claude Code's PowerShell tool (Windows without Git Bash) are handled like `cat` under Bash: whole-file reads go through the gate, `-TotalCount` / `-Head` / `-Tail` pass through, and re-reads are counted. The hooks' `PreToolUse` matcher is now `Bash|PowerShell`.
+- **`CORK_AI_DEBUG=1`**: the hook writes swallowed errors and one trace line per event to `~/.cork-ai/debug.log` (1 MB rotation). `doctor` reports the log when it exists.
+- `doctor` checks the Claude Code version against the tested range (2.1.47 → 2.1.263), the age of the last telemetry snapshot when telemetry is on, and the state of the local caches.
+- `docs/METHODOLOGY.md`: how every figure is computed (first pass vs lifetime vs penalties, amplification, the EV gate, the replay at 200k, token estimation), the payload fields the hook reads, and the known limits. Linked from the README.
+- Telemetry: `hook_read` gains `decision: cached`, `turns_ago`, `cache_miss` and `agent_class`; `hook_reread` gains `kind: after-cache` and `agent_class`. Two insights on the Savings dashboard: *Cache hits vs re-reads*, *Decisions by agent class*.
+
+### Changed
+- Every state file cork-ai writes (`config.json`, `policy.json`, `reads-*.json`, `sessions-seen.json`, `heartbeat.json`, stats, caches, digests) is written to a temporary file and renamed: concurrent hooks (subagents) can no longer leave a truncated file behind.
+- The hook never throws: a failing handler is logged (`CORK_AI_DEBUG`) and the read passes through untouched.
+- `context --set-autocompact` says so and changes nothing when the value is already set; setting it by hand marks the install question as answered.
+- SDK tests moved out of the default `npm test` (`npm run test:sdk`, still run in CI); unit and integration tests each get their own `CORK_AI_HOME`.
+- `docs/SDK.md`: the deprecated library is scheduled for removal in 1.1.0.
+
 ## [0.9.1] — 2026-09-08
 
 ### Fixed

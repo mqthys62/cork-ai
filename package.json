@@ -1,6 +1,6 @@
 {
   "name": "cork-ai",
-  "version": "0.9.1",
+  "version": "1.0.0-rc.1",
   "description": "Claude Code cost tool \u2014 outlines whole-file reads when it pays off, and shows what your context size really costs",
   "bin": {
     "cork-ai": "./dist/cli/index.js"

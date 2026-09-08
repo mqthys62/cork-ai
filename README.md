@@ -31,7 +31,7 @@ Meanwhile the context guard tells you when the context crosses 150k / 300k / 500
 and what every further tool call costs — /compact or /autocompact fixes that
 ```
 
-> **Where the money really goes.** On a real 2-month history (16k turns, $4.3k), **78% of the spend was cache reads of the conversation prefix** — the whole context re-sent on every tool call, 400k tokens on average, on sessions that ran to the 1M window. Replayed with auto-compaction at 200k, the same work costs **57% less**. Read compression moves ~1%. `cork-ai context` shows this for your own history; `cork-ai context --set-autocompact 200k` applies the fix.
+> **Where the money really goes.** On a real 2-month history (16k turns, $4.3k), **78% of the spend was cache reads of the conversation prefix** — the whole context re-sent on every tool call, 400k tokens on average, on sessions that ran to the 1M window. Replayed with auto-compaction at 200k, the same work costs **57% less**. Read compression moves ~1%. `cork-ai context` shows this for your own history; `cork-ai context --set-autocompact 200k` applies the fix. How every figure is computed, and where it is weakest: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 
 <!-- cork-ai:stats -->
 <!-- /cork-ai:stats -->
@@ -96,22 +96,25 @@ Registers cork-ai's hooks globally in `~/.claude/settings.json`. Active for ever
 
 ```bash
 cork-ai hooks install   # enable / upgrade
-cork-ai hooks status    # which of the 5 hooks are active
+cork-ai hooks status    # which of the 6 hooks are active
 cork-ai hooks remove    # disable
 ```
 
 | Hook | What it does |
 |------|--------------|
 | `PreToolUse` **Read** | Whole-file reads get a numbered outline when the expected-value gate says it pays off |
-| `PreToolUse` **Bash** | Same for `cat file`, `nl`, `bat`, `rtk proxy cat` — Claude Code's auto mode reads through Bash, not `Read`. Targeted reads (`sed -n`, `head`, `tail`) always pass, and `sed -i` / redirections mark the file as being edited |
+| `PreToolUse` **Bash / PowerShell** | Same for `cat file`, `nl`, `bat`, `rtk proxy cat`, and `Get-Content` / `gc` / `type` under PowerShell — Claude Code's auto mode reads through the shell, not `Read`. Targeted reads (`sed -n`, `head`, `tail`, `-TotalCount`) always pass, and `sed -i` / redirections mark the file as being edited |
 | `PostToolUse` **Edit / Write** | Failed edits on outlined files, edited-file tracking, context guard |
 | `UserPromptSubmit`, `Stop` | Context guard notices |
+| `SessionEnd` | Session digest (`~/.cork-ai/digests/`, shown by `cork-ai gain`) |
 
 The hook never compresses at the model's expense. The guardrails, all measured on real transcripts:
 
 - **An expected-value gate decides per read** — `saved tokens × amplification × cache-read price` against `P(re-read) × (dead outline + one extra turn over the current context + output)`. Small files, huge contexts and extensions that keep backfiring are served raw. `P(re-read)` is learned per extension on your machine (`~/.cork-ai/policy.json`); an extension above 35% re-reads goes on probation and is probed one read in ten.
 - **The outline is navigable** — every entry carries its line number (`L127  export async function fetchAll(...)`), so the follow-up is `Read offset=127 limit=40` or `sed -n '127,166p'`, not a full re-read.
 - **Explicit `offset`/`limit` reads are never compressed** — the model is targeting a precise zone.
+- **A file already in context is not sent twice** — the *re-read cache*: a file served raw earlier in the session, unchanged since (mtime, size and a content hash agree) and not lost to a compaction, gets an 80-token reminder (`already read 12 turns ago, unchanged since (L1–L340): the full content is still in your context above`) instead of the file. Edited files, files named in your prompt, ranged reads and other agents' reads never hit the cache; one wrong call (the model re-reads anyway) switches the file back to raw for the session. Off with `cork-ai config set policy.reReadCache false`.
+- **Read-only subagents get a lower bar** — Explore and Plan never edit what they read and their context is discarded at the end, so they are outlined from 800 saved tokens instead of 1,500 and skip the edited-file rule; every other agent (general-purpose, forks, custom agents) keeps the main conversation's rules. Learned re-read rates are kept per agent class. Off with `cork-ai config set policy.readonlyAgentsAggressive false`.
 - **Re-reads are served raw** — a file re-read after an outline gets the full content, is remembered across sessions (`skip-list.json`), and its cost — the raw tokens *and* the extra API turn — is deducted in `cork-ai gain`.
 - **Files being edited are served raw** — 59% of outlined files were edited afterwards (97% of `.tsx`); an `Edit`, `Write`, `sed -i` or redirection on a file switches it to raw for the session.
 - **The file the user is asking about is never compressed** — if your last message mentions `interceptor.ts`, its read passes through untouched.
@@ -132,10 +135,11 @@ The **context guard** fires once per band (150k / 300k / 500k / 750k tokens) per
 
 ### `cork-ai doctor`
 
-Is cork-ai actually being called? Checks the binary, the five hooks, runs the hook on a synthetic payload, reads the heartbeat left by the last real event (Claude Code version, permission mode), and compares the last 14 days of Claude Code sessions with the sessions cork-ai saw — with the Read vs Bash-read split that explains any gap. Run it after `claude update` or whenever `cork-ai gain` looks stale.
+Is cork-ai actually being called? Checks the binary, the six hooks (and their form on Windows), the Claude Code version against the tested range, runs the hook on a synthetic payload, reads the heartbeat left by the last real event (Claude Code version, permission mode), and compares the last 14 days of Claude Code sessions with the sessions cork-ai saw — with the Read vs shell-read split that explains any gap. Run it after `claude update` or whenever `cork-ai gain` looks stale.
 
 ```bash
 cork-ai doctor
+CORK_AI_DEBUG=1 claude     # the hook logs swallowed errors and one line per event to ~/.cork-ai/debug.log
 ```
 
 ### `cork-ai statusline`
@@ -151,6 +155,8 @@ A status-line segment: context size, cache-read cost of the next call, session c
 ```bash
 cork-ai update            # replace the standalone binary with the latest release (--check to only look)
 cork-ai config            # list settings in ~/.cork-ai/config.json · config set contextGuard.bands 150k,400k
+cork-ai config set policy.reReadCache false            # disable the re-read cache
+cork-ai config set policy.readonlyAgentsAggressive false  # Explore/Plan follow the main rules
 cork-ai reset             # clear stats · --policy (learned re-read rates) · --skip-list · --all
 cork-ai telemetry on      # anonymous usage events, opt-in — what is sent: docs/TELEMETRY.md
 cork-ai telemetry preview # the exact daily payload, byte for byte, before you decide
@@ -204,10 +210,13 @@ cork-ai — All-Time Stats
 Yes, that is a real report, and yes, the honest line is *0.9%*: outlining reads is a small lever. The Context block is the large one.
 
 ```bash
-cork-ai gain              # last session
+cork-ai gain              # live session, or the digest of the last finished one
+cork-ai gain --sessions   # the last 10 session digests: duration, turns, context, cost, saving at 200k (--json)
 cork-ai gain --all        # all-time totals, real spend, context block, hook liveness
 cork-ai gain --history    # all recorded sessions
 ```
+
+Digests are written at `SessionEnd` and kept 30 days (`reset --digests` clears them).
 
 `gain --all` reads Claude Code's transcripts for the **real spend** (every turn's `usage`, subagents included), keeps a durable per-session copy in `~/.cork-ai/spend-cache.json` so the history survives Claude Code's 30-day transcript cleanup, and values savings over their life in context. The net deducts both re-read penalties: the raw tokens re-sent, and the real cost of the extra turns that only existed to re-read an outlined file.
 
@@ -261,6 +270,7 @@ The conversation-compression library cork-ai started as (`wrapClient`, seven str
 - **OS**: Linux (Ubuntu 20.04+, Debian, Alpine), macOS (Intel + Apple Silicon), Windows (native + WSL2)
 - **Zero runtime dependencies** — standalone binary, no Node.js or npm required
 - **From npm** (`npx cork-ai`): Node.js ≥ 18
+- **Claude Code**: tested from 2.1.47 to 2.1.263 (`doctor` warns outside the range); Windows without Git Bash needs ≥ 2.1.139
 
 ---
 

@@ -29,7 +29,7 @@ Pendant ce temps, le garde contexte te prévient quand le contexte passe 150k / 
 et ce que coûte chaque appel d'outil supplémentaire — /compact ou /autocompact règle ça
 ```
 
-> **Où part vraiment l'argent.** Sur un historique réel de 2 mois (16k tours, 4,3 k$), **78 % de la dépense était des cache reads du préfixe de conversation** — tout le contexte renvoyé à chaque appel d'outil, 400k tokens en moyenne, sur des sessions montées jusqu'à la fenêtre de 1M. Rejoué avec une auto-compaction à 200k, le même travail coûte **57 % de moins**. La compression des Read pèse ~1 %. `cork-ai context` le montre sur ton propre historique ; `cork-ai context --set-autocompact 200k` applique le correctif.
+> **Où part vraiment l'argent.** Sur un historique réel de 2 mois (16k tours, 4,3 k$), **78 % de la dépense était des cache reads du préfixe de conversation** — tout le contexte renvoyé à chaque appel d'outil, 400k tokens en moyenne, sur des sessions montées jusqu'à la fenêtre de 1M. Rejoué avec une auto-compaction à 200k, le même travail coûte **57 % de moins**. La compression des Read pèse ~1 %. `cork-ai context` le montre sur ton propre historique ; `cork-ai context --set-autocompact 200k` applique le correctif. Comment chaque chiffre est calculé, et où il est le plus fragile : [docs/METHODOLOGY.md](METHODOLOGY.md) (en anglais).
 
 ---
 
@@ -92,22 +92,25 @@ Enregistre les hooks cork-ai globalement dans `~/.claude/settings.json`. Actifs 
 
 ```bash
 cork-ai hooks install   # activer / mettre à niveau
-cork-ai hooks status    # lesquels des 5 hooks sont actifs
+cork-ai hooks status    # lesquels des 6 hooks sont actifs
 cork-ai hooks remove    # désactiver
 ```
 
 | Hook | Rôle |
 |------|------|
 | `PreToolUse` **Read** | Les lectures de fichiers entiers reçoivent un outline numéroté quand la porte de valeur attendue dit que ça rapporte |
-| `PreToolUse` **Bash** | Pareil pour `cat fichier`, `nl`, `bat`, `rtk proxy cat` — en mode auto, Claude Code lit via Bash, pas via `Read`. Les lectures ciblées (`sed -n`, `head`, `tail`) passent toujours, et `sed -i` / les redirections marquent le fichier comme en cours d'édition |
+| `PreToolUse` **Bash / PowerShell** | Pareil pour `cat fichier`, `nl`, `bat`, `rtk proxy cat`, et `Get-Content` / `gc` / `type` sous PowerShell — en mode auto, Claude Code lit via le shell, pas via `Read`. Les lectures ciblées (`sed -n`, `head`, `tail`, `-TotalCount`) passent toujours, et `sed -i` / les redirections marquent le fichier comme en cours d'édition |
 | `PostToolUse` **Edit / Write** | Edit échoués sur fichiers outlinés, suivi des fichiers édités, garde contexte |
 | `UserPromptSubmit`, `Stop` | Notices du garde contexte |
+| `SessionEnd` | Digest de session (`~/.cork-ai/digests/`, affiché par `cork-ai gain`) |
 
 Le hook ne compresse jamais au détriment du modèle. Les garde-fous, tous mesurés sur de vrais transcripts :
 
 - **Une porte de valeur attendue décide lecture par lecture** — `tokens économisés × amplification × prix cache-read` contre `P(relecture) × (outline mort + un tour de plus sur le contexte courant + sortie)`. Petits fichiers, contextes énormes et extensions qui se retournent contre nous sont servis bruts. `P(relecture)` est appris par extension sur ta machine (`~/.cork-ai/policy.json`) ; une extension au-dessus de 35 % de relectures passe en probation et n'est sondée qu'une lecture sur dix.
 - **L'outline est navigable** — chaque entrée porte son numéro de ligne (`L127  export async function fetchAll(...)`) : la suite, c'est `Read offset=127 limit=40` ou `sed -n '127,166p'`, pas une relecture complète.
 - **Les Read avec `offset`/`limit` explicites ne sont jamais compressés** — le modèle cible une zone précise.
+- **Un fichier déjà dans le contexte n'est pas renvoyé deux fois** — le *cache de relecture* : un fichier servi brut plus tôt dans la session, inchangé depuis (mtime, taille et hash du contenu concordent) et non perdu dans une compaction, reçoit un rappel de 80 tokens (`already read 12 turns ago, unchanged since (L1–L340): the full content is still in your context above`) à la place du fichier. Fichiers édités, fichiers cités dans ton prompt, lectures par plage et lectures d'un autre agent ne passent jamais par le cache ; une seule erreur (le modèle relit quand même) remet le fichier en brut pour la session. Désactivable : `cork-ai config set policy.reReadCache false`.
+- **Les sous-agents en lecture seule ont une barre plus basse** — Explore et Plan n'éditent jamais ce qu'ils lisent et leur contexte est jeté à la fin : ils sont outlinés dès 800 tokens économisés au lieu de 1 500 et ignorent la règle « fichier en cours d'édition » ; tous les autres agents (general-purpose, forks, agents custom) gardent les règles de la conversation principale. Les taux de relecture appris sont tenus par classe d'agent. Désactivable : `cork-ai config set policy.readonlyAgentsAggressive false`.
 - **Les relectures sont servies brutes** — un fichier relu après un outline reçoit le contenu complet, est mémorisé d'une session à l'autre (`skip-list.json`), et son coût — les tokens bruts *et* le tour API supplémentaire — est déduit dans `cork-ai gain`.
 - **Les fichiers en cours d'édition sont servis bruts** — 59 % des fichiers outlinés étaient édités ensuite (97 % des `.tsx`) ; un `Edit`, `Write`, `sed -i` ou une redirection sur un fichier le passe en brut pour la session.
 - **Le fichier dont l'utilisateur parle n'est jamais compressé** — si ton dernier message mentionne `interceptor.ts`, sa lecture passe telle quelle.
@@ -128,10 +131,11 @@ Le **garde contexte** se déclenche une fois par palier (150k / 300k / 500k / 75
 
 ### `cork-ai doctor`
 
-cork-ai est-il vraiment appelé ? Vérifie le binaire, les cinq hooks, exécute le hook sur un payload synthétique, lit le heartbeat laissé par le dernier vrai événement (version de Claude Code, mode de permission), et compare les 14 derniers jours de sessions Claude Code avec celles que cork-ai a vues — avec la répartition Read / lectures Bash qui explique l'écart. À lancer après un `claude update` ou dès que `cork-ai gain` semble figé.
+cork-ai est-il vraiment appelé ? Vérifie le binaire, les six hooks (et leur forme sous Windows), la version de Claude Code par rapport à la plage testée, exécute le hook sur un payload synthétique, lit le heartbeat laissé par le dernier vrai événement (version de Claude Code, mode de permission), et compare les 14 derniers jours de sessions Claude Code avec celles que cork-ai a vues — avec la répartition Read / lectures Bash qui explique l'écart. À lancer après un `claude update` ou dès que `cork-ai gain` semble figé.
 
 ```bash
 cork-ai doctor
+CORK_AI_DEBUG=1 claude     # le hook journalise les erreurs avalées et une ligne par événement dans ~/.cork-ai/debug.log
 ```
 
 ### `cork-ai statusline`
@@ -147,6 +151,8 @@ Un segment de barre de statut : taille du contexte, coût cache-read du prochain
 ```bash
 cork-ai update            # remplace le binaire par la dernière release (--check pour seulement regarder)
 cork-ai config            # liste les réglages de ~/.cork-ai/config.json · config set contextGuard.bands 150k,400k
+cork-ai config set policy.reReadCache false            # désactive le cache de relecture
+cork-ai config set policy.readonlyAgentsAggressive false  # Explore/Plan suivent les règles principales
 cork-ai reset             # efface les stats · --policy (taux de relecture appris) · --skip-list · --all
 cork-ai telemetry on      # événements d'usage anonymes, opt-in — ce qui est envoyé : docs/TELEMETRY.md
 cork-ai telemetry preview # le payload quotidien exact, octet par octet, avant de décider
@@ -188,10 +194,13 @@ $ cork-ai gain --all
 Oui, c'est un vrai rapport, et oui, la ligne honnête dit *0,9 %* : outliner les lectures est un petit levier. Le bloc Context est le gros.
 
 ```bash
-cork-ai gain              # dernière session
+cork-ai gain              # session en cours, ou le digest de la dernière session terminée
+cork-ai gain --sessions   # les 10 derniers digests : durée, tours, contexte, coût, économie à 200k (--json)
 cork-ai gain --all        # totaux, dépense réelle, bloc Contexte, vivacité du hook
 cork-ai gain --history    # toutes les sessions enregistrées
 ```
+
+Les digests sont écrits au `SessionEnd` et gardés 30 jours (`reset --digests` les efface).
 
 `gain --all` lit les transcripts de Claude Code pour la **dépense réelle** (l'`usage` de chaque tour, sous-agents compris), en garde une copie durable par session dans `~/.cork-ai/spend-cache.json` pour que l'historique survive au nettoyage des transcripts après 30 jours, et valorise les économies sur toute leur vie en contexte. Le net déduit les deux pénalités de relecture : les tokens bruts renvoyés, et le coût réel des tours qui n'ont existé que pour relire un fichier outliné.
 
@@ -223,6 +232,7 @@ La bibliothèque de compression de conversation dont cork-ai est parti (`wrapCli
 - **OS** : Linux (Ubuntu 20.04+, Debian, Alpine), macOS (Intel + Apple Silicon), Windows (natif + WSL2)
 - **Zéro dépendance runtime** — binaire standalone, pas de Node.js ni de npm requis
 - **Depuis npm** (`npx cork-ai`) : Node.js ≥ 18
+- **Claude Code** : testé de 2.1.47 à 2.1.263 (`doctor` avertit hors plage) ; Windows sans Git Bash exige ≥ 2.1.139
 
 ---
 

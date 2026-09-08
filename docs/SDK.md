@@ -2,6 +2,8 @@
 
 > **Status: deprecated, kept in the repository, not published.** Since 0.8.0 the `cork-ai` package is the Claude Code tool only. The conversation-compression library below (`wrapClient`, `CtxForge`, the seven strategies) still lives in `src/sdk/` with its tests, and builds with `npm run build:sdk`, but it is no longer exported from the npm package and no longer maintained as a product. If you rely on it, pin `cork-ai@0.7.0` or say so in an issue — it can move to its own package if there is demand.
 >
+> **Timeline.** Deprecated 2026-08 (0.8.0). Its tests still run in CI behind `npm run test:sdk`, not in the default `npm test`, since 1.0.0-rc.1 (2026-09). The `src/sdk/` directory and its tests will be removed from the repository in **1.1.0**, unless an issue asks for it to be published separately before then.
+>
 > Why: measured on two months of real Claude Code history, the whole-file-read compression this library was built around moves about 1% of the bill; the context-size governance the tool now focuses on moves 50%+. The "60–75% token reduction" figures below were measured on synthetic conversations with the library API and never applied to the Claude Code hook.
 
 ## The seven strategies

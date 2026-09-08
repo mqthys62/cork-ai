@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { corkHookEntry, renderHookEntry, isCorkCmd, isShellFormOnWindows, isCorkHookInstalled, installedCorkHooks, ensureHookGroup, CORK_HOOK_FALLBACK, type ClaudeSettings } from '../../src/cli/claude-settings.js'
+import { compareVersions } from '../../src/cli/version.js'
 
 const WIN = 'C:\\Users\\ami\\AppData\\Local\\cork-ai\\bin\\cork-ai.exe'
 const NIX = '/home/ami/.local/bin/cork-ai'
@@ -116,5 +117,18 @@ describe('ensureHookGroup (migration)', () => {
     const installed = settings.hooks!.PreToolUse![0].hooks
     expect(installed.map(h => h.command)).toEqual(['node /x/other.js', WIN])
     expect(installed[1].args).not.toBe(desired.args)
+  })
+})
+
+describe('compareVersions (pré-releases)', () => {
+  it('ordonne rc < release, rc.1 < rc.2, et ignore un v initial', () => {
+    expect(compareVersions('1.0.0-rc.1', '1.0.0')).toBeLessThan(0)
+    expect(compareVersions('1.0.0', '1.0.0-rc.1')).toBeGreaterThan(0)
+    expect(compareVersions('1.0.0-rc.1', '1.0.0-rc.2')).toBeLessThan(0)
+    expect(compareVersions('1.0.0-rc.10', '1.0.0-rc.9')).toBeGreaterThan(0)
+    expect(compareVersions('0.9.1', '1.0.0-rc.1')).toBeLessThan(0)
+    expect(compareVersions('v2.1.263', '2.1.47')).toBeGreaterThan(0)
+    expect(compareVersions('2.1.139', '2.1.139')).toBe(0)
+    expect(compareVersions('1.0.0-beta', '1.0.0-rc.1')).toBeLessThan(0)
   })
 })

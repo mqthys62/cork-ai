@@ -55,7 +55,7 @@ import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
 import { handleHookEvent, type HookOutput } from './hook.js'
-import { VERSION } from './version.js'
+import { VERSION, compareVersions } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat } from './heartbeat.js'
 import { sendTelemetry, runSendTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST } from './telemetry.js'
@@ -1002,8 +1002,13 @@ function setAutoCompactWindow(tokens: number): void {
   }
   const settings = loadClaudeSettings()
   const before = settings.autoCompactWindow
+  if (before === tokens) {
+    console.log(`\n${C.green('✔')}  autoCompactWindow is already ${C.cyan(fmtTokens(tokens))} tokens in ${C.dim(CLAUDE_SETTINGS)} — nothing to do.\n`)
+    return
+  }
   settings.autoCompactWindow = tokens
   saveClaudeSettings(settings)
+  updateConfig({ autoCompactAnswered: true })
   console.log(`\n${C.green('✔')}  autoCompactWindow set to ${C.cyan(fmtTokens(tokens))} tokens in ${C.dim(CLAUDE_SETTINGS)}` +
     (before ? ` ${C.dim(`(was ${fmtTokens(before)})`)}` : ''))
   console.log(`   Claude Code compacts automatically once the context reaches it. Takes effect on the next session;`)
@@ -1705,15 +1710,6 @@ async function fetchLatestRelease(timeoutMs = 6_000): Promise<LatestRelease | un
   } finally {
     clearTimeout(timer)
   }
-}
-
-function compareVersions(a: string, b: string): number {
-  const pa = a.split('.').map(Number), pb = b.split('.').map(Number)
-  for (let i = 0; i < 3; i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (d !== 0) return d
-  }
-  return 0
 }
 
 function releaseAssetName(): string {

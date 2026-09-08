@@ -34,13 +34,13 @@ describe('capturePayload', () => {
     expect(body.timestamp).toBe('2026-09-09T10:00:00.000Z')
     const props = body.properties as Record<string, unknown>
     expect(props).toMatchObject({ $lib: 'cork-ai', decision: 'outline', ext: '.ts', os: process.platform })
-    expect(props.version).toMatch(/^\d+\.\d+\.\d+$/)
+    expect(props.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/)
     expect('maybe' in props).toBe(false)
   })
   it('porte le profil de l’installation ($set / $set_once) et fusionne celui de l’événement', () => {
     const body = capturePayload({ event: 'savings_snapshot', properties: { reason: 'gain' }, set: { lifetime_saved_tokens: 12, skip: undefined }, setOnce: { first_seen: '2026-01-01T00:00:00Z' } }, 'id')
     const props = body.properties as { $set: Record<string, unknown>; $set_once: Record<string, unknown>; runtime: string }
-    expect(props.$set).toMatchObject({ version: expect.stringMatching(/^\d+\.\d+\.\d+$/), os: process.platform, arch: process.arch, lifetime_saved_tokens: 12, telemetry: expect.any(Boolean) })
+    expect(props.$set).toMatchObject({ version: expect.stringMatching(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/), os: process.platform, arch: process.arch, lifetime_saved_tokens: 12, telemetry: expect.any(Boolean) })
     expect('skip' in props.$set).toBe(false)
     expect(props.$set_once).toMatchObject({ first_seen: '2026-01-01T00:00:00Z', first_version: expect.any(String) })
     expect(props.runtime).toMatch(/^(node|bun)-\d+$/)
