@@ -118,6 +118,7 @@ function Install-CorkAi {
         # Not piped to Out-Null: `hooks install` asks two questions (telemetry,
         # auto-compaction) on the terminal, and a hidden prompt looks like a hang.
         try {
+            $env:CORK_AI_INSTALLER = "ps1"
             & $dest hooks install
             if ($LASTEXITCODE -ne 0) { throw "hooks install exited with $LASTEXITCODE" }
             Write-Ok "Claude Code hook installed"

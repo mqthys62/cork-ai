@@ -160,7 +160,7 @@ fi
 
 printf "\n  Setting up Claude Code integration...\n"
 
-if "$CORK_AI" hooks install 2>/dev/null; then
+if CORK_AI_INSTALLER=sh "$CORK_AI" hooks install 2>/dev/null; then
   ok "Claude Code hook installed"
   info "All your Claude Code sessions will now compress Read outputs automatically."
   info "No per-project setup needed — works across all projects."

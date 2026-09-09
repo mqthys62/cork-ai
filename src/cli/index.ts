@@ -63,7 +63,7 @@ import { handleHookEvent, type HookOutput } from './hook.js'
 import { VERSION, compareVersions } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat, readSessionsSeen } from './heartbeat.js'
-import { sendTelemetry, runSendTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST } from './telemetry.js'
+import { sendTelemetry, runSendTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST, errorClass, installChannel, managedSettingsPresent, type TelemetryEvent } from './telemetry.js'
 import {
   CALIBRATION_FILE,
   countTokensRaw,
@@ -938,7 +938,15 @@ async function hooksInstall(): Promise<void> {
 
   if (cfg.telemetry === undefined) await askTelemetryConsent()
   await askAutoCompact(settings)
-  sendTelemetry({ event: 'install', properties: { hooks: changed.length, upgrade: changed.length < specs.length, autocompact: loadClaudeSettingsOrEmpty().autoCompactWindow ?? null } })
+  sendTelemetry({ event: 'install', properties: {
+    hooks: changed.length,
+    upgrade: changed.length < specs.length,
+    autocompact: loadClaudeSettingsOrEmpty().autoCompactWindow ?? null,
+    channel: installChannel(),
+    managed_settings: managedSettingsPresent(),
+    config_dir_custom: Boolean(process.env.CLAUDE_CONFIG_DIR),
+    skipped_hooks: skipped.length,
+  } })
   sendSnapshotDetached('install', true)
 
   console.log(`   Restart Claude Code for the hooks to take effect.`)
@@ -1061,6 +1069,13 @@ function hooksStatus(): void {
 
 // ─── hook (called by Claude Code on every hook event) ────────────────────────
 
+/** A hook crashed: say so, with the error's class only. The tool call went through regardless. */
+function reportHookError(stage: 'parse' | 'handle', err: unknown, event: Record<string, unknown>): void {
+  try {
+    sendTelemetry({ event: 'hook_error', properties: { stage, ...errorClass(err), on: typeof event.hook_event_name === 'string' ? event.hook_event_name : undefined, tool: typeof event.tool_name === 'string' ? event.tool_name : undefined, hook_ms: Math.round(process.uptime() * 1000) } })
+  } catch { /* never */ }
+}
+
 // All the logic lives in src/cli/hook.ts (pure, unit-tested). This is the I/O shell.
 async function runHook(): Promise<void> {
   const started = Date.now()
@@ -1068,11 +1083,19 @@ async function runHook(): Promise<void> {
   try { for await (const chunk of process.stdin) input += chunk } catch (err) { debugLog('hook.stdin', err); return }
   if (!input.trim()) return
   let event: Record<string, unknown>
-  try { event = JSON.parse(input) as Record<string, unknown> } catch (err) { debugLog('hook.parse', err, { bytes: input.length }); return }
+  try { event = JSON.parse(input) as Record<string, unknown> } catch (err) { debugLog('hook.parse', err, { bytes: input.length }); reportHookError('parse', err, {}); return }
   // Whatever happens, the tool call must go through: an exception here would
   // surface as a hook error in Claude Code and, worse, hide the cause.
+  // Every event the hook emits carries how long the hook had been running
+  // when it decided — process start included, which is what Claude Code waits for.
+  const telemetry = (e: TelemetryEvent) => sendTelemetry({ ...e, properties: { ...e.properties, hook_ms: Math.round(process.uptime() * 1000) } })
   let output: HookOutput
-  try { output = handleHookEvent(event) } catch (err) { debugLog('hook.handle', err, { event: event.hook_event_name, tool: event.tool_name }); return }
+  try { output = handleHookEvent(event, { telemetry }) }
+  catch (err) {
+    debugLog('hook.handle', err, { event: event.hook_event_name, tool: event.tool_name })
+    reportHookError('handle', err, event)
+    return
+  }
   if (output) console.log(JSON.stringify(output))
   debugTrace('hook.event', { event: event.hook_event_name, tool: event.tool_name, agent: typeof event.agent_type === 'string' ? event.agent_type : undefined, decision: output ? 'deny' : 'pass', ms: Date.now() - started })
 }
@@ -1465,6 +1488,9 @@ async function runDoctor(args: string[]): Promise<void> {
 
   const problems = checks.filter(c => c.status === 'fail').length
   const telemetry = isTelemetryEnabled()
+  // Which checks failed or warned — names from the fixed list above, never their details.
+  const names = (status: DoctorCheck['status']) => checks.filter(c => c.status === status).map(c => c.name.split(':')[0]).join(',') || undefined
+  sendTelemetry({ event: 'doctor', properties: { ok: problems === 0, problems, fail: names('fail'), warn: names('warn'), managed_settings: managedSettingsPresent() } })
 
   if (json) {
     console.log(JSON.stringify({ version: VERSION, ok: problems === 0, problems, telemetry, checks: checks.map(c => ({ name: c.name, status: c.status, summary: stripAnsi(c.summary), ...c.data })) }, null, 2))

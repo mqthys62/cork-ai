@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { POSTHOG_HOST, POSTHOG_PROJECT_TOKEN, capturePayload, contextBucket, costBucket, modelFamily, postCapture, tokenBucket } from '../../src/cli/telemetry.js'
+import { POSTHOG_HOST, POSTHOG_PROJECT_TOKEN, capturePayload, contextBucket, costBucket, errorClass, installChannel, managedSettingsPresent, modelFamily, postCapture, tokenBucket } from '../../src/cli/telemetry.js'
 
 afterEach(() => { vi.restoreAllMocks() })
 
@@ -44,6 +44,30 @@ describe('capturePayload', () => {
     expect('skip' in props.$set).toBe(false)
     expect(props.$set_once).toMatchObject({ first_seen: '2026-01-01T00:00:00Z', first_version: expect.any(String) })
     expect(props.runtime).toMatch(/^(node|bun)-\d+$/)
+    // the enterprise signal is a boolean, never the file's content
+    expect(props.$set.managed_settings).toEqual(expect.any(Boolean))
+  })
+})
+
+describe('what leaves the machine about errors and setup', () => {
+  it('errorClass : la classe et le code, jamais le message (qui peut citer un chemin)', () => {
+    const enoent = Object.assign(new Error('ENOENT: no such file, open /home/x/secret.ts'), { code: 'ENOENT' })
+    expect(errorClass(enoent)).toEqual({ error: 'Error', code: 'ENOENT' })
+    expect(errorClass(new TypeError('Cannot read /home/x'))).toEqual({ error: 'TypeError', code: undefined })
+    expect(errorClass('boom')).toEqual({ error: 'string' })
+    expect(JSON.stringify(errorClass(enoent))).not.toContain('secret')
+  })
+  it('installChannel : une valeur de la liste fixe, tout le reste devient manual', () => {
+    const before = process.env.CORK_AI_INSTALLER
+    try {
+      process.env.CORK_AI_INSTALLER = 'sh'; expect(installChannel()).toBe('sh')
+      process.env.CORK_AI_INSTALLER = 'ps1'; expect(installChannel()).toBe('ps1')
+      process.env.CORK_AI_INSTALLER = '/home/x/evil'; expect(installChannel()).toBe('manual')
+      delete process.env.CORK_AI_INSTALLER; expect(installChannel()).toBe('manual')
+    } finally { if (before === undefined) delete process.env.CORK_AI_INSTALLER; else process.env.CORK_AI_INSTALLER = before }
+  })
+  it('managedSettingsPresent : un booléen, sans lever', () => {
+    expect(typeof managedSettingsPresent()).toBe('boolean')
   })
 })
 

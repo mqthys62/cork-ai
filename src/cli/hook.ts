@@ -28,11 +28,11 @@ import { evaluateGuard, guardHookOutput } from './context-guard.js'
 import { eligibility, CODE_EXTS, TEXT_EXTS, BINARY_EXTS } from './file-eligibility.js'
 import { noteSessionSeen, readSessionsSeen, writeHeartbeat } from './heartbeat.js'
 import { outline } from './outline.js'
-import { LIVE_DIR, accumulateInSession, readActiveLiveSessions } from './persistent-stats.js'
+import { LIVE_DIR, accumulateInSession, readActiveLiveSessions, readGlobalStats } from './persistent-stats.js'
 import { agentClassOf, gate, recordCompression, recordEditAfter, recordProbationRead, recordRangeRead, recordReRead, type AgentClass, type PolicyScope } from './policy.js'
 import { isSkipped, markSkipped } from './skip-list.js'
 import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
-import { snapshotDue, type SnapshotReason } from './savings.js'
+import { lifetimeSavings, snapshotDue, type SnapshotReason } from './savings.js'
 import { agentTranscriptPath, lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile, transcriptSince } from './transcript-usage.js'
 import { writeFileAtomic, debugLog } from './fs-utils.js'
 
@@ -608,6 +608,20 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
   }
   writeDigest(digest, deps.now())
 
+  // What this session saved, valued over the life of its context (same basis
+  // as `gain`): the flushed bursts of this session plus whatever is still live.
+  let sessionNetUSD = 0
+  try {
+    const records = [...(readGlobalStats()?.sessions ?? []).filter(r => r.sessionId === sessionId), ...(live ? [live] : [])]
+    if (records.length > 0) {
+      const life = lifetimeSavings(records)
+      sessionNetUSD = life.measured > 0 ? life.lifetime - life.penalty - life.extraTurnPenalty : life.firstPass
+    }
+  } catch (err) { debugLog('hook.sessionSavings', err) }
+  // Share of the bill cork-ai took off: what was avoided over what would have been paid.
+  const wouldHavePaid = profile.costUSD + Math.max(0, sessionNetUSD)
+  const savedPctOfCost = wouldHavePaid > 0 ? Math.round((Math.max(0, sessionNetUSD) / wouldHavePaid) * 100) : 0
+
   deps.telemetry({
     event: 'session_digest',
     properties: {
@@ -626,6 +640,8 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
       edit_failures: digest.editFailures,
       guard_bands: guardBands.length,
       reason: digest.reason,
+      saved_usd: Math.round(sessionNetUSD * 100) / 100,
+      saved_pct_of_cost: savedPctOfCost,
     },
   })
   if (snapshotDue(deps.now())) deps.snapshot('session_end')

@@ -242,6 +242,10 @@ describe('SessionEnd', () => {
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({ event: 'session_digest', properties: { model: 'opus-5', turns: 1, avg_context: '<50k', compressions: 1, reason: 'exit', duration_min: 0 } })
     expect(events[0].properties.saved_tokens).toBeGreaterThan(1000)
+    // what the session saved, and the share of the bill it took off — a percentage, never the bill
+    expect(events[0].properties.saved_usd).toBeGreaterThan(0)
+    expect(events[0].properties.saved_pct_of_cost).toBeGreaterThan(0)
+    expect(events[0].properties.saved_pct_of_cost).toBeLessThanOrEqual(100)
     expect(JSON.stringify(events[0])).not.toContain(sessionId)
   })
 

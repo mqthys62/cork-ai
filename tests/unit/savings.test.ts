@@ -9,7 +9,7 @@ import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CONFIG_FILE, CORK_HOME, saveConfig } from '../../src/cli/config.js'
 import { STATS_FILE } from '../../src/cli/persistent-stats.js'
-import { buildSavingsSnapshot, snapshotDue, SNAPSHOT_INTERVAL_MS } from '../../src/cli/savings.js'
+import { buildSavingsSnapshot, projectsBucket, snapshotDue, SNAPSHOT_INTERVAL_MS } from '../../src/cli/savings.js'
 import { capturePayload } from '../../src/cli/telemetry.js'
 
 const now = new Date('2026-09-09T10:00:00Z')
@@ -32,6 +32,12 @@ afterEach(() => {
   fs.rmSync(projects, { recursive: true, force: true })
 })
 
+describe('projectsBucket', () => {
+  it('tranches fixes, jamais le nombre exact au-delà de 1', () => {
+    expect([0, 1, 2, 3, 4, 6, 7, 15, 16, 40].map(projectsBucket)).toEqual(['0', '1', '2-3', '2-3', '4-6', '4-6', '7-15', '7-15', '>15', '>15'])
+  })
+})
+
 describe('buildSavingsSnapshot', () => {
   it('agrège les gains réels et ne contient ni chemin, ni nom de projet, ni identifiant de session', () => {
     const e = buildSavingsSnapshot('gain', now)
@@ -39,7 +45,7 @@ describe('buildSavingsSnapshot', () => {
     expect(e.properties).toMatchObject({
       reason: 'gain', tracking_days: 39, sessions: 1, requests: 40, read_raw_tokens: 400_000, saved_tokens: 360_000, saved_pct: 90,
       rereads: 4, reread_tokens: 30_000, reread_rate_pct: 10, edit_failures: 1, top_model: 'opus-5', models: 2,
-      spend_30d: '<$1', turns_30d: 0, context_guard: true, hooks_installed: expect.any(Number),
+      spend_30d: '<$1', turns_30d: 0, context_guard: true, hooks_installed: expect.any(Number), projects_30d: expect.stringMatching(/^(0|1|2-3|4-6|7-15|>15)$/),
     })
     expect(e.properties.saved_usd_first_pass).toBeGreaterThan(0)
     expect(e.properties.net_usd).toBeDefined()

@@ -17,6 +17,7 @@
  */
 
 import { spawn } from 'child_process'
+import fs from 'fs'
 import path from 'path'
 import { installId, isTelemetryEnabled, loadConfig } from './config.js'
 import { readHeartbeat } from './heartbeat.js'
@@ -35,6 +36,8 @@ export type TelemetryEventName =
   | 'guard_notice'
   | 'session_digest'
   | 'savings_snapshot'
+  | 'hook_error'
+  | 'doctor'
 
 export type TelemetryValue = string | number | boolean | null | undefined
 
@@ -83,6 +86,39 @@ export function modelFamily(model?: string): string {
   return m ? `${m[1].toLowerCase()}-${m[2]}` : 'other'
 }
 
+/**
+ * Whether Claude Code's managed settings file exists — the file an IT team
+ * deploys to every workstation. Its presence (never its content) is the one
+ * signal that an install sits inside a company-managed Claude Code.
+ */
+export function managedSettingsPresent(): boolean {
+  const candidates = process.platform === 'win32'
+    ? [path.join(process.env.ProgramData ?? 'C:\\ProgramData', 'ClaudeCode', 'managed-settings.json')]
+    : process.platform === 'darwin'
+      ? ['/Library/Application Support/ClaudeCode/managed-settings.json']
+      : ['/etc/claude-code/managed-settings.json']
+  return candidates.some(f => { try { return fs.statSync(f).isFile() } catch { return false } })
+}
+
+/** How the binary got here, from a fixed list — the installers set `CORK_AI_INSTALLER`. */
+export function installChannel(): 'sh' | 'ps1' | 'manual' {
+  const v = process.env.CORK_AI_INSTALLER
+  return v === 'sh' || v === 'ps1' ? v : 'manual'
+}
+
+/**
+ * The class of an error and nothing else: `TypeError`, `SyntaxError`, plus
+ * Node's `code` (`ENOENT`, `EACCES`) when there is one. Never the message —
+ * a message can quote a path.
+ */
+export function errorClass(err: unknown): { error: string; code?: string } {
+  if (err instanceof Error) {
+    const code = (err as NodeJS.ErrnoException).code
+    return { error: err.name || 'Error', code: typeof code === 'string' ? code.slice(0, 24) : undefined }
+  }
+  return { error: typeof err }
+}
+
 /** `bun-1` for the standalone binary, `node-22` from npm. */
 export function runtimeLabel(): string {
   return process.versions.bun ? `bun-${process.versions.bun.split('.')[0]}` : `node-${process.versions.node.split('.')[0]}`
@@ -118,6 +154,7 @@ export function personProperties(): { set: Record<string, TelemetryValue>; setOn
       claude_version: readHeartbeat()?.claudeVersion ?? null,
       telemetry: cfg.telemetry === true,
       context_guard: cfg.contextGuard?.enabled !== false,
+      managed_settings: managedSettingsPresent(),
     },
     setOnce: { first_version: VERSION, first_seen: new Date().toISOString() },
   }

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.2] — 2026-09-09
+
+Second candidate. No behaviour change for the user: this release makes the telemetry answer the questions a maintainer — or a company evaluating the tool — actually asks. Everything below is opt-in like the rest, listed in `docs/TELEMETRY.md`, and carries no path, name or message.
+
+### Added
+- **Hook latency** — every event emitted from a hook carries `hook_ms`, the time Claude Code waited for cork-ai, process start included. "It does not slow Claude down" becomes a measured claim (p50 / p95) instead of a promise.
+- **`hook_error` event** — when a hook crashes (the tool call always goes through), the error's class and Node code are reported. Never the message: a message can quote a path.
+- **Savings per session** — `session_digest` now carries `saved_usd` (this session's outlines valued over the life of the context, the same basis as `gain`) and `saved_pct_of_cost`, the share of the bill cork-ai took off. The per-session number is what convinces; the lifetime total already existed.
+- **`doctor` event** — `ok`, number of problems, names of the failing and warning checks. Shows where setups break.
+- **Install context** — `install` carries the `channel` (`sh` / `ps1` installer or `manual`, set by the scripts through `CORK_AI_INSTALLER`), how many hooks were skipped for an old Claude Code, whether `CLAUDE_CONFIG_DIR` is set, and `managed_settings`: whether Claude Code's managed settings file exists on the machine — the one signal of a company-managed Claude Code. Its presence only; the file is never read. Also on the person profile and on `doctor`.
+- **Projects bucket** — the daily snapshot carries `projects_30d`, the number of distinct projects an install worked on over 30 days, as a bucket (`1`, `2-3`, `4-6`, `7-15`, `>15`). Breadth of use, never a name.
+
+### Changed
+- `docs/TELEMETRY.md` lists every new field; `tests/unit/telemetry.test.ts` asserts that an error report never contains the message and that the install channel is allowlisted.
+
 ## [1.0.0-rc.1] — 2026-09-08
 
 Release candidate for 1.0: three features measured on real transcripts, then stabilisation. Beta testers and the Windows checklist decide what becomes 1.0.0.

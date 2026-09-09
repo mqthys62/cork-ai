@@ -174,6 +174,16 @@ const pct = (num: number, den: number): number => (den > 0 ? Math.round((num / d
  * cannot identify a file or a project. What the user spends stays a bucket:
  * a bill is personal, a saving is a product metric.
  */
+/** How many distinct projects an install works on — a breadth signal, never a name. */
+export function projectsBucket(n: number): string {
+  if (n <= 0) return '0'
+  if (n === 1) return '1'
+  if (n <= 3) return '2-3'
+  if (n <= 6) return '4-6'
+  if (n <= 15) return '7-15'
+  return '>15'
+}
+
 export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Date()): TelemetryEvent {
   const stats = readGlobalStats()
   const live = readActiveLiveSessions()
@@ -234,6 +244,7 @@ export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Dat
       spend_30d: costBucket(spend.costUSD),
       turns_30d: ctx.turns,
       sessions_30d: ctx.sessions.length,
+      projects_30d: projectsBucket(new Set(ctx.sessions.map(s => s.project)).size),
       context_avg_30d: ctx.avgContextTokens,
       context_avg_30d_bucket: contextBucket(ctx.avgContextTokens),
       cache_read_share_pct_30d: pct(ctx.cacheReadCostUSD, ctx.costUSD),
@@ -254,6 +265,7 @@ export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Dat
       context_guard: guard,
       hooks_installed: hooks,
       telemetry: true,
+      projects_30d: projectsBucket(new Set(ctx.sessions.map(s => s.project)).size),
       lifetime_sessions: sessions,
       lifetime_saved_tokens: savedTokens,
       lifetime_net_usd: usd(net),
