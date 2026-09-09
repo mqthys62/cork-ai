@@ -1,5 +1,5 @@
 /** Single source of truth for the CLI version (kept in sync with package.json by the release checklist). */
-export const VERSION = '1.0.0-rc.2'
+export const VERSION = '1.0.0-rc.3'
 
 /** Semver order, pre-releases included: 1.0.0-rc.1 < 1.0.0-rc.2 < 1.0.0. */
 export function compareVersions(a: string, b: string): number {

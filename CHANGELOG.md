@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.3] — 2026-09-09
+
+Third candidate. One change: the update notice earns its place.
+
+### Changed
+
+- **Update notice** — visible (`!`) when a newer version exists on the install's channel, with the `cork-ai update` command spelled out. A stable install that is up to date but could try a release candidate gets a dim invitation with `cork-ai update --pre` instead, at most once every three days, so testers hear about a candidate without being nagged. The cache now holds the latest stable and the latest candidate, fetched in one request, and `cork-ai update` on the stable channel names the candidate too. Same switches as before to turn it off.
+
 ## [1.0.0-rc.2] — 2026-09-09
 
 Second candidate. No behaviour change for the user: this release makes the telemetry answer the questions a maintainer — or a company evaluating the tool — actually asks. Everything below is opt-in like the rest, listed in `docs/TELEMETRY.md`, and carries no path, name or message.
@@ -18,7 +26,7 @@ Second candidate. No behaviour change for the user: this release makes the telem
 - **Projects bucket** — the daily snapshot carries `projects_30d`, the number of distinct projects an install worked on over 30 days, as a bucket (`1`, `2-3`, `4-6`, `7-15`, `>15`). Breadth of use, never a name.
 
 - **Release channel** — `cork-ai update --pre` follows release candidates (and remembers it: `config set channel pre|stable`, `--stable` to go back); the installers do the same under `CORK_AI_PRERELEASE=1`. GitHub keeps `/releases/latest` clear of pre-releases, which is why a fresh install landed on 0.9.1 instead of the candidate.
-- **Update notice** — one line at the end of `gain`, `context`, `doctor`, `hooks`, `report` and `models`. Visible (`!`) when a newer version exists on the install's channel, with the `cork-ai update` command. A stable install that is up to date but could try a release candidate gets a dim invitation with `cork-ai update --pre` instead, at most once every three days. A detached child refreshes a small cache (`~/.cork-ai/update-check.json`, latest stable and latest candidate in one request) at most once a day; the commands themselves never wait for the network. `cork-ai update` on the stable channel names the candidate too. Off with `config set updateCheck false` or `CORK_AI_NO_UPDATE_CHECK=1`; never printed with `--json`, never by the hook.
+- **Update notice** — one dim line at the end of `gain`, `context`, `doctor`, `hooks`, `report` and `models` when a newer version exists on the install's channel. A detached child refreshes a small cache (`~/.cork-ai/update-check.json`) at most once a day; the commands themselves never wait for the network. Off with `config set updateCheck false` or `CORK_AI_NO_UPDATE_CHECK=1`; never printed with `--json`, never by the hook.
 
 ### Changed
 - `docs/TELEMETRY.md` lists every new field; `tests/unit/telemetry.test.ts` asserts that an error report never contains the message and that the install channel is allowlisted.
