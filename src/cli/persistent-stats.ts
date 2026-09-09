@@ -175,6 +175,11 @@ function loadStats(): GlobalStats {
   try {
     const data = fs.readFileSync(STATS_FILE, 'utf-8')
     const stats = JSON.parse(data) as GlobalStats
+    // A truncated or foreign file must not crash every command: shape check,
+    // the fallback below starts fresh (the unreadable file is left in place).
+    if (!stats || typeof stats !== 'object' || typeof stats.allTime !== 'object' || !stats.allTime) throw new Error('stats.json: not a stats file')
+    if (!Array.isArray(stats.sessions)) stats.sessions = []
+    stats.sessions = stats.sessions.filter(s => s && typeof s === 'object' && typeof s.sessionId === 'string')
     if (migrateStats(stats)) saveStats(stats)
     return stats
   } catch {
@@ -360,8 +365,8 @@ function listLiveFiles(): string[] {
   return files
 }
 
-/** Flushes every expired live session into history and deletes its file. */
-function flushExpiredLiveSessions(): void {
+/** Flushes every expired live session into history and deletes its file. Also called by `gain`, so the report never lags behind a burst that ended hours ago. */
+export function flushExpiredLiveSessions(): void {
   for (const file of listLiveFiles()) {
     const live = readLiveFile(file)
     // Not a live session (corrupt, or a shape we don't know): leave it alone.

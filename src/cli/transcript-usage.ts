@@ -525,7 +525,7 @@ export interface TurnUsage {
  * the whole conversation on every turn, so the next tool call will be billed
  * roughly `contextTokens` cache-read tokens again.
  */
-export function lastMainTurnUsage(transcriptPath: string | undefined, tailBytes = 512 * 1024): TurnUsage | undefined {
+export function lastMainTurnUsage(transcriptPath: string | undefined, tailBytes = 512 * 1024, own = false): TurnUsage | undefined {
   if (!transcriptPath) return undefined
   let lines: string[]
   try {
@@ -548,7 +548,7 @@ export function lastMainTurnUsage(transcriptPath: string | undefined, tailBytes 
     } catch {
       continue
     }
-    if (entry.type !== 'assistant' || entry.isSidechain) continue
+    if (entry.type !== 'assistant' || (entry.isSidechain && !own)) continue
     const usage = entry.message?.usage
     const model = entry.message?.model
     if (!usage || !model || !/^claude/i.test(model)) continue
@@ -577,7 +577,7 @@ const SINCE_MAX_BYTES = 8 * 1024 * 1024
  * transcript is append-only, so an offset is a stable "moment". Returns
  * undefined when it cannot tell (file gone, truncated, too much to read).
  */
-export function transcriptSince(transcriptPath: string | undefined, offset: number): TranscriptSince | undefined {
+export function transcriptSince(transcriptPath: string | undefined, offset: number, own = false): TranscriptSince | undefined {
   if (!transcriptPath || offset < 0) return undefined
   let text: string
   try {
@@ -603,7 +603,7 @@ export function transcriptSince(transcriptPath: string | undefined, offset: numb
     if (!line.includes('"assistant"')) continue
     let entry: TranscriptLine & { message?: { id?: string } }
     try { entry = JSON.parse(line) } catch { continue }
-    if (entry.type !== 'assistant' || entry.isSidechain) continue
+    if (entry.type !== 'assistant' || (entry.isSidechain && !own)) continue
     const id = entry.message?.id
     if (id && !seen.has(id)) { seen.add(id); out.turns += 1 }
   }
@@ -929,7 +929,18 @@ function computeReReadTurns(file: string): ReReadTurns {
 // Extracts the last REAL user prompt from the transcript (skipping user-role
 // entries that only carry tool_result blocks — those are agentic plumbing).
 // Used to avoid compressing a file the user explicitly asked about.
-export function lastUserPromptFromTranscript(transcriptPath?: string): string | undefined {
+/**
+ * A subagent's own transcript: `<session>/subagents/agent-<id>.jsonl` next to
+ * the main one. The hook payload of a subagent carries the *main* transcript,
+ * which says nothing about the agent's context size, compactions or prompt.
+ */
+export function agentTranscriptPath(transcriptPath: string | undefined, agentId: string | null | undefined): string | undefined {
+  if (!transcriptPath || !agentId || !/^[\w.-]+$/.test(agentId)) return undefined
+  const candidate = path.join(path.dirname(transcriptPath), path.basename(transcriptPath, '.jsonl'), 'subagents', `agent-${agentId}.jsonl`)
+  try { return fs.statSync(candidate).isFile() ? candidate : undefined } catch { return undefined }
+}
+
+export function lastUserPromptFromTranscript(transcriptPath?: string, own = false): string | undefined {
   if (!transcriptPath) return undefined
   try {
     const stat = fs.statSync(transcriptPath)
@@ -948,9 +959,16 @@ export function lastUserPromptFromTranscript(transcriptPath?: string): string | 
         const entry = JSON.parse(line) as {
           type?: string
           isSidechain?: boolean
+          isCompactSummary?: boolean
+          isMeta?: boolean
           message?: { role?: string; content?: unknown }
         }
-        if (entry.type !== 'user' || entry.isSidechain) continue
+        if (entry.type !== 'user' || (entry.isSidechain && !own)) continue
+        // A compaction summary is stored as a user turn and names every file
+        // of the working set: taking it for the prompt would serve them all
+        // raw until the user types again. Tool results are user turns too,
+        // but carry no text block, so they fall through on their own.
+        if (entry.isCompactSummary || entry.isMeta) continue
         const content = entry.message?.content
         let text = ''
         if (typeof content === 'string') {
@@ -962,6 +980,7 @@ export function lastUserPromptFromTranscript(transcriptPath?: string): string | 
             .map(b => b.text)
             .join('\n')
         }
+        if (/^This session is being continued from a previous conversation/.test(text.trimStart())) continue
         if (text.trim().length > 0) return text
       } catch { /* partial line at the tail cut — skip */ }
     }

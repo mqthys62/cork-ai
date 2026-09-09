@@ -26,6 +26,31 @@ Release candidate for 1.0: three features measured on real transcripts, then sta
 - SDK tests moved out of the default `npm test` (`npm run test:sdk`, still run in CI); unit and integration tests each get their own `CORK_AI_HOME`.
 - `docs/SDK.md`: the deprecated library is scheduled for removal in 1.1.0.
 
+### Audit (2026-09-09) — everything below came out of a full review of the candidate
+
+#### Added
+- **`PostToolUseFailure` hook** (Edit / MultiEdit / Write). Claude Code fires `PostToolUse` on success only, so the failed-edit detection — an Edit whose `old_string` came from an outline, the clearest sign the outline was not enough — could never trigger. The seventh hook reads the `error` field of the failure event, whitelists the file for good and counts the failure; a failed edit no longer counts as an edit (the file did not change). Installed only on Claude Code ≥ 2.1.119, where the event is documented; `hooks install` says when it skips it.
+- `cork-ai gain` shows **the last session cork-ai saw**, whatever it saw of it: outlines (live or finished), the SessionEnd digest, or just a heartbeat. It used to show the last *flushed compression burst* and, under it, the latest digest — two different sessions when the most recent one had no outline, or when its live file had expired without being flushed (that only happened on the next outline). Bursts of one session are summed; expired live files are flushed by `gain` itself; the session count is the number of distinct sessions.
+- `cork-ai update` verifies the SHA-256 of the download against the release's `checksums.txt`, so do both installers; `update` from a pre-release looks at the release list, since GitHub's `/releases/latest` hides pre-releases.
+- `cork-ai reset` accepts several flags at once (`--policy --skip-list`); `--stats` also clears the per-session read state.
+- Outline of a file longer than 2,000 lines says so (`2,431 lines (first 2000 outlined)`) and tells the model how to reach the rest; the Read tool would have truncated the raw view at the same point.
+- Live state files (`reads-*.json`, `guard-*.json`) are pruned after 7 days at SessionEnd.
+
+#### Fixed
+- **`~/.claude/settings.json` could be overwritten with `{}`** when it was unreadable (a BOM, a trailing comma, a half-written file): `hooks install`, `hooks remove` and `--set-autocompact` now refuse to touch a settings file they cannot parse, `doctor` reports it, and the file is written atomically. `CLAUDE_CONFIG_DIR` is honoured.
+- `hooks install` no longer renames the matcher of a hook group shared with third-party hooks (their hooks would have fired on tools they never asked for): cork-ai moves to its own group.
+- Parallel hooks (parallel tool calls, parallel subagents) lost each other's writes to the session read state: the file is merged on write, so six concurrent reads leave six entries, not one.
+- A key on probation (re-read rate > 35 %) could stay there forever: one read in ten is now compressed as a probe, so the rate can recover.
+- Content Claude Code would have truncated (Read beyond 2,000 lines, shell output beyond 30 KB) is never entered in the re-read cache; a compaction summary is never taken for the user's prompt; files above 4 MB, directories and `tool-results/` spills pass raw without being hashed.
+- Subagents read their own transcript (`subagents/agent-<id>.jsonl`) for context size, compaction and prompt detection, instead of the main conversation's.
+- PowerShell paths with backslashes (`Get-Content .\src\app.ts`) are parsed as one operand; `bat --line-range` is a range read; `~/` is expanded.
+- Windows: the installers download to a temporary file, verify, then move into place, and park a running `cork-ai.exe` aside first; `install.sh` under Git Bash appends `.exe`; `install.ps1` runs as one function so `irm | iex` cannot close the user's console on error.
+- Release workflow: pins bun 1.4.2, refuses a tag that does not match `src/cli/version.ts` and `package.json`, marks pre-release tags as such on GitHub; the adoption/stats workflows authenticate to the GitHub API; CI runs with read-only permissions.
+- Telemetry: the `command` event sends only names from a fixed allowlist (a typo or a path in argv was sent verbatim); unknown file extensions are sent as `other`; `docs/TELEMETRY.md` lists every property now sent, including the profile (`$set`) ones.
+- `config set` refuses a value it cannot parse (`telemetry flase` was saved as `false`, `everyNthToolUse abc` as `NaN`); accepts `on/off/yes/no/1/0` for booleans.
+- A truncated or foreign `stats.json` no longer crashes every command.
+- README: an unclosed code fence since 0.9.0 swallowed the installation section; `npx cork-ai` removed (the package is not on npm); Alpine removed from the supported list (glibc binaries only); the French and Spanish READMEs said 60–75 % / 60–90 % savings and, in Spanish, still described the 0.5 tool; `--help` matches the commands.
+
 ## [0.9.1] — 2026-09-08
 
 ### Fixed

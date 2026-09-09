@@ -126,8 +126,10 @@ cork-ai is tested against Claude Code **2.1.47 → 2.1.263** (`doctor` warns
 outside that range, using the `version` stamped on each transcript line).
 Windows without Git Bash needs ≥ 2.1.139 (exec-form hooks).
 
-Events: `PreToolUse` (Read, Bash, PowerShell), `PostToolUse` (Edit,
-MultiEdit, Write), `UserPromptSubmit`, `Stop`, `SessionEnd`.
+Events: `PreToolUse` (Read, Bash, PowerShell), `PostToolUse` and
+`PostToolUseFailure` (Edit, MultiEdit, Write — the latter only on Claude Code
+≥ 2.1.119, where it is documented; `PostToolUse` fires on success only),
+`UserPromptSubmit`, `Stop`, `SessionEnd`.
 
 Payload fields used, and nothing else:
 
@@ -137,7 +139,7 @@ Payload fields used, and nothing else:
 | `transcript_path` | live context size, compaction detection, Claude Code version |
 | `cwd` | resolving relative paths; `project` in the local digest only |
 | `hook_event_name`, `tool_name`, `tool_input` | the decision itself |
-| `tool_response` | failed-edit detection after an outline |
+| `error` (PostToolUseFailure) | failed-edit detection after an outline |
 | `permission_mode` | heartbeat / `doctor` (auto mode moves reads to Bash) |
 | `agent_type`, `agent_id` | agent class (main / readonly / editing), per-agent read state |
 | `model` | pricing tier |

@@ -49,6 +49,7 @@ case "$ARCH" in
 esac
 
 BINARY_NAME="cork-ai-${PLATFORM}-${ARCH_NAME}"
+[ "$PLATFORM" = "windows" ] && BINARY_NAME="${BINARY_NAME}.exe"
 info "Platform: ${PLATFORM}-${ARCH_NAME}"
 
 # ─── Find latest release ──────────────────────────────────────────────────────
@@ -77,16 +78,39 @@ ok "Latest: ${LATEST_TAG}"
 
 mkdir -p "$INSTALL_DIR"
 DEST="${INSTALL_DIR}/cork-ai"
+[ "$PLATFORM" = "windows" ] && DEST="${DEST}.exe"
+# Download next to the destination, then rename: a running binary is never
+# opened for writing (ETXTBSY), and an interrupted transfer never leaves a
+# truncated cork-ai behind for the hooks to exec on every tool call.
+TMP="${DEST}.new.$$"
+trap 'rm -f "$TMP"' EXIT
 
 printf "\n  Downloading ${BINARY_NAME}...\n"
 
 if command -v curl >/dev/null 2>&1; then
-  curl -fsSL --progress-bar -o "$DEST" "$DOWNLOAD_URL" || fail "Download failed: $DOWNLOAD_URL"
+  curl -fsSL --progress-bar -o "$TMP" "$DOWNLOAD_URL" || fail "Download failed: $DOWNLOAD_URL"
 else
-  wget -q --show-progress -O "$DEST" "$DOWNLOAD_URL" || fail "Download failed: $DOWNLOAD_URL"
+  wget -q --show-progress -O "$TMP" "$DOWNLOAD_URL" || fail "Download failed: $DOWNLOAD_URL"
 fi
 
-chmod +x "$DEST"
+# Integrity: the release ships sha256 checksums; verify when a tool is available.
+SUMS_URL="https://github.com/${REPO}/releases/download/${LATEST_TAG}/checksums.txt"
+EXPECTED="$(eval "$FETCH \"$SUMS_URL\"" 2>/dev/null | grep " ${BINARY_NAME}\$" | cut -d' ' -f1)"
+if [ -n "$EXPECTED" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then ACTUAL="$(sha256sum "$TMP" | cut -d' ' -f1)"
+  elif command -v shasum >/dev/null 2>&1; then ACTUAL="$(shasum -a 256 "$TMP" | cut -d' ' -f1)"
+  else ACTUAL=""; fi
+  if [ -n "$ACTUAL" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
+    fail "Checksum mismatch for ${BINARY_NAME} (expected ${EXPECTED}, got ${ACTUAL}). Not installed."
+  fi
+  [ -n "$ACTUAL" ] && ok "Checksum verified"
+else
+  warn "No checksum published for ${LATEST_TAG}; skipping verification"
+fi
+
+chmod +x "$TMP"
+mv -f "$TMP" "$DEST" || fail "Could not replace ${DEST}"
+trap - EXIT
 ok "Downloaded to ${DEST}"
 
 # ─── PATH setup ───────────────────────────────────────────────────────────────

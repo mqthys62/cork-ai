@@ -24,7 +24,7 @@ const DAYS = Number(process.env.DAYS ?? 30)
 const PUSH = process.argv.includes('--push')
 
 async function githubDownloads() {
-  const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=50`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'cork-ai-adoption' } })
+  const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=50`, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'cork-ai-adoption', ...(process.env.GITHUB_TOKEN ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` } : {}) } })
   if (!res.ok) throw new Error(`GitHub ${res.status}`)
   const releases = await res.json()
   return releases.map(r => ({

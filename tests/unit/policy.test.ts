@@ -6,6 +6,7 @@ import {
   MIN_SAVED_TOKENS,
   POLICY_FILE,
   PROBATION_MIN_SAMPLES,
+  PROBE_EVERY,
   agentClassOf,
   gate,
   policyKey,
@@ -13,6 +14,7 @@ import {
   policySummary,
   recordCompression,
   recordEditAfter,
+  recordProbationRead,
   recordRangeRead,
   recordReRead,
   reReadProbability,
@@ -80,17 +82,30 @@ describe('gate — valeur attendue', () => {
     expect(d.expectedValueUSD).toBeCloseTo(gain - loss, 6)
   })
 
-  it('une extension qui re-lit trop passe en probation, sondée 1 fois sur 10', () => {
-    for (let i = 0; i < PROBATION_MIN_SAMPLES; i++) recordCompression('/p/a.tsx')
-    for (let i = 0; i < 8; i++) recordReRead('/p/a.tsx')
+  it('une extension qui re-lit trop passe en probation, sondée 1 fois sur 10 des lectures gérées', () => {
+    for (let i = 0; i < PROBATION_MIN_SAMPLES + 3; i++) recordCompression('/p/a.tsx')   // 13 : pas un multiple de 10
+    for (let i = 0; i < 9; i++) recordReRead('/p/a.tsx')
+    const read = () => { const d = gate({ ...base, filePath: '/p/b.tsx', contextTokens: 10_000 }); if (d.probation) recordProbationRead('/p/b.tsx'); return d }
+    const first = read()
+    expect(first.probation).toBe(true)
+    expect(first.compress).toBe(true)          // probationReads 0 → probe
+    expect(first.reason).toBe('probation probe')
+    for (let i = 0; i < PROBE_EVERY - 1; i++) {
+      const d = read()
+      expect(d.compress).toBe(false)
+      expect(d.reason).toContain('probation')
+    }
+    expect(read().reason).toBe('probation probe')   // 10e lecture gérée → nouvelle sonde
+  })
+
+  it('la probation se lève quand les sondes ne sont plus relues', () => {
+    for (let i = 0; i < PROBATION_MIN_SAMPLES; i++) { recordCompression('/p/a.tsx'); recordReRead('/p/a.tsx') }
+    expect(gate({ ...base, filePath: '/p/b.tsx', contextTokens: 10_000 }).probation).toBe(true)
+    for (let i = 0; i < 40; i++) recordCompression('/p/a.tsx')   // 40 sondes, aucune relecture → p ≈ (2+10)/(4+50) = 0.22
     const d = gate({ ...base, filePath: '/p/b.tsx', contextTokens: 10_000 })
-    expect(d.probation).toBe(true)
-    expect(d.compress).toBe(true) // 10 % 10 === 0 → probe
-    expect(d.reason).toBe('probation probe')
-    recordCompression('/p/a.tsx')
-    const next = gate({ ...base, filePath: '/p/b.tsx', contextTokens: 10_000 })
-    expect(next.compress).toBe(false)
-    expect(next.reason).toContain('probation')
+    expect(d.probation).toBe(false)
+    expect(d.compress).toBe(true)
+    expect(d.reason).toContain('expected value')
   })
 
   it('le prix du modèle entre dans le calcul (Opus 5 vs Sonnet 5 à contexte égal)', () => {

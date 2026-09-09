@@ -62,16 +62,16 @@ Build from source:
 
 ```bash
 git clone https://github.com/mqthys62/cork-ai.git
-cd cork-ai && npm install && npm run build
+cd cork-ai && npm install && npm run build:sdk    # → dist/sdk/index.{js,mjs,d.ts}
 ```
 
-Then import from `./dist`:
+Then import from `./dist/sdk`:
 
 ### Option A — Wrap your Anthropic client (recommended)
 
 ```typescript
 import Anthropic from '@anthropic-ai/sdk'
-import { wrapClient } from './dist/index.js'
+import { wrapClient } from './dist/sdk/index.js'
 
 const client = wrapClient(new Anthropic(), {
   maxContextTokens: 150_000,
@@ -113,7 +113,7 @@ wrapClient(new Anthropic(), {
 ### Option B — Compress manually
 
 ```typescript
-import { CtxForge } from './dist/index.js'
+import { CtxForge } from './dist/sdk/index.js'
 
 const forge = new CtxForge({ maxContextTokens: 150_000 })
 
@@ -145,15 +145,15 @@ Tune `maxContextTokens` to match your actual context window and when you want co
 wrapClient(client, { maxContextTokens: 50_000 })
 ```
 
-> **Note**: This adaptive logic only applies to the library API. The Claude Code hook
-> compresses **every** file read unconditionally — it doesn't know the conversation size,
-> and that's intentional: every token saved on a Read is a token saved regardless of
-> where you are in the session.
+> **Note**: This adaptive logic only applies to the library API. The Claude Code hook has
+> its own, different gate: it reads the live context size from the transcript and compresses a
+> file only when the expected saving beats the expected cost of a re-read
+> (see [METHODOLOGY.md §2](METHODOLOGY.md)).
 
 ### Session cache — carry context across sessions
 
 ```typescript
-import { SessionCache } from './dist/index.js'
+import { SessionCache } from './dist/sdk/index.js'
 
 const cache = new SessionCache()
 
@@ -180,7 +180,7 @@ When working on TypeScript: strict types, no any, .js imports.
 <!-- @cork-ai end -->
 `
 
-import { DynamicSystemPrompt } from './dist/index.js'
+import { DynamicSystemPrompt } from './dist/sdk/index.js'
 const dsp = new DynamicSystemPrompt()
 const optimized = dsp.build(systemPrompt, recentMessages)
 ```

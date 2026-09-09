@@ -25,6 +25,17 @@ describe('config', () => {
     expect(CONFIG_KEYS['contextGuard.bands'].parse('150k, 300k')).toEqual([150_000, 300_000])
     expect(CONFIG_KEYS['telemetry'].parse('true')).toBe(true)
     expect(CONFIG_KEYS['contextGuard.everyNthToolUse'].parse('7')).toBe(7)
+    // audit 1.0.0-rc.1: garbage is refused (undefined), not saved as false / NaN / []
+    expect(CONFIG_KEYS['telemetry'].parse('yes')).toBe(true)
+    expect(CONFIG_KEYS['telemetry'].parse('off')).toBe(false)
+    expect(CONFIG_KEYS['telemetry'].parse('flase')).toBeUndefined()
+    expect(CONFIG_KEYS['contextGuard.everyNthToolUse'].parse('abc')).toBeUndefined()
+    expect(CONFIG_KEYS['contextGuard.everyNthToolUse'].parse('0')).toBeUndefined()
+    expect(CONFIG_KEYS['contextGuard.everyNthToolUse'].parse('2.5')).toBeUndefined()
+    expect(CONFIG_KEYS['contextGuard.bands'].parse('nope')).toBeUndefined()
+    expect(CONFIG_KEYS['contextGuard.bands'].parse('300k,150k,300k')).toEqual([150_000, 300_000])
+    expect(CONFIG_KEYS['measuredAmplification'].parse('-1')).toBeUndefined()
+    expect(CONFIG_KEYS['measuredAmplification'].parse('12.5')).toBe(12.5)
   })
   it('updateConfig fusionne, installId est stable et aléatoire', () => {
     saveConfig({ telemetry: true })

@@ -16,10 +16,12 @@
  *   cork-ai report --forecast     Annual projection
  *   cork-ai report --json         Export all data as JSON
  *   cork-ai hooks install         Add cork-ai hooks to Claude Code settings
- *   cork-ai hooks remove          Remove cork-ai hooks from Claude Code settings
+ *   cork-ai hooks remove          Remove cork-ai hooks from Claude Code settings (alias: uninstall)
  *   cork-ai hooks status          Show hook installation status
  *   cork-ai doctor                Diagnose the install and hook coverage
- *   cork-ai context               Context-size cost report; --set-autocompact <tokens>
+ *   cork-ai context               Context-size cost report; --days, --ceiling, --set-autocompact <tokens>, guard on|off
+ *   cork-ai calibrate [model]     Measure token factors against the count_tokens API
+ *   cork-ai telemetry on|off      Opt-in anonymous telemetry; status, preview
  *   cork-ai statusline            Status-line segment
  *   cork-ai hook                  Internal: handle Claude Code hook events (stdin/stdout)
  *   cork-ai reset [--all]         Clear stats / learned policy / skip-list / caches
@@ -29,6 +31,7 @@
  *   cork-ai --help                Show help
  */
 
+import crypto from 'crypto'
 import fs from 'fs'
 import { spawnSync } from 'child_process'
 import os from 'os'
@@ -38,7 +41,9 @@ import {
   readGlobalStats,
   resetGlobalStats,
   readLiveSession,
+  flushExpiredLiveSessions,
   clearLiveSession,
+  type SessionRecord,
   getStatsByProject,
   getStatsByPeriod,
   getStatsByModel,
@@ -48,16 +53,16 @@ import {
 } from './persistent-stats.js'
 import { inputPriceForModel } from '../pricing/index.js'
 import { scanAllTranscripts, contextReport, listTranscriptFiles } from './transcript-usage.js'
-import { DIGEST_DIR, DIGEST_MAX_AGE_DAYS, latestDigest, listDigests, type SessionDigest } from './digests.js'
+import { DIGEST_DIR, DIGEST_MAX_AGE_DAYS, listDigests, type SessionDigest } from './digests.js'
 import { DEBUG_LOG_FILE, debugEnabled, debugLog, debugTrace } from './fs-utils.js'
 import { lifetimeSavings, reReadPenalty, buildSavingsSnapshot, runSendSnapshot, snapshotDue, snapshotInputs } from './savings.js'
-import { CLAUDE_SETTINGS, CORK_HOOKS, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE, CLAUDE_CODE_MIN, CLAUDE_CODE_TESTED_MAX, loadClaudeSettings, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, corkHookEntry, ensureHookGroup, renderHookEntry, isShellFormOnWindows, type ClaudeSettings } from './claude-settings.js'
+import { CLAUDE_SETTINGS, CORK_HOOKS, applicableCorkHooks, CORK_HOOK_FALLBACK, CLAUDE_EXEC_FORM_SINCE, CLAUDE_CODE_MIN, CLAUDE_CODE_TESTED_MAX, ClaudeSettingsUnreadable, loadClaudeSettings, loadClaudeSettingsOrEmpty, saveClaudeSettings, isCorkCmd, isCorkHookInstalled, installedCorkHooks, corkHookEntry, ensureHookGroup, renderHookEntry, isShellFormOnWindows, type ClaudeSettings } from './claude-settings.js'
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
 import { handleHookEvent, type HookOutput } from './hook.js'
 import { VERSION, compareVersions } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
-import { readHeartbeat } from './heartbeat.js'
+import { readHeartbeat, readSessionsSeen } from './heartbeat.js'
 import { sendTelemetry, runSendTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST } from './telemetry.js'
 import {
   CALIBRATION_FILE,
@@ -124,11 +129,11 @@ ${C.bold('Quick start:')}
   cork-ai doctor            Check that everything is wired and being called
 
 ${C.bold('Stats:')}
-  cork-ai gain              Current session + all-time savings
-  cork-ai gain --all        All-time totals only
+  cork-ai gain              Live session, or the digest of the last finished one
+  cork-ai gain --all        All-time totals: real spend, context block, hook liveness
   cork-ai gain --sessions   Last 10 finished sessions: turns, context, cost, saving at 200k (--sessions 30, --json)
   cork-ai gain --history    All recorded sessions
-  cork-ai models            Per-model usage, frequency & cost breakdown
+  cork-ai gain --models     Per-model usage, frequency & cost breakdown (alias: cork-ai models)
 
 ${C.bold('Enterprise report:')}
   cork-ai report            Full report (trends + projects + forecast)
@@ -142,10 +147,11 @@ ${C.bold('Enterprise report:')}
 
 ${C.bold('Claude Code integration:')}
   cork-ai hooks install     Install/upgrade the hooks (Read + Bash reads, edits, context guard)
-  cork-ai hooks remove      Remove cork-ai hooks
+  cork-ai hooks remove      Remove cork-ai hooks (alias: hooks uninstall)
   cork-ai hooks status      Show hook configuration
   cork-ai doctor [--json]   Check the install: binary, hooks, self-test, coverage of recent sessions
   cork-ai context [--json]  Where the money goes: context size per turn, what auto-compaction would save
+                            (--days 60 for the window, --ceiling 150k for the replayed auto-compaction)
   cork-ai context --set-autocompact 200k   Set Claude Code's autoCompactWindow
   cork-ai context guard [on|off]           Toggle the live context notices
   cork-ai statusline        Status-line segment (reads Claude Code's status JSON on stdin)
@@ -158,7 +164,7 @@ ${C.bold('Maintenance:')}
   cork-ai update            Replace the binary with the latest release (--check to only look)
   cork-ai config            List settings · config get|set|unset <key> [value]
   cork-ai reset             Clear stats (--policy, --skip-list, --spend-cache, --digests, --all)
-  cork-ai telemetry on|off  Anonymous usage stats, opt-in (docs/TELEMETRY.md)
+  cork-ai telemetry on|off  Anonymous usage stats, opt-in (docs/TELEMETRY.md); telemetry status
   cork-ai telemetry preview Show exactly what the daily snapshot would send
   cork-ai --version         Show version
 
@@ -170,79 +176,127 @@ function showVersion(): void { console.log(`cork-ai v${VERSION}`) }
 
 // ─── gain ─────────────────────────────────────────────────────────────────────
 
+/**
+ * The compression record of one Claude Code session. `stats.sessions` holds
+ * one record per *burst* (a live file is flushed after 2h without an outline,
+ * and a later outline in the same session opens a new one), so a long session
+ * with a lunch break has two: they are summed here.
+ */
+function sessionRecordFor(sessions: SessionRecord[], sessionId: string): SessionRecord | undefined {
+  const parts = sessions.filter(s => s.sessionId === sessionId)
+  if (parts.length === 0) return undefined
+  if (parts.length === 1) return parts[0]
+  const merged: SessionRecord = { ...parts[0], byModule: {}, byModel: undefined, measured: undefined }
+  merged.requests = 0; merged.originalTokens = 0; merged.compressedTokens = 0; merged.savedTokens = 0; merged.estimatedCostSaved = 0
+  merged.reReads = 0; merged.reReadTokensServed = 0; merged.editFailuresAfterCompression = 0
+  for (const p of parts) {
+    if (p.startedAt < merged.startedAt) merged.startedAt = p.startedAt
+    if (p.endedAt > merged.endedAt) merged.endedAt = p.endedAt
+    merged.requests += p.requests; merged.originalTokens += p.originalTokens; merged.compressedTokens += p.compressedTokens
+    merged.savedTokens += p.savedTokens; merged.estimatedCostSaved += p.estimatedCostSaved
+    merged.reReads! += p.reReads ?? 0; merged.reReadTokensServed! += p.reReadTokensServed ?? 0; merged.editFailuresAfterCompression! += p.editFailuresAfterCompression ?? 0
+    for (const [k, v] of Object.entries(p.byModule)) merged.byModule[k] = (merged.byModule[k] ?? 0) + v
+  }
+  merged.savingsPercent = merged.originalTokens > 0 ? (merged.savedTokens / merged.originalTokens) * 100 : 0
+  return merged
+}
+
+/**
+ * The last Claude Code session cork-ai saw anything of, whatever it saw: an
+ * outline (live file or flushed record), a SessionEnd digest, or just a hook
+ * event (heartbeat, sessions-seen). Before 1.0, `gain` showed the last
+ * *flushed compression burst* and, under it, the latest digest — two different
+ * sessions when the most recent one had no outline, or when its live file had
+ * expired but not been flushed yet (that only happens on the next outline).
+ */
+function lastTrackedSession(sessions: SessionRecord[], digests: SessionDigest[]): { sessionId: string; at: string } | undefined {
+  let best: { sessionId: string; at: string } | undefined
+  const consider = (sessionId: string | undefined, at: string | undefined) => {
+    if (!sessionId || !at) return
+    if (!best || at > best.at) best = { sessionId, at }
+  }
+  for (const s of sessions) consider(s.sessionId, s.endedAt)
+  for (const d of digests) consider(d.sessionId, d.endedAt)
+  for (const [id, at] of Object.entries(readSessionsSeen())) consider(id, at)
+  const beat = readHeartbeat()
+  consider(beat?.sessionId, beat?.at)
+  return best
+}
+
+function printSessionRecord(title: string, rec: SessionRecord): void {
+  const pct = rec.originalTokens > 0 ? (rec.savedTokens / rec.originalTokens) * 100 : 0
+  console.log(`\n${C.bold(title)}`)
+  console.log(divider())
+  console.log(`  ${C.dim('Date')}        ${fmtDate(rec.startedAt)}${rec.endedAt > rec.startedAt ? C.dim(` → ${fmtDate(rec.endedAt)}`) : ''}`)
+  if (rec.projectPath) console.log(`  ${C.dim('Project')}     ${C.cyan(path.basename(rec.projectPath))}`)
+  const models = Object.keys(rec.byModel ?? {})
+  if (models.length > 0) console.log(`  ${C.dim('Model')}       ${C.cyan(models.join(', '))}`)
+  console.log(`  ${C.dim('Requests')}    ${fmt(rec.requests)}`)
+  console.log()
+  console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(rec.originalTokens))}`)
+  console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(rec.compressedTokens))}`)
+  console.log(`  ${C.dim('Saved')}       ${C.green(fmt(rec.savedTokens))} tokens`)
+  console.log()
+  console.log(`  ${C.bold('Savings')}     ${C.green(bar(pct))}`)
+  console.log(`  ${C.bold('Cost saved')}  ${C.green(fmtUsd(rec.estimatedCostSaved))} USD`)
+  if (rec.reReads) {
+    console.log(`  ${C.yellow('Re-reads')}    ${rec.reReads} file${rec.reReads > 1 ? 's' : ''} re-read after compression (${fmtTokens(rec.reReadTokensServed ?? 0)} tokens served raw — cost deducted)`)
+  }
+  if (rec.editFailuresAfterCompression) {
+    console.log(`  ${C.yellow('Edit fails')}  ${rec.editFailuresAfterCompression} edit${rec.editFailuresAfterCompression > 1 ? 's' : ''} failed on compressed-only files (auto-whitelisted)`)
+  }
+  console.log()
+  const sorted = Object.entries(rec.byModule).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a)
+  if (sorted.length > 0) {
+    console.log(`  ${C.dim('By module:')}`)
+    for (const [name, saved] of sorted) {
+      const modPct = rec.originalTokens > 0 ? (saved / rec.originalTokens) * 100 : 0
+      console.log(`    ${name.padEnd(24)} ${C.green(fmt(saved).padStart(8))} tokens  (${fmtPct(modPct)})`)
+    }
+    console.log()
+  }
+}
+
 function showLastSession(): void {
+  // A burst that ended hours ago is flushed only by the next outline. Do it
+  // now, so the record below is the most recent one and not the one before.
+  flushExpiredLiveSessions()
   const live = readLiveSession()
   const stats = readGlobalStats()
+  const digests = listDigests()
 
   const hasHistory = stats && stats.allTime.totalRequests > 0
-  const hasCompletedSessions = stats && stats.sessions.length > 0
+  const last = live ? undefined : lastTrackedSession(stats?.sessions ?? [], digests)
 
-  if (!live && !hasHistory) {
+  if (!live && !hasHistory && !last) {
     console.log(`\n${C.yellow('No sessions recorded yet.')}\n`)
     console.log(`Run ${C.cyan('cork-ai hooks install')} to start tracking automatically.`)
     console.log(`Stats file: ${C.dim(STATS_FILE)}\n`)
     return
   }
 
-  // ── Section 1: current session (or last completed session) ──
+  // ── Section 1: current session (an outline in the last 2h) ──
   if (live) {
-    const pct = live.originalTokens > 0 ? (live.savedTokens / live.originalTokens) * 100 : 0
-    console.log(`\n${C.bold('cork-ai — Current Session')}`)
-    console.log(divider())
-    console.log(`  ${C.dim('Started')}    ${fmtDate(live.startedAt)}`)
-    if (live.projectPath) console.log(`  ${C.dim('Project')}      ${C.cyan(path.basename(live.projectPath))}`)
-    const liveModels = Object.keys(live.byModel ?? {})
-    if (liveModels.length > 0) {
-      console.log(`  ${C.dim('Model')}        ${C.cyan(liveModels.join(', '))}`)
-    }
-    console.log(`  ${C.dim('Requests')}    ${C.bold(fmt(live.requests))}`)
-    console.log()
-    console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(live.originalTokens))}`)
-    console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(live.compressedTokens))}`)
-    console.log(`  ${C.dim('Saved')}  ${C.green(fmt(live.savedTokens))} tokens`)
-    console.log()
-    console.log(`  ${C.bold('Savings')}   ${C.green(bar(pct))}`)
-    console.log(`  ${C.bold('Cost saved')} ${C.green(fmtUsd(live.estimatedCostSaved))} USD`)
-    if (live.reReads) {
-      console.log(`  ${C.yellow('Re-reads')}   ${live.reReads} file${live.reReads > 1 ? 's' : ''} re-read after compression (${fmtTokens(live.reReadTokensServed ?? 0)} tokens served raw — cost deducted)`)
-    }
-    if (live.editFailuresAfterCompression) {
-      console.log(`  ${C.yellow('Edit fails')} ${live.editFailuresAfterCompression} edit${live.editFailuresAfterCompression > 1 ? 's' : ''} failed on compressed-only files (auto-whitelisted)`)
-    }
-    console.log()
-
-    if (Object.keys(live.byModule).length > 0) {
-      console.log(`  ${C.dim('By module:')}`)
-      const sorted = Object.entries(live.byModule).filter(([, v]) => v > 0).sort(([, a], [, b]) => b - a)
-      for (const [name, saved] of sorted) {
-        const modPct = live.originalTokens > 0 ? (saved / live.originalTokens) * 100 : 0
-        console.log(`    ${name.padEnd(24)} ${C.green(fmt(saved).padStart(8))} tokens  (${fmtPct(modPct)})`)
-      }
+    printSessionRecord('cork-ai — Current Session', {
+      sessionId: live.sessionId, projectPath: live.projectPath, startedAt: live.startedAt, endedAt: live.lastActivityAt,
+      requests: live.requests, originalTokens: live.originalTokens, compressedTokens: live.compressedTokens, savedTokens: live.savedTokens,
+      savingsPercent: 0, estimatedCostSaved: live.estimatedCostSaved, byModule: live.byModule, byModel: live.byModel,
+      reReads: live.reReads, reReadTokensServed: live.reReadTokensServed, editFailuresAfterCompression: live.editFailuresAfterCompression,
+    })
+  } else if (last) {
+    // ── Section 1: the last session cork-ai saw, whatever it saw of it ──
+    const rec = sessionRecordFor(stats?.sessions ?? [], last.sessionId)
+    const digest = digests.find(d => d.sessionId === last.sessionId)
+    if (rec) {
+      printSessionRecord('cork-ai — Last Session', rec)
+    } else {
+      console.log(`\n${C.bold('cork-ai — Last Session')} ${C.dim(`(${fmtDate(last.at)}${digest?.project ? ' · ' + digest.project : ''})`)}`)
+      console.log(divider())
+      console.log(`  ${C.dim('No outline in this session: every read was served raw (small files, files being edited, or the gate found compression not worth it).')}`)
       console.log()
     }
-  } else if (hasCompletedSessions) {
-    // No live session → show last completed session
-    const last = stats!.sessions[stats!.sessions.length - 1]
-    const pct = last.originalTokens > 0 ? (last.savedTokens / last.originalTokens) * 100 : 0
-    console.log(`\n${C.bold('cork-ai — Last Session')}`)
-    console.log(divider())
-    console.log(`  ${C.dim('Date')}        ${fmtDate(last.startedAt)}`)
-    if (last.projectPath) console.log(`  ${C.dim('Project')}     ${C.cyan(path.basename(last.projectPath))}`)
-    console.log(`  ${C.dim('Requests')}    ${fmt(last.requests)}`)
-    console.log()
-    console.log(`  ${C.dim('Tokens in')}   ${C.cyan(fmt(last.originalTokens))}`)
-    console.log(`  ${C.dim('Tokens out')}  ${C.green(fmt(last.compressedTokens))}`)
-    console.log(`  ${C.dim('Saved')}  ${C.green(fmt(last.savedTokens))} tokens`)
-    console.log()
-    console.log(`  ${C.bold('Économies')}   ${C.green(bar(pct))}`)
-    console.log(`  ${C.bold('Cost saved')} ${C.green(fmtUsd(last.estimatedCostSaved))} USD`)
-    console.log()
-  }
-
-  // ── Section 1b: the last finished session's digest (SessionEnd hook) ──
-  if (!live) {
-    const digest = latestDigest()
     if (digest) printDigest(digest)
+    else if (rec) console.log(`  ${C.dim('No digest yet: Claude Code has not fired SessionEnd for this session (still open, or killed).')}\n`)
   }
 
   // ── Section 2: global totals (live session included if active) ──
@@ -253,7 +307,8 @@ function showLastSession(): void {
     const totalSaved = stats.allTime.totalSavedTokens + liveSaved
     const totalCost  = stats.allTime.estimatedCostSaved + liveCost
     const totalReqs  = stats.allTime.totalRequests + liveReqs
-    const sessionCnt = stats.sessions.length + (live ? 1 : 0)
+    // Distinct Claude Code sessions: a record is a burst, a session may have several.
+    const sessionCnt = new Set(stats.sessions.map(s => s.sessionId)).size + (live && !stats.sessions.some(s => s.sessionId === live.sessionId) ? 1 : 0)
 
     console.log(divider())
     console.log(
@@ -278,7 +333,7 @@ function fmtDuration(min: number | undefined): string {
 /** One finished session, as the SessionEnd hook saw it. */
 function printDigest(d: SessionDigest): void {
   const saving200k = d.costUSD > 0 ? Math.round(((d.costUSD - d.cappedCost200kUSD) / d.costUSD) * 100) : 0
-  console.log(`${C.bold('cork-ai — Last Finished Session')} ${C.dim(`(${fmtDate(d.endedAt)}${d.project ? ' · ' + d.project : ''}${d.reason ? ' · ' + d.reason : ''})`)}`)
+  console.log(`${C.bold('cork-ai — Session Digest')} ${C.dim(`(ended ${fmtDate(d.endedAt)}${d.project ? ' · ' + d.project : ''}${d.reason ? ' · ' + d.reason : ''})`)}`)
   console.log(divider())
   console.log(`  ${C.dim('Turns')}       ${fmt(d.turns)}   ${C.dim('Duration')} ${fmtDuration(d.durationMin)}   ${C.dim('Model')} ${C.cyan(d.model ?? '?')}${d.permissionMode ? C.dim(` · ${d.permissionMode} mode`) : ''}`)
   console.log(`  ${C.dim('Context')}     avg ${fmtTokens(d.avgContextTokens)} · max ${fmtTokens(d.maxContextTokens)} tokens   ${C.dim('Compactions')} ${d.compactions}`)
@@ -366,7 +421,7 @@ function showAllTime(): void {
     console.log(`    ${C.dim('Lifetime in context')}  ${C.green(fmtUsdLong(life.lifetime))} USD`)
     console.log(`    ${C.dim('Re-read penalty')}      ${C.yellow(`-${fmtUsdLong(penalty)}`)} USD ${C.dim(`(${fmt(stats?.allTime.reReads ?? 0)} re-reads · ${fmtTokens(stats?.allTime.reReadTokensServed ?? 0)} raw)`)}`)
     if (life.extraTurns > 0) {
-      console.log(`    ${C.dim('Re-read extra turns')}  ${C.yellow(`-${fmtUsdLong(life.extraTurnPenalty)}`)} USD ${C.dim(`(${fmt(life.extraTurns)} turns that only existed to re-read a compressed file, at their real cost)`)}`)
+      console.log(`    ${C.dim('Re-read extra turns')}  ${C.yellow(`-${fmtUsdLong(life.extraTurnPenalty)}`)} USD ${C.dim(`(${fmt(life.extraTurns)} turns that only existed to re-read an outlined file, at their real cost)`)}`)
     }
     const net = life.lifetime - penalty - life.extraTurnPenalty
     console.log(`    ${C.bold('Net')}                  ${(net >= 0 ? C.green : C.red)(fmtUsdLong(net))} USD`)
@@ -816,15 +871,47 @@ function resolveHookBinary(): string {
   return ''  // fallback: CORK_HOOK_FALLBACK, resolved through PATH
 }
 
+/**
+ * Settings for a command that will write them back. An unreadable file stops
+ * the command: writing `{}` over it would erase the user's permissions, model,
+ * env and every other hook.
+ */
+function loadClaudeSettingsForWrite(): ClaudeSettings {
+  try { return loadClaudeSettings() }
+  catch (err) {
+    if (err instanceof ClaudeSettingsUnreadable) {
+      console.error(`\n${C.red('✖')}  ${C.dim(err.file)} exists but is not valid JSON, so cork-ai will not touch it.`)
+      console.error(`   ${C.dim(err.message.split(': ').slice(1).join(': '))}`)
+      console.error(`   Fix the file (or let Claude Code rewrite it), then re-run.\n`)
+      process.exit(1)
+    }
+    throw err
+  }
+}
+
+/**
+ * The Claude Code version this machine runs, as far as cork-ai can tell: the
+ * last hook event's heartbeat, else the newest transcript. Undefined before
+ * the first session (fresh install).
+ */
+function knownClaudeVersion(): string | undefined {
+  const beat = readHeartbeat()
+  if (beat?.claudeVersion) return beat.claudeVersion
+  try { return coverage(14).find(r => r.claudeVersion)?.claudeVersion } catch { return undefined }
+}
+
 async function hooksInstall(): Promise<void> {
-  const settings = loadClaudeSettings()
+  const settings = loadClaudeSettingsForWrite()
 
   // Use the absolute binary path so the hook works
   // even if ~/.local/bin is not in Claude Code's PATH (Mac / Electron)
   const binaryPath = resolveHookBinary()
   const entry = corkHookEntry(binaryPath)
 
-  const changed = CORK_HOOKS.map(spec => ({ spec, changed: ensureHookGroup(settings, spec, entry) })).filter(x => x.changed)
+  const claudeVersion = knownClaudeVersion()
+  const specs = applicableCorkHooks(claudeVersion)
+  const skipped = CORK_HOOKS.filter(h => !specs.includes(h))
+  const changed = specs.map(spec => ({ spec, changed: ensureHookGroup(settings, spec, entry) })).filter(x => x.changed)
 
   // The guard is on by default once installed; keep any explicit user choice.
   const cfg = loadConfig()
@@ -842,6 +929,7 @@ async function hooksInstall(): Promise<void> {
     console.log(`   ${spec.event}${spec.matcher ? ` (${spec.matcher})` : ''} → ${C.cyan(CLAUDE_SETTINGS)}`)
   }
   if (binaryPath) console.log(`   Binary: ${C.dim(binaryPath)}${entry.args ? C.dim(' (exec form, no shell — needs Claude Code ≥ ' + CLAUDE_EXEC_FORM_SINCE + ')') : ''}`)
+  for (const h of skipped) console.log(`   ${C.yellow('skipped')} ${h.event}${h.matcher ? ` (${h.matcher})` : ''} — needs Claude Code ≥ ${h.since}, this machine runs ${claudeVersion}. Re-run after updating Claude Code.`)
   console.log()
   console.log(`   ${C.dim('Read / Bash:')} whole-file reads (Read tool, cat, …) get a numbered outline when it pays off.`)
   console.log(`   ${C.dim('Context guard:')} a notice at 150k / 300k / 500k / 750k tokens of context — the cost that matters.`)
@@ -850,7 +938,7 @@ async function hooksInstall(): Promise<void> {
 
   if (cfg.telemetry === undefined) await askTelemetryConsent()
   await askAutoCompact(settings)
-  sendTelemetry({ event: 'install', properties: { hooks: changed.length, upgrade: changed.length < CORK_HOOKS.length, autocompact: loadClaudeSettings().autoCompactWindow ?? null } })
+  sendTelemetry({ event: 'install', properties: { hooks: changed.length, upgrade: changed.length < specs.length, autocompact: loadClaudeSettingsOrEmpty().autoCompactWindow ?? null } })
   sendSnapshotDetached('install', true)
 
   console.log(`   Restart Claude Code for the hooks to take effect.`)
@@ -916,7 +1004,7 @@ async function askAutoCompact(settings: ClaudeSettings): Promise<void> {
   }
   updateConfig({ autoCompactAnswered: true })
   if (answer) {
-    const fresh = loadClaudeSettings()
+    const fresh = loadClaudeSettingsForWrite()
     fresh.autoCompactWindow = 200_000
     saveClaudeSettings(fresh)
     console.log(`   ${C.green('✔')}  autoCompactWindow = 200k in ${C.dim(CLAUDE_SETTINGS)} ${C.dim('(/autocompact auto in Claude Code restores the default)')}`)
@@ -927,7 +1015,7 @@ async function askAutoCompact(settings: ClaudeSettings): Promise<void> {
 }
 
 function hooksRemove(): void {
-  const settings = loadClaudeSettings()
+  const settings = loadClaudeSettingsForWrite()
   if (!isCorkHookInstalled(settings)) {
     console.log(`\n${C.yellow('cork-ai hook not found in settings.')}\n`); return
   }
@@ -935,10 +1023,12 @@ function hooksRemove(): void {
   for (const eventName of Object.keys(settings.hooks ?? {})) {
     const groups = settings.hooks?.[eventName] ?? []
     for (const group of groups) {
-      group.hooks = group.hooks.filter(h => !isCorkCmd(h))
+      if (Array.isArray(group.hooks)) group.hooks = group.hooks.filter(h => !isCorkCmd(h))
     }
     if (settings.hooks) {
-      const kept = groups.filter(g => g.hooks.length > 0)
+      // Keep anything that is not an emptied group of ours: other people's
+      // groups, even malformed ones, are theirs to manage.
+      const kept = groups.filter(g => !Array.isArray(g.hooks) || g.hooks.length > 0)
       if (kept.length > 0) settings.hooks[eventName] = kept
       else delete settings.hooks[eventName]
     }
@@ -950,14 +1040,14 @@ function hooksRemove(): void {
 }
 
 function hooksStatus(): void {
-  const settings = loadClaudeSettings()
+  const settings = loadClaudeSettingsOrEmpty()
   const installed = isCorkHookInstalled(settings)
   console.log()
   console.log(`  cork-ai hooks: ${installed ? C.green('● installed') : C.yellow('○ not installed')}`)
   console.log(`  Settings file: ${C.dim(CLAUDE_SETTINGS)}`)
   if (installed) {
     let missing = 0
-    for (const h of installedCorkHooks(settings)) {
+    for (const h of installedCorkHooks(settings, knownClaudeVersion())) {
       const label = `${h.event}${h.matcher ? ` (${h.matcher})` : ''}`
       if (h.present) console.log(`  ${C.green('●')} ${label.padEnd(36)} ${C.dim(h.command ?? '')}`)
       else { console.log(`  ${C.yellow('○')} ${label.padEnd(36)} ${C.yellow('missing')}`); missing++ }
@@ -1000,7 +1090,7 @@ function setAutoCompactWindow(tokens: number): void {
     console.error(`\n${C.yellow('autoCompactWindow must be between 100k and 1M tokens.')}\n`)
     process.exit(1)
   }
-  const settings = loadClaudeSettings()
+  const settings = loadClaudeSettingsForWrite()
   const before = settings.autoCompactWindow
   if (before === tokens) {
     console.log(`\n${C.green('✔')}  autoCompactWindow is already ${C.cyan(fmtTokens(tokens))} tokens in ${C.dim(CLAUDE_SETTINGS)} — nothing to do.\n`)
@@ -1029,7 +1119,7 @@ function showContext(args: string[]): void {
   const ceilings = [...new Set([150_000, 200_000, 300_000, ceiling])].sort((a, b) => a - b)
   const since = new Date(Date.now() - days * 86_400_000)
   const report = contextReport({ since, ceilings, minTurns: 20 })
-  const settings = loadClaudeSettings()
+  const settings = loadClaudeSettingsOrEmpty()
 
   if (args.includes('--json')) {
     console.log(JSON.stringify({
@@ -1213,8 +1303,12 @@ async function runDoctor(args: string[]): Promise<void> {
   }
 
   // 2. Hooks in settings
-  const settings = loadClaudeSettings()
-  const hooks = installedCorkHooks(settings)
+  let settings: ClaudeSettings = {}
+  try { settings = loadClaudeSettings() }
+  catch (err) {
+    push({ name: 'settings', status: 'fail', summary: `${CLAUDE_SETTINGS} is not valid JSON — Claude Code ignores it, and so does cork-ai`, lines: [C.dim(err instanceof Error ? err.message : String(err))], data: { file: CLAUDE_SETTINGS } })
+  }
+  const hooks = installedCorkHooks(settings, knownClaudeVersion())
   const missing = hooks.filter(h => !h.present)
   const stale = hooks.filter(h => h.present && h.command && h.command !== CORK_HOOK_FALLBACK && binary && !h.command.includes(binary))
   // Windows: the shell form runs through PowerShell when Git Bash is absent
@@ -1237,7 +1331,7 @@ async function runDoctor(args: string[]): Promise<void> {
   for (const spec of CORK_HOOKS.filter(h => h.event === 'PreToolUse')) {
     const others = (settings.hooks?.PreToolUse ?? [])
       .filter(g => g.matcher === spec.matcher)
-      .flatMap(g => g.hooks.filter(h => !isCorkCmd(h)).map(h => renderHookEntry(h)))
+      .flatMap(g => (g.hooks ?? []).filter(h => !isCorkCmd(h)).map(h => renderHookEntry(h)))
     if (others.length > 0) {
       push({
         name: `neighbours:${spec.matcher}`, status: 'warn',
@@ -1631,6 +1725,10 @@ function runConfig(args: string[]): void {
       process.exit(1)
     }
     const value = meta.parse(rest.join(' '))
+    if (value === undefined) {
+      console.error(`\n${C.red('✖')}  ${JSON.stringify(rest.join(' '))} is not a valid value for ${key}: ${meta.description}\n`)
+      process.exit(1)
+    }
     saveConfig(setConfigValue(cfg, key, value))
     console.log(`\n${C.green('✔')}  ${key} = ${JSON.stringify(value)}\n`)
     return
@@ -1648,11 +1746,14 @@ function runConfig(args: string[]): void {
 // ─── reset ────────────────────────────────────────────────────────────────────
 
 function runReset(args: string[]): void {
-  const what = args[0] ?? '--stats'
+  const flags = args.filter(a => a.startsWith('--'))
   const targets: Record<string, { label: string; run: () => void }> = {
     '--stats': {
-      label: 'stats.json and live sessions',
-      run: () => { resetGlobalStats(); clearLiveSession() },
+      label: 'stats.json, live sessions and per-session read state',
+      run: () => {
+        resetGlobalStats(); clearLiveSession()
+        try { for (const f of fs.readdirSync(LIVE_DIR)) if (/^(reads|guard)-.*\.json$/.test(f)) { try { fs.unlinkSync(path.join(LIVE_DIR, f)) } catch { /* next */ } } } catch { /* no live dir */ }
+      },
     },
     '--policy': {
       label: 'learned re-read rates (policy.json)',
@@ -1671,9 +1772,10 @@ function runReset(args: string[]): void {
       run: () => { try { fs.rmSync(path.join(CORK_HOME, 'digests'), { recursive: true, force: true }) } catch { /* none */ } },
     },
   }
-  const chosen = what === '--all' ? Object.keys(targets) : [what]
+  // `reset --policy --skip-list` clears both; no flag means --stats.
+  const chosen = flags.includes('--all') ? Object.keys(targets) : flags.length > 0 ? [...new Set(flags)] : ['--stats']
   const unknown = chosen.filter(c => !targets[c])
-  if (unknown.length > 0) {
+  if (unknown.length > 0 || args.some(a => !a.startsWith('--'))) {
     console.error(`\nUsage: cork-ai reset [--stats|--policy|--skip-list|--spend-cache|--digests|--all]\n`)
     process.exit(1)
   }
@@ -1689,27 +1791,53 @@ function runReset(args: string[]): void {
 
 const RELEASE_REPO = 'mqthys62/cork-ai'
 
-interface LatestRelease { tag: string; version: string; assets: Record<string, string> }
+interface LatestRelease { tag: string; version: string; prerelease: boolean; assets: Record<string, string> }
+interface GitHubRelease { tag_name?: string; prerelease?: boolean; draft?: boolean; assets?: Array<{ name: string; browser_download_url: string }> }
 
-async function fetchLatestRelease(timeoutMs = 6_000): Promise<LatestRelease | undefined> {
+function toRelease(json: GitHubRelease): LatestRelease | undefined {
+  if (!json.tag_name) return undefined
+  const assets: Record<string, string> = {}
+  for (const a of json.assets ?? []) assets[a.name] = a.browser_download_url
+  return { tag: json.tag_name, version: json.tag_name.replace(/^v/, ''), prerelease: json.prerelease === true, assets }
+}
+
+/**
+ * The newest release this install should move to. A stable install follows
+ * `/releases/latest`, which GitHub keeps clear of pre-releases. An install that
+ * *is* a pre-release (1.0.0-rc.1) also considers pre-releases, so rc.2 reaches
+ * the testers who run rc.1 — and so does the final 1.0.0, which is newer.
+ */
+async function fetchLatestRelease(timeoutMs = 6_000, installed = VERSION): Promise<LatestRelease | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const headers = { Accept: 'application/vnd.github+json', 'User-Agent': `cork-ai/${VERSION}` }
   try {
-    const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`, {
-      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `cork-ai/${VERSION}` },
-      signal: controller.signal,
-    })
+    if (installed.includes('-')) {
+      const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=20`, { headers, signal: controller.signal })
+      if (!res.ok) return undefined
+      const list = (await res.json() as GitHubRelease[]).filter(r => !r.draft).map(toRelease).filter((r): r is LatestRelease => r !== undefined)
+      return list.sort((a, b) => compareVersions(b.version, a.version))[0]
+    }
+    const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`, { headers, signal: controller.signal })
     if (!res.ok) return undefined
-    const json = await res.json() as { tag_name?: string; assets?: Array<{ name: string; browser_download_url: string }> }
-    if (!json.tag_name) return undefined
-    const assets: Record<string, string> = {}
-    for (const a of json.assets ?? []) assets[a.name] = a.browser_download_url
-    return { tag: json.tag_name, version: json.tag_name.replace(/^v/, ''), assets }
+    return toRelease(await res.json() as GitHubRelease)
   } catch {
     return undefined
   } finally {
     clearTimeout(timer)
   }
+}
+
+/** sha256 published as `checksums.txt` next to the assets; undefined when the release has none. */
+async function fetchExpectedChecksum(latest: LatestRelease, asset: string): Promise<string | undefined> {
+  const url = latest.assets['checksums.txt']
+  if (!url) return undefined
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': `cork-ai/${VERSION}` } })
+    if (!res.ok) return undefined
+    const line = (await res.text()).split('\n').find(l => l.trim().endsWith(` ${asset}`) || l.trim().endsWith(`*${asset}`))
+    return line?.trim().split(/\s+/)[0]?.toLowerCase()
+  } catch { return undefined }
 }
 
 function releaseAssetName(): string {
@@ -1745,9 +1873,27 @@ async function runUpdate(args: string[]): Promise<void> {
   const res = await fetch(url, { headers: { 'User-Agent': `cork-ai/${VERSION}` } })
   if (!res.ok) { console.error(`  ${C.red('✗')}  Download failed (${res.status}).\n`); process.exit(1) }
   const bytes = Buffer.from(await res.arrayBuffer())
+  const expected = await fetchExpectedChecksum(latest, asset)
+  if (expected) {
+    const actual = crypto.createHash('sha256').update(bytes).digest('hex')
+    if (actual !== expected) { console.error(`  ${C.red('✗')}  Checksum mismatch for ${asset} (expected ${expected.slice(0, 12)}…, got ${actual.slice(0, 12)}…). Not installed.\n`); process.exit(1) }
+    console.log(`  ${C.green('✔')}  Checksum verified`)
+  } else {
+    console.log(`  ${C.yellow('!')}  No checksum published for ${latest.tag}; skipping verification`)
+  }
   const tmp = `${binary}.new`
-  fs.writeFileSync(tmp, bytes)
-  try { fs.chmodSync(tmp, 0o755) } catch { /* windows */ }
+  try {
+    fs.writeFileSync(tmp, bytes)
+    try { fs.chmodSync(tmp, 0o755) } catch { /* windows */ }
+  } catch (err) {
+    try { fs.unlinkSync(tmp) } catch { /* nothing written */ }
+    const code = (err as NodeJS.ErrnoException).code
+    console.error(`  ${C.red('✗')}  Cannot write next to ${C.dim(binary)} (${code ?? 'error'}).` +
+      (code === 'EACCES' || code === 'EPERM' ? ` The binary is not yours to replace — re-run with ${C.cyan('sudo cork-ai update')}, or reinstall into ~/.local/bin:` : ''))
+    if (code === 'EACCES' || code === 'EPERM') console.error(`     ${C.cyan(`curl -fsSL https://raw.githubusercontent.com/${RELEASE_REPO}/main/scripts/install.sh | sh`)}`)
+    console.error()
+    process.exit(1)
+  }
 
   if (process.platform === 'win32') {
     // A running .exe cannot be replaced on Windows: leave the new file next to it.
@@ -1755,20 +1901,37 @@ async function runUpdate(args: string[]): Promise<void> {
     console.log(`     ${C.cyan(`Move-Item -Force "${tmp}" "${binary}"`)}   ${C.dim('(PowerShell)')}\n`)
     return
   }
-  fs.renameSync(tmp, binary)  // atomic on POSIX; the running process keeps its old inode
+  try { fs.renameSync(tmp, binary) }  // atomic on POSIX; the running process keeps its old inode
+  catch (err) {
+    try { fs.unlinkSync(tmp) } catch { /* leave nothing behind */ }
+    console.error(`  ${C.red('✗')}  Could not replace ${C.dim(binary)}: ${err instanceof Error ? err.message : String(err)}\n`)
+    process.exit(1)
+  }
   console.log(`  ${C.green('✔')}  Updated to ${latest.tag}. Hooks keep pointing at ${C.dim(binary)} — nothing else to do.`)
   console.log(`  ${C.dim('Run cork-ai doctor to confirm.')}\n`)
 }
 
 // ─── Main dispatcher ──────────────────────────────────────────────────────────
 
+const KNOWN_COMMANDS = new Set(['hooks', 'gain', 'context', 'doctor', 'statusline', 'calibrate', 'models', 'report', 'update', 'config', 'reset', 'telemetry', '--help', '-h', '--version', '-v'])
+const KNOWN_SUBCOMMANDS = new Set([
+  'install', 'uninstall', 'remove', 'status', 'on', 'off', 'guard', 'list', 'get', 'set', 'unset', 'preview',
+  '--all', '--history', '--sessions', '--models', '--json', '--days', '--ceiling', '--set-autocompact', '--check',
+  '--stats', '--policy', '--skip-list', '--spend-cache', '--digests', '--daily', '--weekly', '--monthly', '--projects', '--forecast', '--force',
+])
+
 ;(async () => {
   const args = process.argv.slice(2)
   const cmd = args[0]
   const sub = args[1]
 
-  // Usage telemetry for the CLI itself (never for the hook, which is called per tool use).
-  if (cmd && cmd !== 'hook' && cmd !== '__send-telemetry') sendTelemetry({ event: 'command', properties: { command: cmd, sub: sub?.startsWith('--') || ['install', 'remove', 'status', 'on', 'off', 'guard', 'list', 'get', 'set'].includes(sub ?? '') ? sub : undefined } })
+  // Usage telemetry for the CLI itself (never for the hook, which is called per
+  // tool use, nor for the detached children). Only known names are sent: a
+  // typo or a path typed as a command must not travel.
+  if (cmd && KNOWN_COMMANDS.has(cmd)) {
+    const flag = sub?.startsWith('--') ? sub.split('=')[0] : sub
+    sendTelemetry({ event: 'command', properties: { command: cmd, sub: flag && KNOWN_SUBCOMMANDS.has(flag) ? flag : undefined } })
+  }
 
   if (!cmd || cmd === '--help' || cmd === '-h') {
     showHelp()

@@ -25,6 +25,7 @@ function run(...args: string[]): { stdout: string; status: number | null } {
       HOME: home,
       USERPROFILE: home,
       CORK_AI_HOME: path.join(home, '.cork-ai'),
+      CLAUDE_CONFIG_DIR: path.join(home, '.claude'),
       CLAUDE_PROJECTS_DIR: path.join(home, 'none'),
     },
     input: '',
@@ -56,7 +57,7 @@ afterEach(() => {
 })
 
 describe('hooks install', () => {
-  it('installe les 6 hooks sans toucher au reste des settings, et est idempotent', () => {
+  it('installe les 7 hooks sans toucher au reste des settings, et est idempotent', () => {
     fs.writeFileSync(settingsFile, JSON.stringify({
       permissions: { allow: ['Bash(ls:*)'] },
       hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: 'node /x/other.js' }] }] },
@@ -65,7 +66,7 @@ describe('hooks install', () => {
     expect(first.status).toBe(0)
     const hooks = corkHooks()
     expect(hooks.map(h => `${h.event}:${h.matcher ?? '*'}`).sort()).toEqual([
-      'PostToolUse:Edit|MultiEdit|Write', 'PreToolUse:Bash|PowerShell', 'PreToolUse:Read', 'SessionEnd:*', 'Stop:*', 'UserPromptSubmit:*',
+      'PostToolUse:Edit|MultiEdit|Write', 'PostToolUseFailure:Edit|MultiEdit|Write', 'PreToolUse:Bash|PowerShell', 'PreToolUse:Read', 'SessionEnd:*', 'Stop:*', 'UserPromptSubmit:*',
     ])
     // the foreign hook on Read is kept, cork-ai appended to the same group
     const readGroup = settings().hooks!.PreToolUse.find(g => g.matcher === 'Read')!
@@ -74,7 +75,7 @@ describe('hooks install', () => {
 
     const second = run('hooks', 'install')
     expect(second.stdout).toContain('already installed')
-    expect(corkHooks()).toHaveLength(6)
+    expect(corkHooks()).toHaveLength(7)
 
     // the guard is switched on by default
     const cfg = JSON.parse(fs.readFileSync(path.join(home, '.cork-ai', 'config.json'), 'utf-8'))
@@ -90,7 +91,7 @@ describe('hooks install', () => {
     }))
     run('hooks', 'install')
     const hooks = corkHooks()
-    expect(hooks).toHaveLength(6)
+    expect(hooks).toHaveLength(7)
     expect(hooks.find(h => h.event === 'PostToolUse')?.matcher).toBe('Edit|MultiEdit|Write')
     // no duplicate group for PostToolUse
     expect(settings().hooks!.PostToolUse).toHaveLength(1)
@@ -106,7 +107,7 @@ describe('hooks remove', () => {
       hooks: { Stop: [{ hooks: [{ type: 'command', command: '/x/notify.sh' }] }] },
     }))
     run('hooks', 'install')
-    expect(corkHooks()).toHaveLength(6)
+    expect(corkHooks()).toHaveLength(7)
     run('hooks', 'remove')
     expect(corkHooks()).toHaveLength(0)
     const s = settings()

@@ -29,14 +29,14 @@ npm run typecheck
 npm run build
 ```
 
-All tests must pass before opening a PR (`npm test`, ~380 tests).
+All tests must pass before opening a PR (`npm test`, ~245 tests; the deprecated SDK has its own ~190 behind `npm run test:sdk`, run in CI but not on every change).
 
 ## Project structure
 
 ```
 src/
 ├── cli/                     # The tool — compiled to a standalone binary (bun build --compile)
-│   ├── index.ts             # Commands: gain, context, doctor, hooks, config, update, reset, telemetry, statusline
+│   ├── index.ts             # Commands: gain, context, doctor, hooks, calibrate, models, report, config, update, reset, telemetry, statusline
 │   ├── hook.ts              # The hook, as one pure function: handleHookEvent(event) → stdout JSON | undefined
 │   ├── bash-read.ts         # Which shell commands are reads (cat, sed -n, …) or edits (sed -i, redirections)
 │   ├── outline.ts           # The numbered outline served instead of a whole file
@@ -44,7 +44,10 @@ src/
 │   ├── context-guard.ts     # Band notices (150k / 300k / 500k / 750k) to the user and the model
 │   ├── transcript-usage.ts  # Everything read from ~/.claude/projects transcripts (spend, context, re-reads)
 │   ├── persistent-stats.ts  # ~/.cork-ai/stats.json and live sessions
-│   ├── config.ts · telemetry.ts · heartbeat.ts · skip-list.ts · file-eligibility.ts · version.ts
+│   ├── digests.ts           # Per-session digest written at SessionEnd (~/.cork-ai/digests)
+│   ├── savings.ts           # Lifetime valuation of savings, the daily savings_snapshot
+│   ├── claude-settings.ts   # ~/.claude/settings.json: the hooks cork-ai installs, autoCompactWindow
+│   ├── config.ts · telemetry.ts · heartbeat.ts · skip-list.ts · file-eligibility.ts · fs-utils.ts · version.ts
 ├── pricing/                 # Single source of truth for model pricing (4 billing tiers)
 ├── core/tokenizer.ts        # Calibrated token estimates
 ├── types/                   # Shared types
@@ -55,7 +58,7 @@ The CLI imports only Node.js built-ins and local files — no npm dependencies. 
 
 ## Working on the hook
 
-All hook logic is in `src/cli/hook.ts` and is unit-tested in `tests/unit/hook.test.ts` by calling `handleHookEvent()` directly with a synthetic payload, a temp file and a fake transcript. Add a test for every new decision path. The I/O shell (`runHook` in `index.ts`) stays three lines.
+All hook logic is in `src/cli/hook.ts` and is unit-tested in `tests/unit/hook.test.ts` by calling `handleHookEvent()` directly with a synthetic payload, a temp file and a fake transcript. Add a test for every new decision path. The I/O shell (`runHook` in `index.ts`) only reads stdin, parses, calls it, prints, and swallows every error — a hook must never fail a tool call.
 
 Persistent state always goes through `CORK_AI_HOME` (vitest isolates it in a temp dir). Never write a test that touches the real `~/.cork-ai`.
 

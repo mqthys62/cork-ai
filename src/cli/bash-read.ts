@@ -13,6 +13,7 @@
  */
 
 import fs from 'fs'
+import os from 'os'
 import path from 'path'
 
 export interface BashRead {
@@ -68,12 +69,20 @@ function parsePowerShellRead(tool: string, args: string[], cwd: string): BashRea
     operands.push(a)
   }
   if (operands.length !== 1 || /[*?]/.test(operands[0])) return undefined
-  const file = resolveFile(operands[0], cwd)
+  // PowerShell accepts both separators; node's posix `path` only knows `/`.
+  const operand = process.platform === 'win32' ? operands[0] : operands[0].replace(/\\/g, '/')
+  const file = resolveFile(operand, cwd)
   return file ? { kind: range ? 'range' : 'full', file, tool } : undefined
 }
 
 /** Shell words, honouring single/double quotes (no escapes beyond that). */
-export function splitWords(command: string): string[] | undefined {
+/**
+ * Splits a simple command into words. The escape character is the shell's:
+ * `\` under bash, the backtick under PowerShell — where `\` is the path
+ * separator (`Get-Content C:\src\app.ts`, `.\app.ts`) and must survive.
+ */
+export function splitWords(command: string, shell: ShellKind = 'bash'): string[] | undefined {
+  const escape = shell === 'powershell' ? '`' : '\\'
   const words: string[] = []
   let current = ''
   let quote: '"' | "'" | null = null
@@ -86,7 +95,7 @@ export function splitWords(command: string): string[] | undefined {
       continue
     }
     if (ch === '"' || ch === "'") { quote = ch; hasWord = true; continue }
-    if (ch === '\\' && i + 1 < command.length) { current += command[++i]; hasWord = true; continue }
+    if (ch === escape && i + 1 < command.length) { current += command[++i]; hasWord = true; continue }
     if (/\s/.test(ch)) {
       if (hasWord) { words.push(current); current = ''; hasWord = false }
       continue
@@ -101,7 +110,7 @@ export function splitWords(command: string): string[] | undefined {
 
 function resolveFile(operand: string, cwd: string): string | undefined {
   if (!operand || operand.startsWith('-')) return undefined
-  const expanded = operand.startsWith('~/') ? path.join(process.env.HOME ?? '', operand.slice(2)) : operand
+  const expanded = /^~[\/\\]/.test(operand) ? path.join(os.homedir(), operand.slice(2)) : operand
   const abs = path.isAbsolute(expanded) ? expanded : path.resolve(cwd, expanded)
   try {
     if (!fs.statSync(abs).isFile()) return undefined
@@ -121,7 +130,7 @@ export function parseBashRead(command: string, cwd: string, shell: ShellKind = '
   const trimmed = command.trim()
   if (!trimmed || COMPOUND_RE.test(trimmed)) return undefined
 
-  let words = splitWords(trimmed)
+  let words = splitWords(trimmed, shell)
   if (!words || words.length < 2) return undefined
 
   // `rtk proxy cat file` — RTK's escape hatch is a plain read.
@@ -145,7 +154,10 @@ export function parseBashRead(command: string, cwd: string, shell: ShellKind = '
     if (operands.length !== 1 || operands[0] === '-') return undefined
     if (tool === 'cat' && !flags.every(f => CAT_FLAG_RE.test(f))) return undefined
     const file = resolveFile(operands[0], cwd)
-    return file ? { kind: 'full', file, tool } : undefined
+    if (!file) return undefined
+    // `bat --line-range=10:20 file` / `bat -r 10:20 file` print a region: a range read, not a whole one.
+    if (tool === 'bat' && (flags.some(f => /^--line-range/.test(f) || /^-r/.test(f)) || args.includes('-r'))) return { kind: 'range', file, tool }
+    return { kind: 'full', file, tool }
   }
 
   if (RANGE_READ_TOOLS.has(tool)) {

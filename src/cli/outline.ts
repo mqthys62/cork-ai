@@ -92,15 +92,25 @@ function fmtLine(n: number, width: number, text: string, max = 140): string {
   return `L${String(n).padStart(width)}  ${t}`
 }
 
-function hint(filePath: string, lines: number): string {
+/**
+ * "971 lines", or "12,400 lines (first 2000 outlined)" when the outline only
+ * saw the slice Claude Code's `Read` would have returned — the model must know
+ * the file goes on past the last entry.
+ */
+function describeLength(lines: number, total?: number): string {
+  return total && total > lines ? `${total} lines (first ${lines} outlined)` : `${lines} lines`
+}
+
+function hint(filePath: string, lines: number, total?: number): string {
+  const beyond = total && total > lines ? ` Lines ${lines + 1}–${total} are not in this outline: read them with offset/limit.` : ''
   return [
-    `${OUTLINE_MARKER} To view a region: Read with offset=<line> limit=<n>, or \`sed -n '<a>,<b>p' ${filePath}\`.`,
-    `${OUTLINE_MARKER} Re-reading the whole file serves it raw (${lines} lines). Edit with an exact old_string only after viewing that region.`,
+    `${OUTLINE_MARKER} To view a region: Read with offset=<line> limit=<n>, or \`sed -n '<a>,<b>p' ${filePath}\`.${beyond}`,
+    `${OUTLINE_MARKER} Re-reading the whole file serves it raw (${describeLength(lines, total)}). Edit with an exact old_string only after viewing that region.`,
   ].join('\n')
 }
 
 /** Code files: imports folded, declarations with line numbers. */
-export function outlineCode(content: string, filePath: string): OutlineResult {
+export function outlineCode(content: string, filePath: string, totalLines?: number): OutlineResult {
   const ext = path.extname(filePath).toLowerCase()
   const lines = content.split(/\r?\n/)
   const width = String(lines.length).length
@@ -169,16 +179,16 @@ export function outlineCode(content: string, filePath: string): OutlineResult {
     entries++
   }
 
-  const header = `${OUTLINE_MARKER} ${path.basename(filePath)} — ${lines.length} lines → outline (${entries} entries)`
+  const header = `${OUTLINE_MARKER} ${path.basename(filePath)} — ${describeLength(lines.length, totalLines)} → outline (${entries} entries)`
   const imports = importCount > 0
     ? `L${String(firstImport).padStart(width)}–${lastImport}  ${importCount} import line${importCount > 1 ? 's' : ''}`
     : ''
   const body = [imports, ...out].filter((l, i, arr) => !(l === '' && (i === 0 || arr[i - 1] === ''))).join('\n')
-  return { text: `${header}\n${hint(filePath, lines.length)}\n\n${body}`.trimEnd(), entries, lines: lines.length }
+  return { text: `${header}\n${hint(filePath, lines.length, totalLines)}\n\n${body}`.trimEnd(), entries, lines: lines.length }
 }
 
 /** Markdown and prose: headings with line numbers, plus the opening lines. */
-export function outlineText(content: string, filePath: string): OutlineResult {
+export function outlineText(content: string, filePath: string, totalLines?: number): OutlineResult {
   const lines = content.split(/\r?\n/)
   const width = String(lines.length).length
   const ext = path.extname(filePath).toLowerCase()
@@ -217,12 +227,12 @@ export function outlineText(content: string, filePath: string): OutlineResult {
     }
   }
 
-  const header = `${OUTLINE_MARKER} ${path.basename(filePath)} — ${lines.length} lines → outline (${entries} entries)`
-  return { text: `${header}\n${hint(filePath, lines.length)}\n\n${out.join('\n')}`.trimEnd(), entries, lines: lines.length }
+  const header = `${OUTLINE_MARKER} ${path.basename(filePath)} — ${describeLength(lines.length, totalLines)} → outline (${entries} entries)`
+  return { text: `${header}\n${hint(filePath, lines.length, totalLines)}\n\n${out.join('\n')}`.trimEnd(), entries, lines: lines.length }
 }
 
 /** JSON: keys kept, long strings and arrays elided. */
-export function outlineJson(content: string, filePath: string): OutlineResult {
+export function outlineJson(content: string, filePath: string, totalLines?: number): OutlineResult {
   const lines = content.split(/\r?\n/).length
   try {
     const obj = JSON.parse(content) as unknown
@@ -231,17 +241,17 @@ export function outlineJson(content: string, filePath: string): OutlineResult {
       if (Array.isArray(v) && v.length > 12) return [...v.slice(0, 12), `… (${v.length - 12} more)`]
       return v
     }, 2)
-    const header = `${OUTLINE_MARKER} ${path.basename(filePath)} — ${lines} lines → JSON with long values elided`
-    return { text: `${header}\n${hint(filePath, lines)}\n\n${slim}`, entries: 1, lines }
+    const header = `${OUTLINE_MARKER} ${path.basename(filePath)} — ${describeLength(lines, totalLines)} → JSON with long values elided`
+    return { text: `${header}\n${hint(filePath, lines, totalLines)}\n\n${slim}`, entries: 1, lines }
   } catch {
-    return outlineText(content, filePath)
+    return outlineText(content, filePath, totalLines)
   }
 }
 
 export type OutlineKind = 'code' | 'json' | 'text'
 
-export function outline(content: string, filePath: string, kind: OutlineKind): OutlineResult {
-  if (kind === 'code') return outlineCode(content, filePath)
-  if (kind === 'json') return outlineJson(content, filePath)
-  return outlineText(content, filePath)
+export function outline(content: string, filePath: string, kind: OutlineKind, totalLines?: number): OutlineResult {
+  if (kind === 'code') return outlineCode(content, filePath, totalLines)
+  if (kind === 'json') return outlineJson(content, filePath, totalLines)
+  return outlineText(content, filePath, totalLines)
 }

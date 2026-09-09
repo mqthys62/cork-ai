@@ -41,15 +41,34 @@ export interface PolicyConfig {
 }
 
 /** Keys `cork-ai config set` accepts, with a one-line description and a parser. */
+const parseBool = (raw: string): boolean | undefined => {
+  const v = raw.trim().toLowerCase()
+  if (v === 'true' || v === 'on' || v === '1' || v === 'yes') return true
+  if (v === 'false' || v === 'off' || v === '0' || v === 'no') return false
+  return undefined
+}
+const parseInteger = (min: number) => (raw: string): number | undefined => {
+  const n = Number(raw.trim())
+  return Number.isInteger(n) && n >= min ? n : undefined
+}
+const parseNumber = (min: number) => (raw: string): number | undefined => {
+  const n = Number(raw.trim())
+  return Number.isFinite(n) && n >= min ? n : undefined
+}
+
+/** `parse` returns undefined for a value it cannot accept: `config set` refuses it instead of saving garbage. */
 export const CONFIG_KEYS: Record<string, { description: string; parse: (raw: string) => unknown }> = {
-  'telemetry': { description: 'Anonymous usage telemetry (true/false)', parse: raw => raw === 'true' },
-  'contextGuard.enabled': { description: 'Live context notices (true/false)', parse: raw => raw === 'true' },
-  'contextGuard.nudgeModel': { description: 'Also nudge the model, not only the user (true/false)', parse: raw => raw === 'true' },
-  'contextGuard.bands': { description: 'Context sizes that trigger a notice, e.g. 150k,300k,500k', parse: raw => raw.split(',').map(s => parseTokens(s.trim())).filter((n): n is number => n !== undefined) },
-  'contextGuard.everyNthToolUse': { description: 'Evaluate the guard every N edits (PostToolUse)', parse: raw => Number(raw) },
-  'policy.reReadCache': { description: 'Remind instead of re-serving a whole file already in context (true/false)', parse: raw => raw === 'true' },
-  'policy.readonlyAgentsAggressive': { description: 'Lower outline threshold for read-only subagents such as Explore (true/false)', parse: raw => raw === 'true' },
-  'measuredAmplification': { description: 'Cache reads per token written used by the EV gate (auto-measured by gain --all)', parse: raw => Number(raw) },
+  'telemetry': { description: 'Anonymous usage telemetry (true/false)', parse: parseBool },
+  'contextGuard.enabled': { description: 'Live context notices (true/false)', parse: parseBool },
+  'contextGuard.nudgeModel': { description: 'Also nudge the model, not only the user (true/false)', parse: parseBool },
+  'contextGuard.bands': { description: 'Context sizes that trigger a notice, e.g. 150k,300k,500k', parse: raw => {
+    const bands = raw.split(',').map(s => parseTokens(s.trim()))
+    return bands.length > 0 && bands.every((n): n is number => n !== undefined && n > 0) ? [...new Set(bands)].sort((a, b) => a - b) : undefined
+  } },
+  'contextGuard.everyNthToolUse': { description: 'Evaluate the guard every N edits (PostToolUse)', parse: parseInteger(1) },
+  'policy.reReadCache': { description: 'Remind instead of re-serving a whole file already in context (true/false)', parse: parseBool },
+  'policy.readonlyAgentsAggressive': { description: 'Lower outline threshold for read-only subagents such as Explore (true/false)', parse: parseBool },
+  'measuredAmplification': { description: 'Cache reads per token written used by the EV gate (auto-measured by gain --all)', parse: parseNumber(0) },
 }
 
 /** `200k`, `1M`, `200` (thousands) or a plain token count → tokens. */

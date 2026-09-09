@@ -22,6 +22,8 @@ jobs:
           node-version: '22'
       - name: Refresh download counts first
         run: node scripts/adoption.mjs --push
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - name: Build stats, badges and README block
         env:
           POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}

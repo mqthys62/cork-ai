@@ -10,7 +10,8 @@
  *   PreToolUse  Bash           `cat file` & co → same path; `sed -n` & co → follow-up tracking;
  *               PowerShell     `sed -i` / redirections → file marked as being edited;
  *                              `Get-Content` / `gc` / `type` under the PowerShell tool
- *   PostToolUse Edit/Write     failed-edit detection, edited-file tracking, context guard
+ *   PostToolUse Edit/Write     edited-file tracking, context guard
+ *   PostToolUseFailure Edit…   failed-edit detection (whitelist the file for good)
  *   UserPromptSubmit, Stop     context guard
  *   SessionEnd                 session digest (local file + telemetry)
  */
@@ -24,15 +25,15 @@ import { parseBashEdit, parseBashRead } from './bash-read.js'
 import { loadConfig, updateConfig } from './config.js'
 import { writeDigest, type SessionDigest } from './digests.js'
 import { evaluateGuard, guardHookOutput } from './context-guard.js'
-import { eligibility } from './file-eligibility.js'
+import { eligibility, CODE_EXTS, TEXT_EXTS, BINARY_EXTS } from './file-eligibility.js'
 import { noteSessionSeen, readSessionsSeen, writeHeartbeat } from './heartbeat.js'
 import { outline } from './outline.js'
 import { LIVE_DIR, accumulateInSession, readActiveLiveSessions } from './persistent-stats.js'
-import { agentClassOf, gate, recordCompression, recordEditAfter, recordRangeRead, recordReRead, type AgentClass, type PolicyScope } from './policy.js'
+import { agentClassOf, gate, recordCompression, recordEditAfter, recordProbationRead, recordRangeRead, recordReRead, type AgentClass, type PolicyScope } from './policy.js'
 import { isSkipped, markSkipped } from './skip-list.js'
 import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
 import { snapshotDue, type SnapshotReason } from './savings.js'
-import { lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile, transcriptSince } from './transcript-usage.js'
+import { agentTranscriptPath, lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile, transcriptSince } from './transcript-usage.js'
 import { writeFileAtomic, debugLog } from './fs-utils.js'
 
 export type HookOutput = Record<string, unknown> | undefined
@@ -102,6 +103,16 @@ function transcriptSize(transcriptPath: string | undefined): number {
 
 /** Tokens of the reminder itself, for the accounting (the real text is ~60). */
 const CACHE_REMINDER_TOKENS = 80
+/** Claude Code's `Read` returns this many lines by default; the outline works on the same slice. */
+const READ_DEFAULT_LINES = 2_000
+/** Above this, Claude Code spills a Bash tool's output to a file and shows a preview: the model did not get the content. */
+const SHELL_OUTPUT_SPILL_BYTES = 30_000
+/**
+ * Files above this are never outlined nor hashed: reading and hashing a 100 MB
+ * log costs 360 ms and 300 MB of memory for an outline of its first 2000
+ * lines. They pass raw — Claude Code truncates them itself.
+ */
+const MAX_FILE_BYTES = 4 * 1024 * 1024
 
 export function readsFileFor(sessionId: string): string {
   const safe = sessionId.replace(/[^\w.-]/g, '_').slice(0, 80)
@@ -117,10 +128,23 @@ export function loadSessionReads(sessionId: string): SessionReads {
   }
 }
 
-function saveSessionReads(sessionId: string, reads: SessionReads): void {
+/**
+ * Merge-on-write. Claude Code runs the hooks of parallel tool calls at the
+ * same time, and parallel subagents share the session file: a plain
+ * load-modify-save loses whatever the other hook wrote in between (six
+ * concurrent reads left one entry). The atomic rename only prevents torn
+ * files, so the state on disk is re-read right before saving and this hook's
+ * entries are laid over it — nothing is ever deleted from these maps, so a
+ * union is the right merge, with this process winning on the keys it touched.
+ */
+export function saveSessionReads(sessionId: string, reads: SessionReads): void {
   try {
     fs.mkdirSync(LIVE_DIR, { recursive: true })
-    writeFileAtomic(readsFileFor(sessionId), JSON.stringify(reads))
+    const disk = loadSessionReads(sessionId)
+    const merged: SessionReads = { files: { ...disk.files, ...reads.files } }
+    if (disk.edited || reads.edited) merged.edited = { ...disk.edited, ...reads.edited }
+    if (disk.raw || reads.raw) merged.raw = { ...disk.raw, ...reads.raw }
+    writeFileAtomic(readsFileFor(sessionId), JSON.stringify(merged))
   } catch (err) { debugLog('hook.saveSessionReads', err) }
 }
 
@@ -155,12 +179,13 @@ export function denyWith(reason: string): HookOutput {
 
 // An Edit that fails on a file we only ever served compressed means the
 // model's old_string came from the outline, not the real file — direct
-// compression harm. Failure detection is best-effort (Claude Code's known
-// Edit errors); if the payload shape differs, this is a silent no-op.
+// compression harm. Claude Code reports tool failures on `PostToolUseFailure`
+// (`error` field); `PostToolUse` fires on success only, so the markers below
+// on its `tool_response` are a fallback for older payload shapes.
 const EDIT_FAILURE_MARKERS =
   /String to replace not found|matches of the string to replace|has not been read yet|"is_error"\s*:\s*true/i
 
-function handlePostToolUseEdit(event: Record<string, unknown>, now: Date): void {
+function handlePostToolUseEdit(event: Record<string, unknown>, now: Date, failed = false): void {
   const toolName = (event.tool_name as string) ?? ''
   if (toolName !== 'Edit' && toolName !== 'MultiEdit' && toolName !== 'Write') return
   const toolInput = (event.tool_input as Record<string, unknown>) ?? {}
@@ -170,12 +195,15 @@ function handlePostToolUseEdit(event: Record<string, unknown>, now: Date): void 
 
   const key = readsKey(filePath, event)
   const wasCompressed = Boolean(loadSessionReads(sessionId).files[key])
-  markEdited(sessionId, filePath, now, event)
+  // A failed edit changed nothing on disk: the re-read cache stays valid.
+  if (!failed) markEdited(sessionId, filePath, now, event)
   if (!wasCompressed) return
 
-  let respText = ''
-  try { respText = JSON.stringify(event.tool_response ?? '') } catch { return }
-  if (!EDIT_FAILURE_MARKERS.test(respText)) return
+  if (!failed) {
+    let respText = ''
+    try { respText = JSON.stringify(event.tool_response ?? '') } catch { return }
+    if (!EDIT_FAILURE_MARKERS.test(respText)) return
+  }
 
   // Whitelist for good: a failed Edit is the strongest possible evidence that
   // the outline was not enough for this file.
@@ -209,12 +237,12 @@ interface ReadContext {
  * model still has it — same bytes on disk, no compaction since, same context.
  * Returns why it does not apply otherwise (telemetry `cache_miss`).
  */
-function cacheStatus(entry: RawRead | undefined, fp: ReturnType<typeof fingerprint>, transcriptPath: string | undefined, agent: string | null): { hit: true; turnsAgo: number } | { hit: false; miss?: string } {
+function cacheStatus(entry: RawRead | undefined, fp: ReturnType<typeof fingerprint>, transcriptPath: string | undefined, agent: string | null, own = false): { hit: true; turnsAgo: number } | { hit: false; miss?: string } {
   if (!entry) return { hit: false }
   if (entry.missed) return { hit: false, miss: 'missed' }
   if (entry.agent !== agent) return { hit: false, miss: 'other-agent' }
   if (entry.hash !== fp.hash || entry.size !== fp.size) return { hit: false, miss: 'changed' }
-  const since = transcriptSince(transcriptPath, entry.offset)
+  const since = transcriptSince(transcriptPath, entry.offset, own)
   if (!since) return { hit: false, miss: 'unknown' }
   if (since.compacted) return { hit: false, miss: 'compacted' }
   return { hit: true, turnsAgo: since.turns }
@@ -264,16 +292,31 @@ function noteRangeRead(event: Record<string, unknown>, filePath: string, deps: R
   reads.files[key] = 2
   saveSessionReads(sessionId, reads)
   recordRangeRead(filePath, { agentClass: agentClassOf(event) })
-  deps.telemetry({ event: 'hook_reread', properties: { kind: 'range', ext: path.extname(filePath).toLowerCase() || 'none' } })
+  deps.telemetry({ event: 'hook_reread', properties: { kind: 'range', ext: telemetryExt(filePath), agent_class: agentClassOf(event) } })
+}
+
+/**
+ * The extension as sent to telemetry: a known one, `none`, or `other`. Never a
+ * fragment of the file name (`notes.acme-internal` is not an extension).
+ */
+export function telemetryExt(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase()
+  if (!ext) return 'none'
+  return CODE_EXTS.has(ext) || TEXT_EXTS.has(ext) || BINARY_EXTS.has(ext) ? ext : 'other'
 }
 
 function handleRead(ctx: ReadContext): HookOutput {
   const { event, filePath, deps } = ctx
-  const ext = path.extname(filePath).toLowerCase() || 'none'
+  const ext = telemetryExt(filePath)
   const agentClass: AgentClass = agentClassOf(event)
   const isSubagent = agentClass !== 'main'
   const agent = typeof event.agent_id === 'string' ? event.agent_id : null
-  const transcriptPath = event.transcript_path as string | undefined
+  // A subagent's payload carries the main transcript; its own context (size,
+  // compactions, task prompt) is in its sidechain file when Claude Code keeps one.
+  const mainTranscript = event.transcript_path as string | undefined
+  const ownTranscript = agentTranscriptPath(mainTranscript, agent)
+  const transcriptPath = ownTranscript ?? mainTranscript
+  const own = ownTranscript !== undefined
   const sessionId = (event.session_id as string) || ''
   const reads = sessionId ? loadSessionReads(sessionId) : null
   const key = readsKey(filePath, event)
@@ -285,9 +328,13 @@ function handleRead(ctx: ReadContext): HookOutput {
 
   // Whatever leaves this function raw and whole is now in the model's context:
   // remember it so the next identical read can be a reminder (re-read cache).
+  // Only when the model really received the whole file: `Read` stops at 2000
+  // lines and a Bash output above ~30 KB is spilled to a file with a preview,
+  // and a reminder saying "still in your context" would then be a lie.
   let fp: ReturnType<typeof fingerprint> | undefined
+  let deliveredWhole = false
   const servedRaw = () => {
-    if (!fp || !reads || !sessionId) return
+    if (!fp || !reads || !sessionId || !deliveredWhole) return
     reads.raw ??= {}
     const prev = reads.raw[key]
     reads.raw[key] = { ...fp, at: deps.now().toISOString(), offset: transcriptSize(transcriptPath), agent, hits: 0, ...(prev?.missed ? { missed: true } : {}) }
@@ -301,15 +348,30 @@ function handleRead(ctx: ReadContext): HookOutput {
 
   // Never compress the file the user is explicitly asking about — the model
   // almost certainly needs its real content.
-  const userPrompt = lastUserPromptFromTranscript(transcriptPath)
+  const userPrompt = lastUserPromptFromTranscript(transcriptPath, own)
   if (userPrompt && userPrompt.toLowerCase().includes(path.basename(filePath).toLowerCase())) return skipped('user-mentioned')
 
   // A file that already proved it needs its real content is served raw for good.
   if (isSkipped(filePath)) return skipped('skip-list')
 
+  // Claude Code's own spill files (`…/tool-results/toolu_*.txt`): the model
+  // opens them precisely to see the full output it was just shown a preview
+  // of. A 12-line text outline of that guarantees a re-read.
+  if (/[\\/]tool-results[\\/]/.test(filePath)) return skipped('tool-results')
+
   // A file the model is editing in this session is served raw: every measured
   // edit flow (59% of compressed files, 97% of .tsx) ended in a full re-read.
   if (!aggressive && reads?.edited?.[filePath]) return skipped('editing')
+
+  // Size and kind first: a FIFO or a device would block or never end, and a
+  // huge file is not worth reading at all.
+  let size = 0
+  try {
+    const st = fs.statSync(filePath)
+    if (!st.isFile()) return undefined
+    size = st.size
+  } catch { return undefined }
+  if (size > MAX_FILE_BYTES) return skipped('ineligible: too-large', { tokens: '>15k' })
 
   // Bytes, not a utf-8 string: `readFileSync(png, 'utf-8')` returns mojibake
   // that passes every downstream check.
@@ -321,10 +383,13 @@ function handleRead(ctx: ReadContext): HookOutput {
   if (!verdict.compress) return skipped(`ineligible: ${verdict.reason.split(' ')[0]}`)
 
   const content = buf.toString('utf-8')
-  const slice = content.split('\n').slice(0, 2000).join('\n')
+  const allLines = content.split('\n')
+  const totalLines = allLines.length
+  const slice = allLines.slice(0, READ_DEFAULT_LINES).join('\n')
   const originalTokens = estimateTokensFast(slice)
+  deliveredWhole = totalLines <= READ_DEFAULT_LINES && (ctx.source === 'Read' || buf.length <= SHELL_OUTPUT_SPILL_BYTES)
 
-  const turn = lastMainTurnUsage(transcriptPath)
+  const turn = lastMainTurnUsage(transcriptPath, undefined, own)
   const detectedModel = turn?.model || (event.model as string) || cfg.detectedModel
   const contextTokens = turn?.contextTokens ?? 0
 
@@ -341,7 +406,7 @@ function handleRead(ctx: ReadContext): HookOutput {
   // The re-read cache: the whole file went raw into this very context earlier
   // and nothing changed since — a reminder instead of the content.
   const cached = reads?.raw?.[key]
-  const cache = cfg.policy?.reReadCache === false ? { hit: false as const } : cacheStatus(cached, fp, transcriptPath, agent)
+  const cache = cfg.policy?.reReadCache === false ? { hit: false as const } : cacheStatus(cached, fp, transcriptPath, agent, own)
   if (cached && cached.hits > 0 && !cached.missed && cache.hit) {
     // A whole read right after a reminder: the reminder was not enough. Serve
     // raw, learn it, charge the extra turn, stop reminding for this file.
@@ -368,6 +433,7 @@ function handleRead(ctx: ReadContext): HookOutput {
       contextTokens, model: detectedModel, amplification: cfg.measuredAmplification,
       scope: { mode: 'cache' },
     })
+    if (decision.probation) recordProbationRead(filePath, { mode: 'cache' })
     if (decision.compress) {
       cached.hits += 1
       saveSessionReads(sessionId, reads)
@@ -395,7 +461,7 @@ function handleRead(ctx: ReadContext): HookOutput {
   }
   const cacheMiss = cached && !cache.hit ? cache.miss : undefined
 
-  const view = outline(slice, filePath, verdict.kind)
+  const view = outline(slice, filePath, verdict.kind, totalLines)
   const compressedTokens = estimateTokensFast(view.text)
   if (compressedTokens >= originalTokens * 0.85) return skipped('not-compressible', { tokens: tokenBucket(originalTokens), cache_miss: cacheMiss })
 
@@ -408,6 +474,7 @@ function handleRead(ctx: ReadContext): HookOutput {
     amplification: cfg.measuredAmplification,
     scope,
   })
+  if (decision.probation) recordProbationRead(filePath, scope)
   if (!decision.compress) {
     return skipped(decision.probation ? 'probation' : decision.reason.split(' ').slice(0, 2).join('-'), {
       tokens: tokenBucket(originalTokens), context: contextBucket(contextTokens), model: modelFamily(detectedModel),
@@ -479,9 +546,32 @@ function runGuard(event: Record<string, unknown>, hookEvent: 'UserPromptSubmit' 
 
 export { DIGEST_DIR, type SessionDigest } from './digests.js'
 
+/** Session state files (`reads-*.json`, `guard-*.json`) older than this are dropped at SessionEnd. */
+const LIVE_STATE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
+
+/**
+ * The per-session state files were never deleted (19 of them dating back two
+ * months on one machine). A `--resume` can bring a session back days later,
+ * so they are kept a week, then pruned whenever a session ends.
+ */
+export function pruneLiveState(now: Date = new Date(), dir: string = LIVE_DIR): number {
+  let removed = 0
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!/^(reads|guard)-.*\.json$/.test(name)) continue
+      const file = path.join(dir, name)
+      try {
+        if (now.getTime() - fs.statSync(file).mtimeMs > LIVE_STATE_MAX_AGE_MS) { fs.unlinkSync(file); removed += 1 }
+      } catch (err) { debugLog('hook.pruneLiveState', err) }
+    }
+  } catch { /* no live dir yet */ }
+  return removed
+}
+
 function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDeps>): void {
   const sessionId = (event.session_id as string) || ''
   const transcriptPath = event.transcript_path as string | undefined
+  pruneLiveState(deps.now())
   if (!sessionId || !transcriptPath) return
   const profile = sessionContextProfile(transcriptPath, [200_000])
   if (!profile) return
@@ -566,6 +656,9 @@ export function handleHookEvent(event: Record<string, unknown>, partialDeps: Hoo
     case 'PostToolUse':
       handlePostToolUseEdit(event, deps.now())
       return runGuard(event, 'PostToolUse', deps)
+    case 'PostToolUseFailure':
+      handlePostToolUseEdit(event, deps.now(), true)
+      return undefined
     case 'UserPromptSubmit':
     case 'Stop':
     case 'SessionStart':

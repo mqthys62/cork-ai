@@ -3,7 +3,7 @@
 [![CI](https://github.com/mqthys62/cork-ai/actions/workflows/ci.yml/badge.svg)](https://github.com/mqthys62/cork-ai/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Reduce un 60–75% los tokens en sesiones largas — sin cambiar cómo trabajas.**
+> Mira lo que de verdad cuestan tus sesiones de Claude Code, y recorta la parte que importa — sin cambiar cómo trabajas.
 
 > [English (principal)](../README.md) · [Français](README.fr.md)
 
@@ -11,21 +11,25 @@
 
 ## ¿Qué es cork-ai?
 
-Cada vez que Claude Code hace una llamada a la API, envía el **historial completo** — cada archivo leído, cada salida bash, cada cabecera repetida. En una sesión de 2 horas, eso supera fácilmente **100.000 tokens por solicitud**, la mayoría redundantes.
+Cada vez que Claude Code hace una llamada a la API, reenvía **toda la conversación** — cada archivo leído, cada salida de comando, cada turno anterior. En los modelos con 1M de contexto eso son fácilmente 300–500k tokens por llamada de herramienta, cobrados como cache reads en cada turno. Esa es la factura, no los archivos en sí.
 
-cork-ai se interpone entre Claude Code y la API de Anthropic. Comprime lo redundante antes de cada llamada. **Tu flujo de trabajo no cambia. Los resultados no cambian. La factura, sí.**
+cork-ai se engancha a Claude Code y hace dos cosas. Mantiene las lecturas de archivos completos fuera del contexto cuando compensa, y — lo que de verdad mueve la factura — te muestra lo que cuesta el tamaño de tu contexto y te ayuda a mantenerlo a raya. **Tu flujo de trabajo no cambia. Los resultados no cambian. La factura, sí.**
 
 ```
-Claude Code lee un archivo
+Claude Code lee un archivo — herramienta `Read`, o `cat archivo` vía Bash (modo auto)
         ↓
-cork-ai intercepta (hook PreToolUse Read)
+cork-ai intercepta (hook PreToolUse Read / Bash)
         ↓
-Comprime: extrae firmas, trunca boilerplate
+¿Compensa? (puerta de valor esperado: tamaño del archivo × tamaño del contexto × tasa de relectura aprendida)
         ↓
-Claude recibe el resumen comprimido en vez del archivo completo
+Claude recibe un esquema numerado (L12 export function …) en vez del archivo completo,
+y lee justo la región que necesita con offset/limit o sed -n
         ↓
-60–90% menos tokens por Read — automáticamente, en cada sesión
+Mientras tanto, el guardián de contexto te avisa cuando el contexto cruza 150k / 300k / 500k tokens
+y lo que cuesta cada llamada de herramienta adicional — /compact o /autocompact lo arreglan
 ```
+
+> **Dónde se va el dinero de verdad.** En un historial real de 2 meses (16k turnos, 4,3 k$), **el 78 % del gasto fueron cache reads del prefijo de la conversación** — todo el contexto reenviado en cada llamada de herramienta, 400k tokens de media, en sesiones que llegaron a la ventana de 1M. Reproducido con auto-compactación a 200k, el mismo trabajo cuesta **un 57 % menos**. La compresión de los Read mueve ~1 %. `cork-ai context` lo muestra sobre tu propio historial; `cork-ai context --set-autocompact 200k` aplica el arreglo. Cómo se calcula cada cifra, y dónde es más frágil: [docs/METHODOLOGY.md](METHODOLOGY.md) (en inglés).
 
 ---
 
@@ -79,7 +83,7 @@ Registra los hooks de cork-ai globalmente en `~/.claude/settings.json`. Activos 
 
 ```bash
 cork-ai hooks install   # activar / actualizar
-cork-ai hooks status    # cuáles de los 6 hooks están activos
+cork-ai hooks status    # cuáles de los 7 hooks están activos
 cork-ai hooks remove    # desactivar
 ```
 
@@ -87,7 +91,8 @@ cork-ai hooks remove    # desactivar
 |------|---------|
 | `PreToolUse` **Read** | Las lecturas de archivos completos reciben un esquema numerado cuando la puerta de valor esperado dice que compensa |
 | `PreToolUse` **Bash / PowerShell** | Lo mismo para `cat archivo`, `nl`, `bat`, `rtk proxy cat`, y `Get-Content` / `gc` / `type` en PowerShell — en modo auto, Claude Code lee por el shell, no por `Read`. Las lecturas dirigidas (`sed -n`, `head`, `tail`, `-TotalCount`) siempre pasan, y `sed -i` / las redirecciones marcan el archivo como en edición |
-| `PostToolUse` **Edit / Write** | Edit fallidos sobre archivos esquematizados, seguimiento de archivos editados, guardia de contexto |
+| `PostToolUse` **Edit / Write** | Seguimiento de archivos editados, guardia de contexto |
+| `PostToolUseFailure` **Edit / Write** | Edit fallidos sobre archivos esquematizados: el archivo se sirve completo para siempre (Claude Code ≥ 2.1.119) |
 | `UserPromptSubmit`, `Stop` | Avisos de la guardia de contexto |
 | `SessionEnd` | Resumen de sesión (`~/.cork-ai/digests/`, mostrado por `cork-ai gain`) |
 
@@ -97,7 +102,7 @@ El hook nunca comprime a costa del modelo. Las salvaguardas, todas medidas en tr
 - **El esquema es navegable** — cada entrada lleva su número de línea (`L127  export async function fetchAll(...)`): lo siguiente es `Read offset=127 limit=40` o `sed -n '127,166p'`, no una relectura completa.
 - **Las lecturas con `offset`/`limit` explícitos nunca se comprimen** — el modelo apunta a una zona precisa.
 - **Un archivo que ya está en el contexto no se envía dos veces** — la *caché de relectura*: un archivo servido completo antes en la sesión, sin cambios desde entonces (mtime, tamaño y hash del contenido coinciden) y no perdido en una compactación, recibe un recordatorio de 80 tokens en lugar del archivo. Archivos editados, archivos citados en tu prompt, lecturas por rango y lecturas de otro agente nunca pasan por la caché; un solo fallo (el modelo relee igualmente) devuelve el archivo a completo durante la sesión. Se desactiva con `cork-ai config set policy.reReadCache false`.
-- **Los subagentes de solo lectura tienen un listón más bajo** — Explore y Plan nunca editan lo que leen y su contexto se descarta al final: reciben outline desde 800 tokens ahorrados en vez de 1 500 e ignoran la regla de «archivo en edición»; el resto de agentes (general-purpose, forks, agentes personalizados) sigue las reglas de la conversación principal. Se desactiva con `cork-ai config set policy.readonlyAgentsAggressive false`.
+- **Los subagentes de solo lectura tienen un listón más bajo** — Explore, Plan, claude-code-guide y statusline-setup nunca editan lo que leen y su contexto se descarta al final: reciben outline desde 800 tokens ahorrados en vez de 1 500 e ignoran la regla de «archivo en edición»; el resto de agentes (general-purpose, forks, agentes personalizados) sigue las reglas de la conversación principal. Se desactiva con `cork-ai config set policy.readonlyAgentsAggressive false`.
 - **Las relecturas se sirven sin comprimir**, se recuerdan entre sesiones (`skip-list.json`), y su coste — los tokens brutos *y* el turno API extra — se descuenta en `cork-ai gain`.
 - **Los archivos en edición se sirven sin comprimir** — un `Edit`, `Write`, `sed -i` o una redirección sobre un archivo lo pasa a bruto durante la sesión.
 - **El archivo del que habla el usuario nunca se comprime** — si tu último mensaje menciona `interceptor.ts`, su lectura pasa intacta.
@@ -117,7 +122,7 @@ La **guardia de contexto** avisa una vez por tramo (150k / 300k / 500k / 750k to
 
 ### `cork-ai doctor`
 
-¿Se está llamando realmente a cork-ai? Comprueba el binario, los seis hooks (y su forma en Windows), la versión de Claude Code frente al rango probado, ejecuta el hook con una carga sintética, lee el heartbeat del último evento real y compara las sesiones de Claude Code de los últimos 14 días con las que cork-ai vio — con el reparto Read / lecturas Bash que explica cualquier hueco. Ejecútalo tras un `claude update` o cuando `cork-ai gain` parezca parado.
+¿Se está llamando realmente a cork-ai? Comprueba el binario, los siete hooks (y su forma en Windows), la versión de Claude Code frente al rango probado, ejecuta el hook con una carga sintética, lee el heartbeat del último evento real y compara las sesiones de Claude Code de los últimos 14 días con las que cork-ai vio — con el reparto Read / lecturas Bash que explica cualquier hueco. Ejecútalo tras un `claude update` o cuando `cork-ai gain` parezca parado.
 
 ```bash
 cork-ai doctor
@@ -141,7 +146,7 @@ cork-ai calibrate claude-sonnet-5    # o uno específico
 Consulta tus ahorros tras cada sesión:
 
 ```bash
-cork-ai gain              # sesión en curso, o el resumen de la última sesión terminada
+cork-ai gain              # la última sesión que cork-ai vio: sus outlines (en curso o terminada) y su resumen de SessionEnd
 cork-ai gain --sessions   # los 10 últimos resúmenes: duración, turnos, contexto, coste, ahorro a 200k (--json)
 cork-ai gain --all        # total acumulado
 cork-ai gain --history    # todas las sesiones registradas
@@ -184,9 +189,8 @@ cork-ai telemetry preview # el payload diario exacto, byte a byte, antes de deci
 
 ## Compatibilidad
 
-- **SO**: Linux (Ubuntu 20.04+, Debian, Alpine), macOS (Intel + Apple Silicon), Windows (nativo + WSL2)
+- **SO**: Linux x64 / arm64 sobre glibc (Ubuntu 20.04+, Debian, Fedora…; aún no hay binarios Alpine/musl), macOS (Intel + Apple Silicon), Windows (nativo + WSL2)
 - **Sin dependencias runtime** — binario standalone, sin Node.js ni npm
-- **Desde npm** (`npx cork-ai`): Node.js ≥ 18
 - **Claude Code**: probado de 2.1.47 a 2.1.263 (`doctor` avisa fuera del rango); Windows sin Git Bash requiere ≥ 2.1.139
 
 ---

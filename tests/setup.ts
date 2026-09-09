@@ -12,6 +12,13 @@ import { afterAll } from 'vitest'
 
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'cork-ai-test-'))
 process.env.CORK_AI_HOME = home
+// Claude Code's own settings live under CLAUDE_CONFIG_DIR: point it at the
+// throw-away home too, so no test reads (let alone writes) ~/.claude/settings.json.
+process.env.CLAUDE_CONFIG_DIR = path.join(home, 'claude')
+// The developer's shell must not change what the suite sees.
+delete process.env.DO_NOT_TRACK
+delete process.env.CORK_AI_TELEMETRY
+delete process.env.CORK_AI_DEBUG
 
 afterAll(() => {
   try { fs.rmSync(home, { recursive: true, force: true }) } catch { /* best effort */ }

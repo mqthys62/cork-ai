@@ -3,6 +3,8 @@ import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
+  ANALYSIS_CACHE_FILE,
+  SPEND_CACHE_FILE,
   contextReport,
   lastMainTurnUsage,
   listTranscriptFiles,
@@ -34,6 +36,9 @@ function toolResult(toolUseId: string, text: string): string {
 }
 
 beforeEach(() => {
+  // The caches key on size+mtime: a profile computed by an earlier test with
+  // other ceilings must not be reused by this one.
+  for (const f of [SPEND_CACHE_FILE, ANALYSIS_CACHE_FILE]) { try { fs.unlinkSync(f) } catch { /* none */ } }
   root = fs.mkdtempSync(path.join(os.tmpdir(), 'cork-projects-'))
   project = path.join(root, '-home-me-projects-app')
   fs.mkdirSync(project)

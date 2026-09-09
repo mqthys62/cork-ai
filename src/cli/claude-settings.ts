@@ -6,8 +6,11 @@
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { compareVersions } from './version.js'
 
-export const CLAUDE_SETTINGS = path.join(os.homedir(), '.claude', 'settings.json')
+/** Claude Code honours `CLAUDE_CONFIG_DIR` for its whole config directory; so does cork-ai. */
+export const CLAUDE_CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude')
+export const CLAUDE_SETTINGS = path.join(CLAUDE_CONFIG_DIR, 'settings.json')
 
 export interface ClaudeSettings {
   hooks?: Record<string, HookGroup[] | undefined>
@@ -36,18 +39,41 @@ export interface HookGroup {
  *   PreToolUse Read       compress whole-file reads (the original hook)
  *   PreToolUse Bash|PowerShell  same for `cat file` & co — auto mode reads through Bash;
  *                         `Get-Content` under Claude Code's PowerShell tool (Windows without Git Bash)
- *   PostToolUse Edit…     failed-edit detection, edited-file tracking, context guard
+ *   PostToolUse Edit…     edited-file tracking, context guard
+ *   PostToolUseFailure Edit…  failed-edit detection: an Edit that fails on a file the model
+ *                         only saw outlined is the strongest compression-harm signal there is.
+ *                         PostToolUse fires on success only, so this needs its own event —
+ *                         documented since Claude Code 2.1.119, hence `since`.
  *   UserPromptSubmit/Stop context guard (band notices to the user and the model)
  *   SessionEnd            session digest (~/.cork-ai/digests, telemetry)
  */
-export const CORK_HOOKS: Array<{ event: string; matcher?: string; legacyMatchers?: string[] }> = [
+export interface CorkHookSpec {
+  event: string
+  matcher?: string
+  legacyMatchers?: string[]
+  /** Oldest Claude Code version known to have this event; not installed on older ones. */
+  since?: string
+}
+
+export const CORK_HOOKS: CorkHookSpec[] = [
   { event: 'PreToolUse', matcher: 'Read' },
   { event: 'PreToolUse', matcher: 'Bash|PowerShell', legacyMatchers: ['Bash'] },
   { event: 'PostToolUse', matcher: 'Edit|MultiEdit|Write', legacyMatchers: ['Edit|MultiEdit'] },
+  { event: 'PostToolUseFailure', matcher: 'Edit|MultiEdit|Write', since: '2.1.119' },
   { event: 'UserPromptSubmit' },
   { event: 'Stop' },
   { event: 'SessionEnd' },
 ]
+
+/**
+ * The hooks that make sense on a given Claude Code version. Unknown version
+ * (fresh install, no transcript yet): all of them — an event a version does not
+ * know is, as far as the docs say, ignored, and a fresh install today runs a
+ * recent Claude Code.
+ */
+export function applicableCorkHooks(claudeVersion?: string): CorkHookSpec[] {
+  return CORK_HOOKS.filter(h => !h.since || !claudeVersion || compareVersions(claudeVersion, h.since) >= 0)
+}
 export const CORK_HOOK_FALLBACK = 'cork-ai hook'
 
 /** Claude Code version that introduced the exec form (`args`) of command hooks. */
@@ -87,14 +113,50 @@ export function isShellFormOnWindows(h: HookEntry, platform: NodeJS.Platform = p
   return platform === 'win32' && !h.args?.length && h.command !== CORK_HOOK_FALLBACK
 }
 
-export function loadClaudeSettings(): ClaudeSettings {
-  try { return JSON.parse(fs.readFileSync(CLAUDE_SETTINGS, 'utf-8')) as ClaudeSettings }
-  catch { return {} }
+/**
+ * Thrown when `~/.claude/settings.json` exists but cannot be read as a JSON
+ * object: a BOM, a trailing comma, a half-written file (Claude Code was saving
+ * it), a permission error. Writers must stop here — saving `{}` over the user's
+ * settings would erase their permissions, model, env, and every other hook.
+ */
+export class ClaudeSettingsUnreadable extends Error {
+  constructor(public readonly file: string, public readonly cause: unknown) {
+    super(`${file} exists but could not be read as a JSON object: ${cause instanceof Error ? cause.message : String(cause)}`)
+    this.name = 'ClaudeSettingsUnreadable'
+  }
 }
 
+/**
+ * Reads the settings. A missing file is `{}`; an unreadable or non-object one
+ * throws `ClaudeSettingsUnreadable` — callers that only *read* may catch it
+ * and treat the settings as empty, callers that *write* must not.
+ */
+export function loadClaudeSettings(): ClaudeSettings {
+  let raw: string
+  try { raw = fs.readFileSync(CLAUDE_SETTINGS, 'utf-8') }
+  catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    throw new ClaudeSettingsUnreadable(CLAUDE_SETTINGS, err)
+  }
+  let parsed: unknown
+  try { parsed = JSON.parse(raw.replace(/^\uFEFF/, '')) }
+  catch (err) { throw new ClaudeSettingsUnreadable(CLAUDE_SETTINGS, err) }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new ClaudeSettingsUnreadable(CLAUDE_SETTINGS, new Error('top-level value is not an object'))
+  return parsed as ClaudeSettings
+}
+
+/** Read-only convenience: unreadable settings count as empty (status, doctor, gain). */
+export function loadClaudeSettingsOrEmpty(): ClaudeSettings {
+  try { return loadClaudeSettings() } catch { return {} }
+}
+
+/** Atomic (tmp + rename), so a crash mid-write never leaves Claude Code a truncated settings file. */
 export function saveClaudeSettings(settings: ClaudeSettings): void {
   fs.mkdirSync(path.dirname(CLAUDE_SETTINGS), { recursive: true })
-  fs.writeFileSync(CLAUDE_SETTINGS, JSON.stringify(settings, null, 2), 'utf-8')
+  const tmp = `${CLAUDE_SETTINGS}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), 'utf-8')
+  try { fs.renameSync(tmp, CLAUDE_SETTINGS) }
+  catch (err) { try { fs.unlinkSync(tmp) } catch { /* nothing to clean */ } throw err }
 }
 
 /** Recognises both forms: `"…/cork-ai" hook` and `{ command: '…/cork-ai.exe', args: ['hook'] }`. */
@@ -110,9 +172,9 @@ export function isCorkHookInstalled(settings: ClaudeSettings): boolean {
   return pre.some(g => g.hooks?.some(h => isCorkCmd(h)))
 }
 
-/** Which of CORK_HOOKS are present (matcher-exact, or via a legacy matcher). */
-export function installedCorkHooks(settings: ClaudeSettings): Array<{ event: string; matcher?: string; present: boolean; command?: string; entry?: HookEntry }> {
-  return CORK_HOOKS.map(spec => {
+/** Which of the applicable hooks are present (matcher-exact, or via a legacy matcher). */
+export function installedCorkHooks(settings: ClaudeSettings, claudeVersion?: string): Array<{ event: string; matcher?: string; since?: string; present: boolean; command?: string; entry?: HookEntry }> {
+  return applicableCorkHooks(claudeVersion).map(spec => {
     const groups = settings.hooks?.[spec.event] ?? []
     const accepted = [spec.matcher, ...(spec.legacyMatchers ?? [])]
     for (const g of groups) {
@@ -129,7 +191,7 @@ export function installedCorkHooks(settings: ClaudeSettings): Array<{ event: str
  * changed: added, migrated from the bare `cork-ai hook` form to the absolute
  * path, migrated from a legacy matcher, or the command path updated.
  */
-export function ensureHookGroup(settings: ClaudeSettings, spec: { event: string; matcher?: string; legacyMatchers?: string[] }, desired: HookEntry): boolean {
+export function ensureHookGroup(settings: ClaudeSettings, spec: CorkHookSpec, desired: HookEntry): boolean {
   settings.hooks ??= {}
   settings.hooks[spec.event] ??= []
   const groups = settings.hooks[spec.event] as HookGroup[]
@@ -151,14 +213,28 @@ export function ensureHookGroup(settings: ClaudeSettings, spec: { event: string;
       else delete existing.args
       changed = true
     }
-    if (spec.matcher !== undefined && g.matcher !== spec.matcher) { g.matcher = spec.matcher; changed = true }
+    if (spec.matcher !== undefined && g.matcher !== spec.matcher) {
+      const others = (g.hooks ?? []).filter(h => !isCorkCmd(h))
+      if (others.length === 0) {
+        g.matcher = spec.matcher
+      } else {
+        // The group is shared with someone else's hooks: renaming its matcher
+        // would fire *their* hooks on tools they never asked for. Leave the
+        // group to them and give cork-ai its own group under the new matcher.
+        g.hooks = others
+        const target = groups.find(x => x.matcher === spec.matcher)
+        if (target) (target.hooks ??= []).push(existing)
+        else groups.push({ matcher: spec.matcher, hooks: [existing] })
+      }
+      changed = true
+    }
     return changed
   }
 
   const entry: HookEntry = { ...desired, ...(desired.args ? { args: [...desired.args] } : {}) }
   const existingGroup = spec.matcher !== undefined ? groups.find(g => g.matcher === spec.matcher) : undefined
   if (existingGroup) {
-    existingGroup.hooks.push(entry)
+    ;(existingGroup.hooks ??= []).push(entry)
   } else {
     groups.push(spec.matcher !== undefined ? { matcher: spec.matcher, hooks: [entry] } : { hooks: [entry] })
   }

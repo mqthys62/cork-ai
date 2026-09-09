@@ -45,6 +45,7 @@ describe('parseBashRead — lectures entières', () => {
   it('nl / bat / less comptent comme lecture entière', () => {
     expect(parseBashRead('nl app.ts', dir)?.kind).toBe('full')
     expect(parseBashRead('bat -p app.ts', dir)?.kind).toBe('full')
+    expect(parseBashRead('bat --line-range=10:20 app.ts', dir)?.kind).toBe('range')   // a region, not the file
   })
   it('refuse pipes, redirections, chaînages et substitutions', () => {
     for (const cmd of ['cat app.ts | head -20', 'cat app.ts > out.txt', 'cat app.ts && ls', 'cat app.ts; ls', 'cat $(ls)', 'cat `ls`', 'cat app.ts 2>&1']) {
@@ -120,6 +121,15 @@ describe('parseBashRead — PowerShell (Get-Content)', () => {
     expect(parseBashRead('type app.ts', dir, 'powershell')?.kind).toBe('full')
     expect(parseBashRead('type app.ts', dir)).toBeUndefined()
     expect(parseBashRead('cat app.ts', dir, 'powershell')?.kind).toBe('full')
+  })
+
+  it('les antislashs sont des séparateurs, pas des échappements (.\\app.ts, C:\\…)', () => {
+    expect(splitWords('Get-Content C:\\Users\\me\\app.ts', 'powershell')).toEqual(['Get-Content', 'C:\\Users\\me\\app.ts'])
+    expect(splitWords('cat a\\ b.ts')).toEqual(['cat', 'a b.ts'])              // bash keeps its own rule
+    expect(splitWords('Get-Content a` b.ts', 'powershell')).toEqual(['Get-Content', 'a b.ts'])
+    expect(parseBashRead('Get-Content .\\app.ts', dir, 'powershell')).toEqual({ kind: 'full', file, tool: 'Get-Content' })
+    expect(parseBashRead('gc .\\app.ts -TotalCount 10', dir, 'powershell')?.kind).toBe('range')
+    expect(parseBashRead(`Get-Content ${dir.replace(/\//g, '\\')}\\app.ts`, dir, 'powershell')?.file).toBe(file)
   })
 
   it('ignore les formes composées ou ambiguës', () => {

@@ -35,6 +35,8 @@ export interface ExtStats {
   /** Targeted follow-ups (sed -n, offset/limit) after an outline: the outline worked as intended. Informational. */
   rangeReads?: number
   editsAfter: number
+  /** Reads gated while on probation (refused or probed): drives the probe cadence. */
+  probationReads?: number
   lastAt: string
 }
 
@@ -126,7 +128,7 @@ export function normalizeExt(filePath: string): string {
   return ext || path.basename(filePath).toLowerCase()
 }
 
-function bump(ext: string, field: 'compressions' | 'reReads' | 'rangeReads' | 'editsAfter'): void {
+function bump(ext: string, field: 'compressions' | 'reReads' | 'rangeReads' | 'editsAfter' | 'probationReads'): void {
   const state = loadPolicy()
   const entry = state.ext[ext] ?? { compressions: 0, reReads: 0, editsAfter: 0, lastAt: '' }
   entry[field] = (entry[field] ?? 0) + 1
@@ -139,6 +141,13 @@ export function recordCompression(filePath: string, scope?: PolicyScope): void {
 export function recordReRead(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'reReads') }
 export function recordRangeRead(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'rangeReads') }
 export function recordEditAfter(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'editsAfter') }
+/**
+ * A read that went through the gate while the key was on probation. Probes
+ * are scheduled on this count, not on compressions: a refused read records no
+ * compression, so counting compressions froze the schedule and made probation
+ * permanent (a key entered at 13 compressions never probed again).
+ */
+export function recordProbationRead(filePath: string, scope?: PolicyScope): void { bump(policyKey(filePath, scope), 'probationReads') }
 
 /**
  * Probability that a compressed read of this key gets re-read, blending the
@@ -206,7 +215,9 @@ export function gate(input: GateInput): GateDecision {
   const stats = state.ext[ext]
   const samples = stats?.compressions ?? 0
   const onProbation = samples >= PROBATION_MIN_SAMPLES && p > PROBATION_RATE
-  const probe = onProbation && samples % PROBE_EVERY === 0
+  // One read in PROBE_EVERY is still compressed so the estimate can recover;
+  // the caller records every gated read on probation (`recordProbationRead`).
+  const probe = onProbation && (stats?.probationReads ?? 0) % PROBE_EVERY === 0
 
   if (saved < minSaved) {
     return { compress: false, reason: `saves only ${saved} tokens (< ${minSaved})`, expectedValueUSD: ev, reReadProbability: p, probation: onProbation }

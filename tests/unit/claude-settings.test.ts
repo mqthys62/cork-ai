@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { corkHookEntry, renderHookEntry, isCorkCmd, isShellFormOnWindows, isCorkHookInstalled, installedCorkHooks, ensureHookGroup, CORK_HOOK_FALLBACK, type ClaudeSettings } from '../../src/cli/claude-settings.js'
+import { corkHookEntry, renderHookEntry, isCorkCmd, isShellFormOnWindows, isCorkHookInstalled, installedCorkHooks, ensureHookGroup, applicableCorkHooks, CORK_HOOKS, CORK_HOOK_FALLBACK, type ClaudeSettings } from '../../src/cli/claude-settings.js'
 import { compareVersions } from '../../src/cli/version.js'
 
 const WIN = 'C:\\Users\\ami\\AppData\\Local\\cork-ai\\bin\\cork-ai.exe'
@@ -130,5 +130,24 @@ describe('compareVersions (pré-releases)', () => {
     expect(compareVersions('v2.1.263', '2.1.47')).toBeGreaterThan(0)
     expect(compareVersions('2.1.139', '2.1.139')).toBe(0)
     expect(compareVersions('1.0.0-beta', '1.0.0-rc.1')).toBeLessThan(0)
+  })
+})
+
+describe('applicableCorkHooks', () => {
+  it('PostToolUseFailure seulement à partir de Claude Code 2.1.119 ; version inconnue = tout', () => {
+    const names = (v?: string) => applicableCorkHooks(v).map(h => h.event)
+    expect(names(undefined)).toEqual(CORK_HOOKS.map(h => h.event))
+    expect(names('2.1.263')).toContain('PostToolUseFailure')
+    expect(names('2.1.119')).toContain('PostToolUseFailure')
+    expect(names('2.1.118')).not.toContain('PostToolUseFailure')
+    expect(names('2.1.47')).toHaveLength(CORK_HOOKS.length - 1)
+  })
+
+  it('installedCorkHooks ne réclame pas un hook inapplicable', () => {
+    const settings: ClaudeSettings = { hooks: {} }
+    for (const spec of applicableCorkHooks('2.1.100')) ensureHookGroup(settings, spec, corkHookEntry(NIX, 'linux'))
+    expect(settings.hooks?.PostToolUseFailure).toBeUndefined()
+    expect(installedCorkHooks(settings, '2.1.100').every(h => h.present)).toBe(true)
+    expect(installedCorkHooks(settings, '2.1.263').find(h => h.event === 'PostToolUseFailure')?.present).toBe(false)
   })
 })

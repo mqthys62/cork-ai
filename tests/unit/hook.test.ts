@@ -198,6 +198,21 @@ describe('PostToolUse Edit', () => {
     const live = readActiveLiveSessions().find(s => s.sessionId === sessionId)!
     expect(live.editFailuresAfterCompression).toBe(1)
   })
+
+  it('PostToolUseFailure : l’échec arrive dans `error`, sans tool_response, et ne marque pas le fichier comme édité', () => {
+    handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    handleHookEvent({ session_id: sessionId, transcript_path: transcript, cwd: dir, hook_event_name: 'PostToolUseFailure', tool_name: 'Edit', tool_input: { file_path: bigFile, old_string: 'zzz', new_string: 'y' }, error: 'String to replace not found in file.', tool_use_id: 'toolu_1' }, deps())
+    expect(isSkipped(bigFile)).toBe(true)
+    const live = readActiveLiveSessions().find(s => s.sessionId === sessionId)!
+    expect(live.editFailuresAfterCompression).toBe(1)
+    expect(loadSessionReads(sessionId).edited?.[bigFile]).toBeUndefined()   // nothing changed on disk
+  })
+
+  it('PostToolUseFailure sur un fichier jamais outliné : rien à apprendre', () => {
+    handleHookEvent({ session_id: sessionId, transcript_path: transcript, cwd: dir, hook_event_name: 'PostToolUseFailure', tool_name: 'Edit', tool_input: { file_path: bigFile, old_string: 'zzz' }, error: 'String to replace not found in file.' }, deps())
+    expect(isSkipped(bigFile)).toBe(false)
+    expect(readActiveLiveSessions().find(s => s.sessionId === sessionId)).toBeUndefined()
+  })
 })
 
 describe('Context guard', () => {
@@ -277,8 +292,9 @@ describe('Heartbeat and unknown events', () => {
 // ─── Re-read cache (1.0) ────────────────────────────────────────────────────
 
 /** `.ts` on probation: the outline gate serves raw, which is what the cache needs to see first. */
+/** `.ts` on probation, with the probe already spent: the next reads are refused (served raw). */
 function putTsOnProbation(): void {
-  fs.writeFileSync(POLICY_FILE, JSON.stringify({ version: 1, ext: { '.ts': { compressions: 21, reReads: 19, editsAfter: 0, lastAt: '' } } }))
+  fs.writeFileSync(POLICY_FILE, JSON.stringify({ version: 1, ext: { '.ts': { compressions: 21, reReads: 19, editsAfter: 0, probationReads: 1, lastAt: '' } } }))
 }
 
 function mediumTs(n = 20): string {
@@ -452,5 +468,82 @@ describe('PreToolUse PowerShell', () => {
     expect(events.at(-1)!.properties).toMatchObject({ decision: 'outline', source: 'Get-Content' })
     expect(handleHookEvent(ps(`Get-Content ${bigFile} -TotalCount 30`), deps())).toBeUndefined()
     expect(events.at(-1)).toMatchObject({ event: 'hook_reread', properties: { kind: 'range' } })
+  })
+})
+
+describe('audit 1.0.0-rc.1 — robustesse', () => {
+  it('des hooks parallèles ne se perdent pas leurs écritures (fusion à l’écriture)', async () => {
+    const { readsFileFor, saveSessionReads } = await import('../../src/cli/hook.js')
+    const raw = (f: string) => ({ mtimeMs: 1, size: 1, hash: 'x', at: 'now', offset: 0, agent: null, hits: 0 })
+    // Hook A loads an empty state. Meanwhile six parallel hooks save one raw
+    // entry each. A plain load-modify-save from A would then leave A's entry alone.
+    const others = Array.from({ length: 6 }, (_, i) => path.join(dir, 'src', `p${i}.ts`))
+    fs.writeFileSync(readsFileFor(sessionId), JSON.stringify({ files: { [others[0]]: 1 }, raw: Object.fromEntries(others.map(f => [f, raw(f)])) }))
+    const late = path.join(dir, 'src', 'late.ts')
+    saveSessionReads(sessionId, { files: { [late]: 1 }, edited: { [late]: 'now' }, raw: { [late]: raw(late) } })
+
+    const after = loadSessionReads(sessionId)
+    expect(Object.keys(after.raw ?? {}).sort()).toEqual([...others, late].sort())
+    expect(after.files).toEqual({ [others[0]]: 1, [late]: 1 })
+    expect(after.edited).toEqual({ [late]: 'now' })
+  })
+
+  it('un contenu que Claude Code aurait tronqué n’entre pas dans le cache (Read > 2000 lignes, cat > 30 Ko)', () => {
+    putTsOnProbation()
+    const long = path.join(dir, 'src', 'long.ts')
+    fs.writeFileSync(long, Array.from({ length: 2_500 }, (_, i) => `export const v${i} = ${i}`).join('\n'))
+    expect(handleHookEvent(pre('Read', { file_path: long }), deps())).toBeUndefined()
+    expect(loadSessionReads(sessionId).raw?.[long]).toBeUndefined()
+
+    const wide = path.join(dir, 'src', 'wide.ts')
+    fs.writeFileSync(wide, Array.from({ length: 400 }, (_, i) => `export const w${i} = '${'x'.repeat(100)}'`).join('\n'))  // ≈ 46 KB, 400 lines
+    expect(fs.statSync(wide).size).toBeGreaterThan(30_000)
+    expect(handleHookEvent(pre('Bash', { command: `cat ${wide}` }), deps())).toBeUndefined()
+    expect(loadSessionReads(sessionId).raw?.[wide]).toBeUndefined()      // shell output would be spilled to a file
+    expect(handleHookEvent(pre('Read', { file_path: wide }), deps())).toBeUndefined()
+    expect(loadSessionReads(sessionId).raw?.[wide]).toBeDefined()        // Read returns all 400 lines
+  })
+
+  it('un résumé de compaction n’est pas « le prompt de l’utilisateur »', () => {
+    fs.writeFileSync(transcript, transcriptLines(40_000, 'refactor the parser') + JSON.stringify({ type: 'user', isCompactSummary: true, message: { role: 'user', content: 'This session is being continued from a previous conversation… files: big.ts, hook.ts' } }) + '\n')
+    const out = handleHookEvent(pre('Read', { file_path: bigFile }), deps())
+    expect(out).toBeDefined()   // outlined: big.ts named only by the summary
+    expect(events[0].properties).toMatchObject({ decision: 'outline' })
+  })
+
+  it('un fichier trop gros, un FIFO ou un tool-results de Claude Code passent bruts sans être lus', () => {
+    const spill = path.join(dir, 'tool-results', 'toolu_01.txt')
+    fs.mkdirSync(path.dirname(spill)); fs.writeFileSync(spill, 'line\n'.repeat(500))
+    expect(handleHookEvent(pre('Read', { file_path: spill }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'tool-results' })
+
+    const huge = path.join(dir, 'src', 'huge.log')
+    const fd = fs.openSync(huge, 'w'); fs.ftruncateSync(fd, 5 * 1024 * 1024); fs.closeSync(fd)
+    expect(handleHookEvent(pre('Read', { file_path: huge }), deps())).toBeUndefined()
+    expect(events.at(-1)!.properties).toMatchObject({ decision: 'raw', reason: 'ineligible: too-large' })
+    expect(handleHookEvent(pre('Read', { file_path: dir }), deps())).toBeUndefined()   // a directory: not a file
+  })
+
+  it('l’outline d’un fichier de plus de 2000 lignes annonce la vraie longueur', () => {
+    const long = path.join(dir, 'src', 'long.ts')
+    fs.writeFileSync(long, mediumTs(400))   // 400 handlers × 6 lines ≈ 2400 lines
+    const total = fs.readFileSync(long, 'utf-8').split('\n').length
+    expect(total).toBeGreaterThan(2000)
+    const out = handleHookEvent(pre('Read', { file_path: long }), deps())
+    const reason = (out!.hookSpecificOutput as { permissionDecisionReason: string }).permissionDecisionReason
+    expect(reason).toContain(`${total} lines (first 2000 outlined)`)
+    expect(reason).toContain(`Lines 2001–${total} are not in this outline`)
+  })
+
+  it('SessionEnd purge les fichiers live de plus de 7 jours', async () => {
+    const { pruneLiveState } = await import('../../src/cli/hook.js')
+    fs.mkdirSync(LIVE_DIR, { recursive: true })
+    const old = path.join(LIVE_DIR, `reads-${sessionId}-old.json`), fresh = path.join(LIVE_DIR, `guard-${sessionId}-fresh.json`)
+    fs.writeFileSync(old, '{}'); fs.writeFileSync(fresh, '{}')
+    const t = Date.now() / 1000 - 8 * 86_400
+    fs.utimesSync(old, t, t)
+    expect(pruneLiveState(new Date())).toBe(1)
+    expect(fs.existsSync(old)).toBe(false)
+    expect(fs.existsSync(fresh)).toBe(true)
   })
 })

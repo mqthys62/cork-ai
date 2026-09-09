@@ -22,3 +22,5 @@ jobs:
           node-version: '22'
       - name: Push release download counts
         run: node scripts/adoption.mjs --push
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
