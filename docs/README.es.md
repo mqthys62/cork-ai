@@ -63,7 +63,7 @@ $env:CORK_AI_PRERELEASE = 1; irm https://raw.githubusercontent.com/mqthys62/cork
 cork-ai update --pre      # ya instalado: cambia al canal pre y actualiza (--stable para volver)
 ```
 
-La elección se recuerda (`config set channel pre|stable`), y el aviso diario de actualización sigue el mismo canal.
+La elección se recuerda (`config set channel pre|stable`). Tras `gain`, `context`, `doctor`, `hooks`, `report` o `models`, una línea te avisa cuando tu canal tiene una versión más reciente; una instalación estable al día que podría probar una release candidate recibe una invitación más discreta, como mucho una vez cada tres días.
 
 ### Descarga manual
 

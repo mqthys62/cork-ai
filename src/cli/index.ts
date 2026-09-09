@@ -60,7 +60,7 @@ import { CLAUDE_SETTINGS, CORK_HOOKS, applicableCorkHooks, CORK_HOOK_FALLBACK, C
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
 import { handleHookEvent, type HookOutput } from './hook.js'
-import { channelFor, scheduleUpdateCheck, updateNoticeLine, writeUpdateCheck, type Channel } from './update-check.js'
+import { channelFor, markPreNoticed, readUpdateCheck, scheduleUpdateCheck, updateNotice, writeUpdateCheck, type Channel } from './update-check.js'
 import { VERSION, compareVersions } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat, readSessionsSeen } from './heartbeat.js'
@@ -1829,33 +1829,38 @@ function toRelease(json: GitHubRelease): LatestRelease | undefined {
   return { tag: json.tag_name, version: json.tag_name.replace(/^v/, ''), prerelease: json.prerelease === true, assets }
 }
 
-/**
- * The newest release this install should move to. The `stable` channel follows
- * `/releases/latest`, which GitHub keeps clear of pre-releases. The `pre`
- * channel — chosen with `update --pre`, `CORK_AI_PRERELEASE=1`, or implied by
- * running a pre-release — also considers them, so rc.2 reaches the testers who
- * run rc.1, and so does the final 1.0.0, which is newer.
- */
-async function fetchLatestRelease(timeoutMs = 6_000, channel: Channel = channelFor(VERSION, loadConfig().channel)): Promise<LatestRelease | undefined> {
+/** Newest stable and newest overall (pre-releases included), from one call to the releases list. */
+async function fetchReleases(timeoutMs = 6_000): Promise<{ stable?: LatestRelease; pre?: LatestRelease } | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const headers = { Accept: 'application/vnd.github+json', 'User-Agent': `cork-ai/${VERSION}` }
   try {
-    if (channel === 'pre') {
-      const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=20`, { headers, signal: controller.signal })
-      if (!res.ok) return undefined
-      const list = (await res.json() as GitHubRelease[]).filter(r => !r.draft).map(toRelease).filter((r): r is LatestRelease => r !== undefined)
-      return list.sort((a, b) => compareVersions(b.version, a.version))[0]
-    }
-    const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases/latest`, { headers, signal: controller.signal })
+    const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=30`, { headers, signal: controller.signal })
     if (!res.ok) return undefined
-    return toRelease(await res.json() as GitHubRelease)
+    const list = (await res.json() as GitHubRelease[]).filter(r => !r.draft).map(toRelease).filter((r): r is LatestRelease => r !== undefined)
+      .sort((a, b) => compareVersions(b.version, a.version))
+    return { stable: list.find(r => !r.prerelease), pre: list[0] }
   } catch {
     return undefined
   } finally {
     clearTimeout(timer)
   }
 }
+
+/**
+ * The newest release this install should move to. The `stable` channel takes
+ * the newest release GitHub does not mark as pre-release. The `pre` channel —
+ * chosen with `update --pre`, `CORK_AI_PRERELEASE=1`, or implied by running a
+ * pre-release — also considers candidates, so rc.2 reaches the testers who run
+ * rc.1, and so does the final 1.0.0, which is newer.
+ */
+async function fetchLatestRelease(timeoutMs = 6_000, channel: Channel = channelFor(VERSION, loadConfig().channel)): Promise<LatestRelease | undefined> {
+  const found = await fetchReleases(timeoutMs)
+  if (!found) return undefined
+  if (found.stable || found.pre) writeUpdateCheck({ checkedAt: new Date().toISOString(), stable: known(found.stable), pre: known(found.pre), preNoticedAt: readUpdateCheck()?.preNoticedAt })
+  return channel === 'pre' ? (found.pre ?? found.stable) : found.stable
+}
+const known = (r?: LatestRelease) => r ? { tag: r.tag, version: r.version } : undefined
 
 /** sha256 published as `checksums.txt` next to the assets; undefined when the release has none. */
 async function fetchExpectedChecksum(latest: LatestRelease, asset: string): Promise<string | undefined> {
@@ -1885,10 +1890,14 @@ async function runUpdate(args: string[]): Promise<void> {
     console.error(`\n${C.yellow('Could not reach GitHub releases.')} Check https://github.com/${RELEASE_REPO}/releases\n`)
     process.exit(1)
   }
-  writeUpdateCheck({ checkedAt: new Date().toISOString(), tag: latest.tag, version: latest.version, prerelease: latest.prerelease, channel })
   const cmp = compareVersions(latest.version, VERSION)
   console.log(`\n  Installed ${C.cyan(`v${VERSION}`)} · latest ${C.cyan(latest.tag)}${latest.prerelease ? C.dim(' (pre-release)') : ''}${channel === 'pre' ? C.dim(' · channel: pre') : ''}`)
-  if (cmp <= 0 && channel === 'stable' && !VERSION.includes('-')) console.log(`  ${C.dim('Release candidates are not considered: cork-ai update --pre')}`)
+  if (cmp <= 0 && channel === 'stable') {
+    const pre = readUpdateCheck()?.pre
+    console.log(pre && compareVersions(pre.version, VERSION) > 0
+      ? `  ${C.dim(`Release candidate ${pre.tag} is out — try it with`)} ${C.cyan('cork-ai update --pre')}`
+      : `  ${C.dim('Release candidates are not considered: cork-ai update --pre')}`)
+  }
   if (cmp <= 0) { console.log(`  ${C.green('✔')}  Up to date.\n`); return }
   if (checkOnly) { console.log(`  ${C.yellow('!')}  Update available: ${C.cyan('cork-ai update')}\n`); return }
 
@@ -1984,9 +1993,7 @@ const NOTICE_COMMANDS = new Set(['gain', 'context', 'doctor', 'hooks', 'report',
     await runSendTelemetry(sub)
   } else if (cmd === '__check-update') {
     // Detached daily check: refresh the cache the notice reads. Silent by design.
-    const channel = channelFor(VERSION, loadConfig().channel)
-    const latest = await fetchLatestRelease(6_000, channel)
-    if (latest) writeUpdateCheck({ checkedAt: new Date().toISOString(), tag: latest.tag, version: latest.version, prerelease: latest.prerelease, channel })
+    await fetchLatestRelease()
   } else if (cmd === '__send-snapshot') {
     await runSendSnapshot(sub, args.includes('--force'))
   } else if (cmd === 'calibrate') {
@@ -2052,8 +2059,8 @@ const NOTICE_COMMANDS = new Set(['gain', 'context', 'doctor', 'hooks', 'report',
   }
 
   if (cmd && NOTICE_COMMANDS.has(cmd) && !args.includes('--json') && process.exitCode === undefined) {
-    const line = updateNoticeLine(VERSION, undefined, C.dim)
-    if (line) console.log(`${line}\n`)
+    const notice = updateNotice(VERSION, undefined, undefined, new Date(), { warn: C.yellow, dim: C.dim, cmd: C.cyan })
+    if (notice) { console.log(`${notice.line}\n`); if (notice.kind === 'candidate') markPreNoticed() }
     scheduleUpdateCheck()
   }
 })()

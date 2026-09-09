@@ -5,7 +5,7 @@
 import fs from 'fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { saveConfig } from '../../src/cli/config.js'
-import { UPDATE_CHECK_FILE, channelFor, readUpdateCheck, updateCheckDue, updateNoticeLine, writeUpdateCheck } from '../../src/cli/update-check.js'
+import { PRE_NOTICE_INTERVAL_MS, UPDATE_CHECK_FILE, channelFor, markPreNoticed, readUpdateCheck, updateCheckDue, updateNotice, writeUpdateCheck } from '../../src/cli/update-check.js'
 
 afterEach(() => {
   try { fs.unlinkSync(UPDATE_CHECK_FILE) } catch { /* none */ }
@@ -27,18 +27,45 @@ describe('channelFor', () => {
   })
 })
 
-describe('updateNoticeLine', () => {
-  const rc2 = { checkedAt: '2026-09-09T00:00:00Z', tag: 'v1.0.0-rc.2', version: '1.0.0-rc.2', prerelease: true, channel: 'pre' as const }
-  it('rien sans cache, rien quand on est à jour ou en avance', () => {
-    expect(updateNoticeLine('0.9.1', undefined)).toBeUndefined()
-    expect(updateNoticeLine('1.0.0-rc.2', rc2)).toBeUndefined()
-    expect(updateNoticeLine('1.0.0', rc2)).toBeUndefined()
+describe('updateNotice', () => {
+  const now = new Date('2026-09-09T12:00:00Z')
+  const stable091 = { tag: 'v0.9.1', version: '0.9.1' }
+  const rc2 = { tag: 'v1.0.0-rc.2', version: '1.0.0-rc.2' }
+  const both = { checkedAt: '2026-09-09T00:00:00Z', stable: stable091, pre: rc2 }
+  const style = { warn: (s: string) => `[${s}]`, dim: (s: string) => `<${s}>`, cmd: (s: string) => `{${s}}` }
+
+  it('rien sans cache, rien quand on est à jour ou en avance sur son canal', () => {
+    expect(updateNotice('0.9.1', 'stable', undefined, now)).toBeUndefined()
+    expect(updateNotice('1.0.0-rc.2', 'pre', both, now)).toBeUndefined()
+    expect(updateNotice('1.0.0', 'pre', both, now)).toBeUndefined()
+    expect(updateNotice('1.0.0', 'stable', both, now)).toBeUndefined()
   })
-  it('une ligne quand une version plus récente existe, avec --pre pour une install stable vers une rc', () => {
-    expect(updateNoticeLine('0.9.1', rc2)).toBe('  ↑ v1.0.0-rc.2 (pre-release) is available · installed v0.9.1 · cork-ai update --pre')
-    expect(updateNoticeLine('1.0.0-rc.1', rc2)).toBe('  ↑ v1.0.0-rc.2 (pre-release) is available · installed v1.0.0-rc.1 · cork-ai update')
-    const stable = { ...rc2, tag: 'v1.0.0', version: '1.0.0', prerelease: false, channel: 'stable' as const }
-    expect(updateNoticeLine('0.9.1', stable, s => `<${s}>`)).toBe('<  ↑ v1.0.0 is available · installed v0.9.1 · cork-ai update>')
+  it('en retard sur son canal : une ligne visible avec cork-ai update', () => {
+    expect(updateNotice('0.9.0', 'stable', both, now)).toEqual({ kind: 'behind', line: '  !  v0.9.1 is available · installed v0.9.0 · cork-ai update' })
+    expect(updateNotice('1.0.0-rc.1', 'pre', both, now)).toEqual({ kind: 'behind', line: '  !  v1.0.0-rc.2 (pre-release) is available · installed v1.0.0-rc.1 · cork-ai update' })
+    expect(updateNotice('0.9.0', 'stable', both, now, style)?.line).toBe('  [!]  v0.9.1 is available · installed v0.9.0 · {cork-ai update}')
+  })
+  it('à jour en stable mais une rc existe : une invitation douce, au plus une fois tous les trois jours', () => {
+    const first = updateNotice('0.9.1', 'stable', both, now)
+    expect(first?.kind).toBe('candidate')
+    expect(first?.line).toBe('  ·  Release candidate v1.0.0-rc.2 is out — try it with cork-ai update --pre (--stable goes back)')
+    const shown = { ...both, preNoticedAt: now.toISOString() }
+    expect(updateNotice('0.9.1', 'stable', shown, new Date(now.getTime() + PRE_NOTICE_INTERVAL_MS - 1000))).toBeUndefined()
+    expect(updateNotice('0.9.1', 'stable', shown, new Date(now.getTime() + PRE_NOTICE_INTERVAL_MS + 1000))?.kind).toBe('candidate')
+  })
+  it('le retard prime sur l’invitation, et une rc plus vieille que l’install n’invite pas', () => {
+    expect(updateNotice('0.9.0', 'stable', both, now)?.kind).toBe('behind')
+    expect(updateNotice('1.0.0', 'stable', { ...both, stable: { tag: 'v1.0.0', version: '1.0.0' } }, now)).toBeUndefined()
+  })
+  it('markPreNoticed garde le cache et date l’invitation', () => {
+    writeUpdateCheck(both)
+    markPreNoticed(now)
+    expect(readUpdateCheck()).toEqual({ ...both, preNoticedAt: now.toISOString() })
+  })
+  it('readUpdateCheck ignore l’ancien format à cible unique', () => {
+    fs.writeFileSync(UPDATE_CHECK_FILE, JSON.stringify({ checkedAt: '2026-09-09T00:00:00Z', tag: 'v0.9.1', version: '0.9.1', prerelease: false, channel: 'stable' }))
+    expect(readUpdateCheck()).toBeUndefined()
+    expect(updateCheckDue(now, {})).toBe(true)
   })
 })
 
@@ -46,18 +73,12 @@ describe('updateCheckDue', () => {
   it('dû sans cache, pas dû dans les 24 h, dû après, jamais si désactivé', () => {
     const now = new Date('2026-09-09T12:00:00Z')
     expect(updateCheckDue(now, {})).toBe(true)
-    writeUpdateCheck({ checkedAt: '2026-09-09T02:00:00Z', tag: 'v0.9.1', version: '0.9.1', prerelease: false, channel: channelFor(undefined, undefined, {}) })
-    expect(readUpdateCheck()?.version).toBe('0.9.1')
+    writeUpdateCheck({ checkedAt: '2026-09-09T02:00:00Z', stable: { tag: 'v0.9.1', version: '0.9.1' } })
+    expect(readUpdateCheck()?.stable?.version).toBe('0.9.1')
     expect(updateCheckDue(now, {})).toBe(false)
     expect(updateCheckDue(new Date('2026-09-10T13:00:00Z'), {})).toBe(true)
     expect(updateCheckDue(new Date('2026-09-10T13:00:00Z'), { CORK_AI_NO_UPDATE_CHECK: '1' })).toBe(false)
     saveConfig({ updateCheck: false })
     expect(updateCheckDue(new Date('2026-09-10T13:00:00Z'), {})).toBe(false)
-  })
-  it('un cache écrit pour l’autre canal est périmé', () => {
-    const now = new Date('2026-09-09T12:00:00Z')
-    const other = channelFor(undefined, undefined, {}) === 'pre' ? 'stable' : 'pre'
-    writeUpdateCheck({ checkedAt: now.toISOString(), tag: 'v0.9.1', version: '0.9.1', prerelease: false, channel: other })
-    expect(updateCheckDue(now, {})).toBe(true)
   })
 })
