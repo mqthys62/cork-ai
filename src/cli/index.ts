@@ -60,6 +60,7 @@ import { CLAUDE_SETTINGS, CORK_HOOKS, applicableCorkHooks, CORK_HOOK_FALLBACK, C
 import { policySummary, POLICY_FILE } from './policy.js'
 import { skippedCount, SKIP_FILE } from './skip-list.js'
 import { handleHookEvent, type HookOutput } from './hook.js'
+import { channelFor, scheduleUpdateCheck, updateNoticeLine, writeUpdateCheck, type Channel } from './update-check.js'
 import { VERSION, compareVersions } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat, readSessionsSeen } from './heartbeat.js'
@@ -161,7 +162,8 @@ ${C.bold('Precision:')}
                             (needs ANTHROPIC_API_KEY — makes every count model-exact)
 
 ${C.bold('Maintenance:')}
-  cork-ai update            Replace the binary with the latest release (--check to only look)
+  cork-ai update            Replace the binary with the latest release (--check to only look,
+                            --pre to follow release candidates, --stable to go back)
   cork-ai config            List settings · config get|set|unset <key> [value]
   cork-ai reset             Clear stats (--policy, --skip-list, --spend-cache, --digests, --all)
   cork-ai telemetry on|off  Anonymous usage stats, opt-in (docs/TELEMETRY.md); telemetry status
@@ -1828,17 +1830,18 @@ function toRelease(json: GitHubRelease): LatestRelease | undefined {
 }
 
 /**
- * The newest release this install should move to. A stable install follows
- * `/releases/latest`, which GitHub keeps clear of pre-releases. An install that
- * *is* a pre-release (1.0.0-rc.1) also considers pre-releases, so rc.2 reaches
- * the testers who run rc.1 — and so does the final 1.0.0, which is newer.
+ * The newest release this install should move to. The `stable` channel follows
+ * `/releases/latest`, which GitHub keeps clear of pre-releases. The `pre`
+ * channel — chosen with `update --pre`, `CORK_AI_PRERELEASE=1`, or implied by
+ * running a pre-release — also considers them, so rc.2 reaches the testers who
+ * run rc.1, and so does the final 1.0.0, which is newer.
  */
-async function fetchLatestRelease(timeoutMs = 6_000, installed = VERSION): Promise<LatestRelease | undefined> {
+async function fetchLatestRelease(timeoutMs = 6_000, channel: Channel = channelFor(VERSION, loadConfig().channel)): Promise<LatestRelease | undefined> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const headers = { Accept: 'application/vnd.github+json', 'User-Agent': `cork-ai/${VERSION}` }
   try {
-    if (installed.includes('-')) {
+    if (channel === 'pre') {
       const res = await fetch(`https://api.github.com/repos/${RELEASE_REPO}/releases?per_page=20`, { headers, signal: controller.signal })
       if (!res.ok) return undefined
       const list = (await res.json() as GitHubRelease[]).filter(r => !r.draft).map(toRelease).filter((r): r is LatestRelease => r !== undefined)
@@ -1874,13 +1877,18 @@ function releaseAssetName(): string {
 
 async function runUpdate(args: string[]): Promise<void> {
   const checkOnly = args.includes('--check')
-  const latest = await fetchLatestRelease()
+  // --pre / --stable pick the channel and remember it, so the daily notice follows the same one.
+  if (args.includes('--pre') || args.includes('--stable')) updateConfig({ channel: args.includes('--pre') ? 'pre' : 'stable' })
+  const channel = channelFor(VERSION, loadConfig().channel)
+  const latest = await fetchLatestRelease(6_000, channel)
   if (!latest) {
     console.error(`\n${C.yellow('Could not reach GitHub releases.')} Check https://github.com/${RELEASE_REPO}/releases\n`)
     process.exit(1)
   }
+  writeUpdateCheck({ checkedAt: new Date().toISOString(), tag: latest.tag, version: latest.version, prerelease: latest.prerelease, channel })
   const cmp = compareVersions(latest.version, VERSION)
-  console.log(`\n  Installed ${C.cyan(`v${VERSION}`)} · latest ${C.cyan(latest.tag)}`)
+  console.log(`\n  Installed ${C.cyan(`v${VERSION}`)} · latest ${C.cyan(latest.tag)}${latest.prerelease ? C.dim(' (pre-release)') : ''}${channel === 'pre' ? C.dim(' · channel: pre') : ''}`)
+  if (cmp <= 0 && channel === 'stable' && !VERSION.includes('-')) console.log(`  ${C.dim('Release candidates are not considered: cork-ai update --pre')}`)
   if (cmp <= 0) { console.log(`  ${C.green('✔')}  Up to date.\n`); return }
   if (checkOnly) { console.log(`  ${C.yellow('!')}  Update available: ${C.cyan('cork-ai update')}\n`); return }
 
@@ -1944,7 +1952,14 @@ const KNOWN_SUBCOMMANDS = new Set([
   'install', 'uninstall', 'remove', 'status', 'on', 'off', 'guard', 'list', 'get', 'set', 'unset', 'preview',
   '--all', '--history', '--sessions', '--models', '--json', '--days', '--ceiling', '--set-autocompact', '--check',
   '--stats', '--policy', '--skip-list', '--spend-cache', '--digests', '--daily', '--weekly', '--monthly', '--projects', '--forecast', '--force',
+  '--pre', '--stable',
 ])
+
+/**
+ * Commands that end with the discreet update line: the ones a person reads in
+ * a terminal. Never the hook, the JSON outputs, the detached children.
+ */
+const NOTICE_COMMANDS = new Set(['gain', 'context', 'doctor', 'hooks', 'report', 'models'])
 
 ;(async () => {
   const args = process.argv.slice(2)
@@ -1967,6 +1982,11 @@ const KNOWN_SUBCOMMANDS = new Set([
     await runHook().catch(() => { /* a hook must never fail a tool call */ })
   } else if (cmd === '__send-telemetry') {
     await runSendTelemetry(sub)
+  } else if (cmd === '__check-update') {
+    // Detached daily check: refresh the cache the notice reads. Silent by design.
+    const channel = channelFor(VERSION, loadConfig().channel)
+    const latest = await fetchLatestRelease(6_000, channel)
+    if (latest) writeUpdateCheck({ checkedAt: new Date().toISOString(), tag: latest.tag, version: latest.version, prerelease: latest.prerelease, channel })
   } else if (cmd === '__send-snapshot') {
     await runSendSnapshot(sub, args.includes('--force'))
   } else if (cmd === 'calibrate') {
@@ -2029,5 +2049,11 @@ const KNOWN_SUBCOMMANDS = new Set([
   } else {
     console.error(`\nUnknown command: ${cmd}\nRun \`cork-ai --help\` for usage.\n`)
     process.exit(1)
+  }
+
+  if (cmd && NOTICE_COMMANDS.has(cmd) && !args.includes('--json') && process.exitCode === undefined) {
+    const line = updateNoticeLine(VERSION, undefined, C.dim)
+    if (line) console.log(`${line}\n`)
+    scheduleUpdateCheck()
   }
 })()

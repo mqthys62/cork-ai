@@ -58,3 +58,12 @@ describe('config', () => {
     expect(isTelemetryEnabled()).toBe(false)
   })
 })
+
+describe('config keys — channel et updateCheck', () => {
+  it('channel n’accepte que stable ou pre', () => {
+    expect(CONFIG_KEYS.channel.parse('pre')).toBe('pre')
+    expect(CONFIG_KEYS.channel.parse(' Stable ')).toBe('stable')
+    expect(CONFIG_KEYS.channel.parse('beta')).toBeUndefined()
+    expect(CONFIG_KEYS.updateCheck.parse('off')).toBe(false)
+  })
+})

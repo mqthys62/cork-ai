@@ -37,8 +37,16 @@ function Install-CorkAi {
 
         Write-Host "  Fetching latest release..."
         try {
-            $api = "https://api.github.com/repos/$Repo/releases/latest"
-            $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "cork-ai-installer" }
+            # $env:CORK_AI_PRERELEASE = 1 installs the newest release candidate
+            # (GitHub keeps /releases/latest clear of pre-releases).
+            $pre = $env:CORK_AI_PRERELEASE -and $env:CORK_AI_PRERELEASE -ne "0"
+            if ($pre) {
+                $api = "https://api.github.com/repos/$Repo/releases?per_page=10"
+                $release = @(Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "cork-ai-installer" }) | Where-Object { -not $_.draft } | Select-Object -First 1
+            } else {
+                $api = "https://api.github.com/repos/$Repo/releases/latest"
+                $release = Invoke-RestMethod -Uri $api -Headers @{ "User-Agent" = "cork-ai-installer" }
+            }
             $tag = $release.tag_name
             if (-not $tag) { throw "no tag_name in the API response" }
         } catch {
@@ -118,6 +126,7 @@ function Install-CorkAi {
         # Not piped to Out-Null: `hooks install` asks two questions (telemetry,
         # auto-compaction) on the terminal, and a hidden prompt looks like a hang.
         try {
+            if ($pre) { & $dest config set channel pre | Out-Null }
             $env:CORK_AI_INSTALLER = "ps1"
             & $dest hooks install
             if ($LASTEXITCODE -ne 0) { throw "hooks install exited with $LASTEXITCODE" }

@@ -53,6 +53,18 @@ irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 
 
 Requiere Claude Code 2.1.139 o más reciente: en Windows los hooks se instalan en forma exec (`command` + `args`), la única que funciona tanto si Claude Code ejecuta los hooks con Git Bash como con PowerShell. `cork-ai doctor` lo indica si la versión es demasiado antigua.
 
+### Release candidates
+
+GitHub excluye las pre-releases de `/releases/latest`: los instaladores y `cork-ai update` siguen las versiones estables salvo que se les indique lo contrario:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | CORK_AI_PRERELEASE=1 sh   # macOS / Linux / WSL2
+$env:CORK_AI_PRERELEASE = 1; irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex  # Windows
+cork-ai update --pre      # ya instalado: cambia al canal pre y actualiza (--stable para volver)
+```
+
+La elección se recuerda (`config set channel pre|stable`), y el aviso diario de actualización sigue el mismo canal.
+
 ### Descarga manual
 
 [Releases de GitHub](https://github.com/mqthys62/cork-ai/releases/latest) → descarga el binario para tu plataforma:
@@ -176,7 +188,8 @@ cork-ai report --json       # salida legible por máquinas para dashboards / CI
 La librería de compresión de conversación con la que empezó cork-ai (`wrapClient`, siete estrategias) está obsoleta y documentada en [docs/SDK.md](SDK.md).
 
 ```bash
-cork-ai update            # sustituye el binario por la última release (--check solo comprueba)
+cork-ai update            # sustituye el binario por la última release (--check solo comprueba, --pre para release candidates)
+cork-ai config set updateCheck false  # sin comprobación diaria ni línea de aviso tras los comandos
 cork-ai config            # ajustes de ~/.cork-ai/config.json
 cork-ai config set policy.reReadCache false            # desactiva la caché de relectura
 cork-ai config set policy.readonlyAgentsAggressive false  # Explore/Plan siguen las reglas principales

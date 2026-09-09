@@ -31,6 +31,10 @@ export interface CorkConfig {
   /** ISO time of the last `savings_snapshot` telemetry event (one per day at most). */
   lastSnapshotAt?: string
   policy?: PolicyConfig
+  /** Which releases `update` and the update notice follow: `stable` (default) or `pre` (release candidates too). */
+  channel?: 'stable' | 'pre'
+  /** false = never check GitHub for a newer version in the background (default true). */
+  updateCheck?: boolean
 }
 
 export interface PolicyConfig {
@@ -69,6 +73,8 @@ export const CONFIG_KEYS: Record<string, { description: string; parse: (raw: str
   'policy.reReadCache': { description: 'Remind instead of re-serving a whole file already in context (true/false)', parse: parseBool },
   'policy.readonlyAgentsAggressive': { description: 'Lower outline threshold for read-only subagents such as Explore (true/false)', parse: parseBool },
   'measuredAmplification': { description: 'Cache reads per token written used by the EV gate (auto-measured by gain --all)', parse: parseNumber(0) },
+  'channel': { description: 'Releases to follow: stable, or pre for release candidates too', parse: raw => { const v = raw.trim().toLowerCase(); return v === 'stable' || v === 'pre' ? v : undefined } },
+  'updateCheck': { description: 'Daily background check for a newer version, shown as one line after commands (true/false)', parse: parseBool },
 }
 
 /** `200k`, `1M`, `200` (thousands) or a plain token count → tokens. */

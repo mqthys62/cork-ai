@@ -53,6 +53,18 @@ irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 
 
 Nécessite Claude Code 2.1.139 ou plus récent : sous Windows les hooks sont installés en forme exec (`command` + `args`), la seule qui fonctionne que Claude Code lance les hooks via Git Bash ou via PowerShell. `cork-ai doctor` le signale si la version est trop ancienne.
 
+### Release candidates
+
+GitHub exclut les pré-releases de `/releases/latest` : les installeurs et `cork-ai update` suivent donc les versions stables, sauf demande explicite :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.sh | CORK_AI_PRERELEASE=1 sh   # macOS / Linux / WSL2
+$env:CORK_AI_PRERELEASE = 1; irm https://raw.githubusercontent.com/mqthys62/cork-ai/main/scripts/install.ps1 | iex  # Windows
+cork-ai update --pre      # déjà installé : passe sur le canal pre et met à jour (--stable pour revenir)
+```
+
+Le choix est mémorisé (`config set channel pre|stable`), et le rappel de mise à jour suit le même canal.
+
 ### Téléchargement manuel
 
 [Releases GitHub](https://github.com/mqthys62/cork-ai/releases/latest) → télécharge le binaire pour ta plateforme :
@@ -150,7 +162,8 @@ Un segment de barre de statut : taille du contexte, coût cache-read du prochain
 ### `cork-ai update`, `config`, `reset`, `telemetry`
 
 ```bash
-cork-ai update            # remplace le binaire par la dernière release (--check pour seulement regarder)
+cork-ai update            # remplace le binaire par la dernière release (--check pour seulement regarder, --pre pour les release candidates)
+cork-ai config set updateCheck false  # pas de vérification quotidienne, pas de ligne de rappel après les commandes
 cork-ai config            # liste les réglages de ~/.cork-ai/config.json · config set contextGuard.bands 150k,400k
 cork-ai config set policy.reReadCache false            # désactive le cache de relecture
 cork-ai config set policy.readonlyAgentsAggressive false  # Explore/Plan suivent les règles principales

@@ -17,6 +17,9 @@ Second candidate. No behaviour change for the user: this release makes the telem
 - **Install context** — `install` carries the `channel` (`sh` / `ps1` installer or `manual`, set by the scripts through `CORK_AI_INSTALLER`), how many hooks were skipped for an old Claude Code, whether `CLAUDE_CONFIG_DIR` is set, and `managed_settings`: whether Claude Code's managed settings file exists on the machine — the one signal of a company-managed Claude Code. Its presence only; the file is never read. Also on the person profile and on `doctor`.
 - **Projects bucket** — the daily snapshot carries `projects_30d`, the number of distinct projects an install worked on over 30 days, as a bucket (`1`, `2-3`, `4-6`, `7-15`, `>15`). Breadth of use, never a name.
 
+- **Release channel** — `cork-ai update --pre` follows release candidates (and remembers it: `config set channel pre|stable`, `--stable` to go back); the installers do the same under `CORK_AI_PRERELEASE=1`. GitHub keeps `/releases/latest` clear of pre-releases, which is why a fresh install landed on 0.9.1 instead of the candidate.
+- **Update notice** — one dim line at the end of `gain`, `context`, `doctor`, `hooks`, `report` and `models` when a newer version exists on the install's channel. A detached child refreshes a small cache (`~/.cork-ai/update-check.json`) at most once a day; the commands themselves never wait for the network. Off with `config set updateCheck false` or `CORK_AI_NO_UPDATE_CHECK=1`; never printed with `--json`, never by the hook.
+
 ### Changed
 - `docs/TELEMETRY.md` lists every new field; `tests/unit/telemetry.test.ts` asserts that an error report never contains the message and that the install channel is allowlisted.
 

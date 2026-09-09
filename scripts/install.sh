@@ -64,7 +64,13 @@ else
   fail "curl or wget is required. Install one and retry."
 fi
 
-API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+# CORK_AI_PRERELEASE=1 installs the newest release candidate instead of the
+# latest stable (GitHub keeps /releases/latest clear of pre-releases).
+if [ -n "${CORK_AI_PRERELEASE:-}" ] && [ "$CORK_AI_PRERELEASE" != "0" ]; then
+  API_URL="https://api.github.com/repos/${REPO}/releases?per_page=10"
+else
+  API_URL="https://api.github.com/repos/${REPO}/releases/latest"
+fi
 LATEST_TAG="$(eval "$FETCH \"$API_URL\"" 2>/dev/null | grep '"tag_name"' | sed 's/.*"tag_name": *"\(.*\)".*/\1/' | head -1)"
 
 if [ -z "$LATEST_TAG" ]; then
@@ -160,6 +166,9 @@ fi
 
 printf "\n  Setting up Claude Code integration...\n"
 
+if [ -n "${CORK_AI_PRERELEASE:-}" ] && [ "$CORK_AI_PRERELEASE" != "0" ]; then
+  "$CORK_AI" config set channel pre >/dev/null 2>&1 || true
+fi
 if CORK_AI_INSTALLER=sh "$CORK_AI" hooks install 2>/dev/null; then
   ok "Claude Code hook installed"
   info "All your Claude Code sessions will now compress Read outputs automatically."
