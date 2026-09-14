@@ -287,6 +287,85 @@ cork-ai report --json       # machine-readable output for dashboards / CI
 
 ---
 
+## Deploying across a team
+
+`cork-ai report` describes one workstation. An organisation running cork-ai on
+several machines can see the whole fleet with [`fleet/`](fleet/) — two files, no
+dependencies, and **no PostHog key**.
+
+Each workstation runs a collector that asks its own local cork-ai for its numbers
+and writes one JSON report. A dashboard somewhere reads those reports.
+
+```
+workstation ──┐
+workstation ──┼──► reports/*.json ──► dashboard ──► http://localhost:4343
+workstation ──┘
+```
+
+### Why there is no key to hand out
+
+PostHog cannot restrict an API key to a subset of rows — the finest grain
+available is the whole project. A key that let your organisation see its own
+twenty machines would also let it see every cork-ai user's events, worldwide. So
+there is no such key, and `fleet/` reads each workstation's own data instead.
+
+That is the better source anyway: it carries real project names and real costs,
+where telemetry only carries bucketed, anonymised aggregates. Your fleet's
+numbers never leave your infrastructure, and cork-ai's author is not a
+sub-processor of your data. You do not need telemetry enabled on any machine for
+this to work.
+
+### Setting it up
+
+**1. Put the two files where your workstations can run them** — a network share,
+a package, a checkout of this repository. They need Node 18 or later and cork-ai
+on `PATH`.
+
+**2. Check what a report contains, before scheduling anything:**
+
+```bash
+node fleet/collect.mjs --stdout | less
+```
+
+**3. Collect on each workstation**, into a shared folder:
+
+```bash
+node fleet/collect.mjs --out /mnt/fleet-reports
+```
+
+`--privacy` bounds what leaves the machine. The default drops absolute paths and
+keeps project names; `minimal` drops project names too; `full` keeps everything
+and is for a machine you own yourself. `--anonymous-host` omits the hostname and
+user name as well.
+
+Schedule it daily — `cron` on Linux and macOS, Task Scheduler on Windows. The
+[fleet README](fleet/README.md) has both, plus the WSL case: a person using
+Claude Code in **both** PowerShell and WSL has two cork-ai installs, with two ids
+and two separate sets of numbers. The collector reports which side it ran on and
+the dashboard shows them apart, because counting them as one person is wrong in
+both directions.
+
+**4. Serve the dashboard:**
+
+```bash
+node fleet/dashboard.mjs --reports /mnt/fleet-reports
+```
+
+It binds to `127.0.0.1` and has no authentication of its own. Serving it to the
+network (`--host 0.0.0.0`) means putting your own reverse proxy and SSO in front,
+like any other internal tool. Workstations can also POST their reports instead of
+writing to a share, with `--ingest --token`.
+
+### What it tells you
+
+Beyond the totals, the fleet view is built to answer "why is this machine not
+reporting what the others do": a version left behind, a missing auto-compaction
+ceiling (the cheapest improvement available), a ceiling set so high it never
+triggers, a re-read rate that says outlines are being read twice, a collector
+that stopped running a week ago.
+
+---
+
 ## Works alongside RTK and Anthropic's native features
 
 [RTK](https://github.com/rtk-ai/rtk) rewrites Bash commands to trim their outputs; cork-ai handles what RTK's own README says it cannot reach — the built-in `Read` tool — plus whole-file reads made *through* Bash, and the context-size governance that neither does. Anthropic's server-side compaction and context editing manage tokens you already sent; cork-ai stops tokens from being sent and tells you when the context has grown past what it costs to keep. They stack.

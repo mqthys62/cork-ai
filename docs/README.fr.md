@@ -233,6 +233,89 @@ cork-ai report --json       # sortie machine pour dashboards / CI
 
 ---
 
+## Déployer sur un parc
+
+`cork-ai report` décrit un poste. Une organisation qui fait tourner cork-ai sur
+plusieurs machines peut voir l'ensemble du parc avec [`fleet/`](../fleet/) : deux
+fichiers, aucune dépendance, et **aucune clé PostHog**.
+
+Chaque poste lance un collecteur qui interroge le cork-ai installé localement et
+écrit un rapport JSON. Un dashboard, quelque part, lit ces rapports.
+
+```
+poste ──┐
+poste ──┼──► reports/*.json ──► dashboard ──► http://localhost:4343
+poste ──┘
+```
+
+### Pourquoi il n'y a aucune clé à distribuer
+
+PostHog ne sait pas restreindre une clé API à un sous-ensemble de lignes : le
+grain le plus fin disponible est le projet entier. Une clé qui permettrait à ton
+organisation de voir ses vingt machines lui permettrait aussi de voir les
+événements de tous les utilisateurs de cork-ai dans le monde. Cette clé n'existe
+donc pas, et `fleet/` lit à la place les données propres à chaque poste.
+
+C'est de toute façon la meilleure source : elle porte les vrais noms de projets
+et les vrais coûts, là où la télémétrie ne transporte que des agrégats anonymisés
+par tranches. Les chiffres de ton parc ne quittent jamais ton infrastructure, et
+l'auteur de cork-ai n'est pas sous-traitant de tes données. Nul besoin d'activer
+la télémétrie sur une seule machine pour que ça fonctionne.
+
+### Mise en place
+
+**1. Place les deux fichiers là où tes postes peuvent les exécuter** — un partage
+réseau, un paquet, un clone de ce dépôt. Il leur faut Node 18 ou plus récent et
+cork-ai dans le `PATH`.
+
+**2. Regarde ce que contient un rapport avant de planifier quoi que ce soit :**
+
+```bash
+node fleet/collect.mjs --stdout | less
+```
+
+**3. Collecte sur chaque poste**, vers un dossier partagé :
+
+```bash
+node fleet/collect.mjs --out /mnt/rapports-parc
+```
+
+`--privacy` borne ce qui sort de la machine. Le défaut supprime les chemins
+absolus et conserve les noms de projets ; `minimal` supprime aussi les noms de
+projets ; `full` garde tout et s'adresse à une machine qui t'appartient.
+`--anonymous-host` omet en plus le nom d'hôte et le nom d'utilisateur.
+
+Planifie-le quotidiennement — `cron` sous Linux et macOS, le Planificateur de
+tâches sous Windows. Le [README de fleet](../fleet/README.md) donne les deux, plus
+le cas WSL : quelqu'un qui utilise Claude Code **à la fois** dans PowerShell et
+dans WSL a deux installations de cork-ai, avec deux identifiants et deux jeux de
+chiffres distincts. Le collecteur indique de quel côté il a tourné et le
+dashboard les affiche séparément, parce que les compter comme une seule personne
+est faux dans les deux sens.
+
+**4. Sers le dashboard :**
+
+```bash
+node fleet/dashboard.mjs --reports /mnt/rapports-parc
+```
+
+Il écoute sur `127.0.0.1` et ne possède aucune authentification propre. L'exposer
+au réseau (`--host 0.0.0.0`) suppose de mettre ton propre reverse proxy et ton SSO
+devant, comme pour n'importe quel outil interne. Les postes peuvent aussi
+transmettre leurs rapports en POST plutôt que d'écrire sur un partage, avec
+`--ingest --token`.
+
+### Ce qu'il te dit
+
+Au-delà des totaux, la vue parc est faite pour répondre à « pourquoi cette
+machine ne remonte pas ce que les autres remontent » : une version restée en
+arrière, un plafond d'auto-compaction absent (l'amélioration la moins chère
+disponible), un plafond réglé si haut qu'il ne se déclenche jamais, un taux de
+relecture qui signale des outlines lues deux fois, un collecteur qui ne tourne
+plus depuis une semaine.
+
+---
+
 ## Avec RTK et les fonctionnalités natives d'Anthropic
 
 [RTK](https://github.com/rtk-ai/rtk) réécrit les commandes Bash pour élaguer leurs sorties ; cork-ai couvre ce que le README de RTK dit ne pas atteindre — l'outil `Read` — plus les lectures de fichiers entiers faites *via* Bash, et la gouvernance de la taille de contexte qu'aucun des deux ne fait. La compaction et l'édition de contexte côté serveur d'Anthropic gèrent les tokens déjà envoyés ; cork-ai empêche des tokens d'être envoyés et te prévient quand le contexte a dépassé ce qu'il coûte de le garder. Les trois s'empilent.

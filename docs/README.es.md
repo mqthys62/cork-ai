@@ -181,6 +181,87 @@ cork-ai report --json       # salida legible por máquinas para dashboards / CI
 
 ---
 
+## Desplegar en un parque de máquinas
+
+`cork-ai report` describe un puesto de trabajo. Una organización que ejecuta
+cork-ai en varias máquinas puede ver el parque completo con [`fleet/`](../fleet/):
+dos archivos, sin dependencias y **sin ninguna clave de PostHog**.
+
+Cada puesto ejecuta un recolector que consulta al cork-ai instalado localmente y
+escribe un informe JSON. Un dashboard, en algún sitio, lee esos informes.
+
+```
+puesto ──┐
+puesto ──┼──► reports/*.json ──► dashboard ──► http://localhost:4343
+puesto ──┘
+```
+
+### Por qué no hay ninguna clave que repartir
+
+PostHog no sabe restringir una clave de API a un subconjunto de filas: el grano
+más fino disponible es el proyecto entero. Una clave que permitiera a tu
+organización ver sus veinte máquinas le permitiría también ver los eventos de
+todos los usuarios de cork-ai del mundo. Esa clave no existe, y `fleet/` lee en su
+lugar los datos propios de cada puesto.
+
+De todos modos es la mejor fuente: lleva nombres de proyecto reales y costes
+reales, mientras que la telemetría solo transporta agregados anonimizados por
+tramos. Las cifras de tu parque nunca salen de tu infraestructura, y el autor de
+cork-ai no es encargado del tratamiento de tus datos. No necesitas activar la
+telemetría en ninguna máquina para que esto funcione.
+
+### Puesta en marcha
+
+**1. Coloca los dos archivos donde tus puestos puedan ejecutarlos**: un recurso
+compartido de red, un paquete, un clon de este repositorio. Necesitan Node 18 o
+posterior y cork-ai en el `PATH`.
+
+**2. Mira qué contiene un informe antes de programar nada:**
+
+```bash
+node fleet/collect.mjs --stdout | less
+```
+
+**3. Recolecta en cada puesto**, hacia una carpeta compartida:
+
+```bash
+node fleet/collect.mjs --out /mnt/informes-parque
+```
+
+`--privacy` acota lo que sale de la máquina. El valor por defecto elimina las
+rutas absolutas y conserva los nombres de proyecto; `minimal` elimina también los
+nombres de proyecto; `full` lo conserva todo y está pensado para una máquina
+tuya. `--anonymous-host` omite además el nombre de host y el nombre de usuario.
+
+Prográmalo a diario: `cron` en Linux y macOS, el Programador de tareas en Windows.
+El [README de fleet](../fleet/README.md) incluye ambos, además del caso WSL: quien
+usa Claude Code **tanto** en PowerShell como en WSL tiene dos instalaciones de
+cork-ai, con dos identificadores y dos conjuntos de cifras independientes. El
+recolector indica de qué lado se ejecutó y el dashboard las muestra por separado,
+porque contarlas como una sola persona es incorrecto en ambos sentidos.
+
+**4. Sirve el dashboard:**
+
+```bash
+node fleet/dashboard.mjs --reports /mnt/informes-parque
+```
+
+Escucha en `127.0.0.1` y no tiene autenticación propia. Exponerlo a la red
+(`--host 0.0.0.0`) implica poner tu propio reverse proxy y tu SSO delante, como
+con cualquier otra herramienta interna. Los puestos también pueden enviar sus
+informes por POST en lugar de escribir en un recurso compartido, con
+`--ingest --token`.
+
+### Qué te dice
+
+Más allá de los totales, la vista de parque está hecha para responder a «por qué
+esta máquina no reporta lo que reportan las demás»: una versión que se ha quedado
+atrás, un techo de auto-compactación ausente (la mejora más barata disponible), un
+techo tan alto que nunca se dispara, una tasa de relectura que delata outlines
+leídos dos veces, un recolector que dejó de ejecutarse hace una semana.
+
+---
+
 ## Con RTK y las funciones nativas de Anthropic
 
 [RTK](https://github.com/rtk-ai/rtk) reescribe comandos Bash para recortar sus salidas; cork-ai cubre lo que el README de RTK dice no alcanzar — la herramienta `Read` — más las lecturas de archivos completos hechas *a través de* Bash, y la gobernanza del tamaño de contexto que ninguno de los dos hace. La compactación y la edición de contexto del lado del servidor de Anthropic gestionan tokens ya enviados; cork-ai evita que se envíen y te avisa cuando el contexto ha crecido más de lo que cuesta mantenerlo. Las tres cosas se suman.
