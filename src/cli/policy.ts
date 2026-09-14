@@ -45,18 +45,35 @@ export interface PolicyState {
   ext: Record<string, ExtStats>
 }
 
-/** Prior belief before any local evidence: a coin flip, weighted like 4 observations. */
+/** Prior belief before any local evidence: a coin flip, weighted like PRIOR_WEIGHT observations. */
 const PRIOR_RE_READ = 0.5
 /**
  * The re-read cache reminds the model of a file it already has in context —
  * a much smaller leap of faith than an outline, so it starts from a lower prior.
  */
 const PRIOR_RE_READ_CACHE = 0.3
-const PRIOR_WEIGHT = 4
+// Weighted like two observations, not four: real evidence should outvote the
+// coin-flip prior quickly. At PROBATION_MIN_SAMPLES=4 a 3/4 failure rate now
+// lands at p=0.58 and trips probation, where before it sat under the bar.
+export const PRIOR_WEIGHT = 2
 /** Above this measured re-read rate an extension is put on probation. */
 export const PROBATION_RATE = 0.35
-/** Observations needed before probation can apply. */
-export const PROBATION_MIN_SAMPLES = 10
+/**
+ * An outline must point at real structure to be worth serving. Below this
+ * density the model has to re-read, so compressing only buys an extra turn.
+ */
+export const MIN_LINES_PER_ENTRY = 40
+/** Short files legitimately have few entries; only judge density above this. */
+export const MIN_LINES_FOR_DENSITY = 60
+
+/**
+ * Observations before an extension can be put on probation.
+ *
+ * Was 10, which the lost-update bug made unreachable; with counters now
+ * accurate, 10 still means ten paid failures before the brake engages on a
+ * surface of ~12% of reads. Four is enough to act on with the prior below.
+ */
+export const PROBATION_MIN_SAMPLES = 4
 /** On probation, one read in N is still compressed so the estimate can recover. */
 export const PROBE_EVERY = 10
 /** Cache reads per token written when no session measurement is available. */
@@ -222,6 +239,10 @@ export interface GateInput {
   state?: PolicyState
   /** Which statistic to consult: outline vs cache, main vs agent class. */
   scope?: PolicyScope
+  /** Structural entries in the outline about to be served (undefined = not an outline). */
+  outlineEntries?: number
+  /** Lines the outline covers, for the density check. */
+  outlineLines?: number
 }
 
 export interface GateDecision {
@@ -268,11 +289,33 @@ export function gate(input: GateInput): GateDecision {
   // the caller records every gated read on probation (`recordProbationRead`).
   const probe = onProbation && (stats?.probationReads ?? 0) % PROBE_EVERY === 0
 
+  // An outline with no structural entries is not a summary, it is deletion:
+  // the model gets a header and a hint and must re-read to learn anything.
+  // Measured on this repo, 7 of 87 eligible files outline to zero entries
+  // (every describe/it test file, plus YAML that the text outliner cannot
+  // see), and 21 more are near-empty. Those were being served — and booked as
+  // savings — at every context size.
+  if (input.outlineEntries !== undefined && input.outlineEntries <= 0) {
+    return { compress: false, reason: 'outline has no entries', expectedValueUSD: ev, reReadProbability: p, probation: onProbation }
+  }
+  if (
+    input.outlineEntries !== undefined &&
+    input.outlineLines !== undefined &&
+    input.outlineLines >= MIN_LINES_FOR_DENSITY &&
+    input.outlineEntries < input.outlineLines / MIN_LINES_PER_ENTRY
+  ) {
+    return { compress: false, reason: `outline too sparse (${input.outlineEntries} entries for ${input.outlineLines} lines)`, expectedValueUSD: ev, reReadProbability: p, probation: onProbation }
+  }
   if (saved < minSaved) {
     return { compress: false, reason: `saves only ${saved} tokens (< ${minSaved})`, expectedValueUSD: ev, reReadProbability: p, probation: onProbation }
   }
   if (onProbation && !probe) {
     return { compress: false, reason: `${ext} on probation (re-read rate ${(p * 100).toFixed(0)}% over ${samples} reads)`, expectedValueUSD: ev, reReadProbability: p, probation: true }
+  }
+  // `ev <= 0` is false for NaN, so a single bad input used to sail through as
+  // "compress". Refuse anything not finite rather than gamble on it.
+  if (!Number.isFinite(ev)) {
+    return { compress: false, reason: 'expected value not computable', expectedValueUSD: 0, reReadProbability: p, probation: onProbation }
   }
   if (ev <= 0) {
     return { compress: false, reason: `expected value ${ev.toFixed(4)} USD ≤ 0 at ${Math.round(input.contextTokens / 1000)}k context`, expectedValueUSD: ev, reReadProbability: p, probation: onProbation }

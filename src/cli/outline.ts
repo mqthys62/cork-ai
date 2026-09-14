@@ -74,6 +74,15 @@ const MEMBER_RE = new RegExp([
   String.raw`^\s{1,8}@\w+`, // decorators
 ].map(r => `(?:${r})`).join('|'))
 
+/**
+ * Test blocks: `describe('…', …)`, `it('…')`, `test.each(…)(…)`, at any indent.
+ *
+ * A spec file's structure *is* its describe/it tree — without this a 163-line
+ * test outlined to zero entries and was served as four words, which the gate
+ * then had to refuse outright. Captures the title so the entry is readable.
+ */
+const TEST_BLOCK_RE = /^\s*(?:export\s+)?(describe|it|test|suite|context|bench)\b\s*(?:\.\s*\w+\s*)?(?:\.\s*each\s*(?:\([^)]*\)|`[^`]*`)\s*)?\(\s*(['"`])(.+?)\2/
+
 /** Section banners developers leave in code: `// ─── Name ───`, `// #region`, `# --- Name ---`. */
 const SECTION_RE = /^\s*(\/\/|#|--|\/\*)\s*(─{3,}|-{3,}|={3,}|#region\b|MARK:|region\b)/
 
@@ -138,6 +147,16 @@ export function outlineCode(content: string, filePath: string, totalLines?: numb
     if (SECTION_RE.test(line)) {
       out.push('')
       out.push(fmtLine(n, width, trimmed.replace(/[─=-]{3,}/g, '').replace(/\s+/g, ' ').trim()))
+      entries++
+      continue
+    }
+
+    // Test blocks before CALL_LIKE_RE, which deliberately filters out bare
+    // `it(` / `describe(` calls: in a spec file those *are* the structure.
+    const test = TEST_BLOCK_RE.exec(line)
+    if (test) {
+      const indent = line.length - line.trimStart().length
+      out.push(fmtLine(n, width, `${' '.repeat(Math.min(indent, 8))}${test[1]} ${test[3]}`))
       entries++
       continue
     }
@@ -217,10 +236,15 @@ export function outlineText(content: string, filePath: string, totalLines?: numb
     }
   } else {
     // css/scss/html/yaml/…: rule selectors, top-level keys, tags with ids.
-    const structural = /^(?:[.#@:\w][^{};]*\{\s*$|[\w-]+:\s*$|<(?:section|div|main|header|footer|nav|form|table|article|aside|template|script|style)\b[^>]*\bid=|\[[\w.-]+\]\s*$|\w[\w.-]*\s*=\s*$)/
+    // `key:` alone missed most real YAML, where the structure is `key: value`
+    // and `- name: …` list items — a 96-line workflow outlined to zero.
+    const structural = /^(?:[.#@:\w][^{};]*\{\s*$|[\w-]+:(?:\s|$)|-\s+(?:name|id|uses|run):\s*\S|<(?:section|div|main|header|footer|nav|form|table|article|aside|template|script|style)\b[^>]*\bid=|\[[\w.-]+\]\s*$|\w[\w.-]*\s*=\s*$)/
+    const isYamlish = /\.(ya?ml|toml|ini|cfg|conf|properties)$/i.test(filePath)
+    // YAML nests meaningfully, so allow one more level than a CSS selector.
+    const maxIndent = isYamlish ? 4 : 2
     for (let i = HEAD; i < lines.length; i++) {
       const line = lines[i]
-      if (structural.test(line.trim()) && (line.length - line.trimStart().length) <= 2) {
+      if (structural.test(line.trim()) && (line.length - line.trimStart().length) <= maxIndent) {
         out.push(fmtLine(i + 1, width, line.trimEnd()))
         entries++
       }

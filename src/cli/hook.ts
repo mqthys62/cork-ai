@@ -473,6 +473,8 @@ function handleRead(ctx: ReadContext): HookOutput {
     model: detectedModel,
     amplification: cfg.measuredAmplification,
     scope,
+    outlineEntries: view.entries,
+    outlineLines: view.lines,
   })
   if (decision.probation) recordProbationRead(filePath, scope)
   if (!decision.compress) {

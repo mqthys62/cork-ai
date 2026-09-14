@@ -140,3 +140,54 @@ describe('outline (dispatch)', () => {
     expect(out.text.length).toBeLessThan(json.length)
   })
 })
+
+describe('outlines that carried no structure', () => {
+  // Regression: CALL_LIKE_RE filters out bare `it(`/`describe(` calls, so a
+  // spec file — whose structure *is* its describe/it tree — outlined to zero
+  // entries and was served to the model as four words.
+  it('lists describe/it blocks in a test file', () => {
+    const src = [
+      "import { describe, it, expect } from 'vitest'",
+      "describe('the widget', () => {",
+      "  it('renders', () => { expect(1).toBe(1) })",
+      "  it.each([1, 2])('handles %i', n => { expect(n).toBeTruthy() })",
+      "})",
+    ].join('\n')
+    const r = outlineCode(src, 'widget.test.ts')
+    expect(r.entries).toBeGreaterThanOrEqual(3)
+    expect(r.text).toContain('the widget')
+    expect(r.text).toContain('renders')
+  })
+
+  // Regression: the structural regex wanted `key:` with nothing after it,
+  // which misses most real YAML (`key: value`, `- name: …`).
+  it('lists keys and list items in a YAML workflow', () => {
+    // The first HEAD lines are echoed verbatim as a preview, so the structural
+    // scan only starts below them: the fixture has to be longer than that.
+    const src = [
+      'name: release',
+      'on:',
+      '  push:',
+      '    tags: ["v*"]',
+      '',
+      '# ------------------------------------------------------------------',
+      '# padding so the structural scan below the head preview is exercised',
+      '# ------------------------------------------------------------------',
+      '',
+      'env:',
+      '  NODE_VERSION: "22"',
+      '  CI: "true"',
+      '',
+      'jobs:',
+      '  build:',
+      '    runs-on: ubuntu-latest',
+      '    steps:',
+      '      - name: checkout',
+      '        uses: actions/checkout@v4',
+      '      - name: test',
+      '        run: npm test',
+    ].join('\n')
+    const r = outlineText(src, '.github/workflows/release.yml')
+    expect(r.entries).toBeGreaterThanOrEqual(3)
+  })
+})

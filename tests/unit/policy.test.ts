@@ -5,6 +5,7 @@ import {
   DEFAULT_AMPLIFICATION,
   MIN_SAVED_TOKENS,
   POLICY_FILE,
+  PRIOR_WEIGHT,
   PROBATION_MIN_SAMPLES,
   PROBE_EVERY,
   agentClassOf,
@@ -35,13 +36,13 @@ describe('apprentissage par extension', () => {
     for (let i = 0; i < 20; i++) recordCompression('/p/a.ts')
     for (let i = 0; i < 2; i++) recordReRead('/p/a.ts')
     const p = reReadProbability('.ts')
-    expect(p).toBeCloseTo((0.5 * 4 + 2) / (4 + 20), 5)
+    expect(p).toBeCloseTo((0.5 * PRIOR_WEIGHT + 2) / (PRIOR_WEIGHT + 20), 5)
     expect(p).toBeLessThan(0.2)
   })
 
   it('une lecture ciblée après un outline ne pèse pas sur P(relecture)', () => {
     for (let i = 0; i < 10; i++) { recordCompression('/p/a.go'); recordRangeRead('/p/a.go') }
-    expect(reReadProbability('.go')).toBeCloseTo((0.5 * 4) / (4 + 10), 5)
+    expect(reReadProbability('.go')).toBeCloseTo((0.5 * PRIOR_WEIGHT) / (PRIOR_WEIGHT + 10), 5)
     expect(policySummary()[0]).toMatchObject({ ext: '.go', rangeReads: 10, reReadRate: 0, probation: false })
   })
 
@@ -184,5 +185,49 @@ describe('concurrent counter writes', () => {
       ),
     )
     expect(loadPolicy().ext['.ts'].compressions).toBe(workers * each)
+  })
+})
+
+describe('gate refuses what it cannot justify', () => {
+  const base = {
+    filePath: '/x/a.ts',
+    originalTokens: 20_000,
+    compressedTokens: 500,
+    contextTokens: 100_000,
+    model: 'claude-opus-5',
+    amplification: 150,
+  }
+
+  // Regression: `ev <= 0` is false for NaN, so a non-finite input sailed
+  // through as "compress".
+  it('refuses when the expected value is not computable', () => {
+    const d = gate({ ...base, originalTokens: NaN })
+    expect(d.compress).toBe(false)
+    expect(d.reason).toMatch(/not computable/)
+  })
+
+  // Regression: an outline with no entries is deletion, not compression —
+  // the model must re-read to learn anything, so it only buys an extra turn.
+  it('refuses an outline with no structural entries', () => {
+    const d = gate({ ...base, outlineEntries: 0, outlineLines: 163 })
+    expect(d.compress).toBe(false)
+    expect(d.reason).toMatch(/no entries/)
+  })
+
+  it('refuses an outline too sparse to navigate', () => {
+    const d = gate({ ...base, outlineEntries: 1, outlineLines: 4_221 })
+    expect(d.compress).toBe(false)
+    expect(d.reason).toMatch(/too sparse/)
+  })
+
+  it('still compresses when the outline has real structure', () => {
+    const d = gate({ ...base, outlineEntries: 19, outlineLines: 189 })
+    expect(d.compress).toBe(true)
+  })
+
+  // Short files legitimately have few entries.
+  it('does not judge density on a short file', () => {
+    const d = gate({ ...base, outlineEntries: 1, outlineLines: 45 })
+    expect(d.compress).toBe(true)
   })
 })
