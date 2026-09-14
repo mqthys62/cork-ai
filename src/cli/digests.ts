@@ -31,6 +31,13 @@ export interface SessionDigest {
   costUSD: number
   /** What the same session would have cost with auto-compaction at 200k. */
   cappedCost200kUSD: number
+  /**
+   * The same replay at the ceiling this machine actually has configured, and
+   * the ceiling itself. Undefined when none is set — which is not the same as
+   * a ceiling of 200k, and the two used to be indistinguishable here.
+   */
+  autocompactWindow?: number
+  cappedCostOwnUSD?: number
   compactions: number
   /** Outlines served / full re-reads / edit failures, from the live session record. */
   compressions: number

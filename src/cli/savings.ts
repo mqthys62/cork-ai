@@ -230,10 +230,29 @@ export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Dat
 
   const since30 = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000)
   const spend = scanAllTranscripts(since30)
-  const ctx = contextReport({ since: since30, ceilings: [200_000] })
 
   const cfg = loadConfig()
   const settings = loadClaudeSettings()
+
+  /**
+   * Two different questions, and conflating them was the bug.
+   *
+   * `saving_at_200k` replays every turn at one fixed ceiling, the same for
+   * everyone — that is what makes installs comparable to each other, and it
+   * stays. But for someone who set 300k (or 1M, which never fires), it answers
+   * "what would you save by moving to 200k", not "what is your setting worth".
+   * So we also replay at the ceiling actually configured, and send the window
+   * itself, and let the reader tell the two apart.
+   */
+  const ownCeiling = typeof settings.autoCompactWindow === 'number' && settings.autoCompactWindow > 0 ? settings.autoCompactWindow : null
+  const ctx = contextReport({ since: since30, ceilings: ownCeiling ? [...new Set([200_000, ownCeiling])] : [200_000] })
+  const savingAt = (ceiling: number): number =>
+    ctx.costUSD > 0 ? Math.round(((ctx.costUSD - (ctx.cappedCostUSD[ceiling] ?? ctx.costUSD)) / ctx.costUSD) * 100) : 0
+  // A window at or above the largest context ever seen can never fire: it is
+  // "set" in the settings file and inert in practice. Worth knowing apart from
+  // "not set at all", because the two need opposite advice.
+  const maxContext = ctx.sessions.reduce((m, sess) => Math.max(m, sess.maxContextTokens), 0)
+  const ceilingInert = ownCeiling != null && maxContext > 0 && ownCeiling >= maxContext
   const hooks = installedCorkHooks(settings).filter(h => h.present).length
   const guard = cfg.contextGuard?.enabled !== false
   const heartbeat = readHeartbeat()
@@ -271,7 +290,11 @@ export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Dat
       context_avg_30d: ctx.avgContextTokens,
       context_avg_30d_bucket: contextBucket(ctx.avgContextTokens),
       cache_read_share_pct_30d: pct(ctx.cacheReadCostUSD, ctx.costUSD),
-      saving_at_200k_pct_30d: ctx.costUSD > 0 ? Math.round(((ctx.costUSD - (ctx.cappedCostUSD[200_000] ?? ctx.costUSD)) / ctx.costUSD) * 100) : 0,
+      saving_at_200k_pct_30d: savingAt(200_000),
+      // The same replay at the ceiling this install actually runs, so a 300k
+      // setting is not read as if it were 200k. Null when nothing is set.
+      saving_at_own_ceiling_pct_30d: ownCeiling ? savingAt(ownCeiling) : null,
+      autocompact_ceiling_inert: ownCeiling ? ceilingInert : null,
       // Setup.
       autocompact_window: settings.autoCompactWindow ?? null,
       context_guard: guard,
@@ -295,7 +318,9 @@ export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Dat
       amplification: Math.round(life.medianAmplification * 10) / 10,
       top_model: topModel,
       context_avg_30d: ctx.avgContextTokens,
-      saving_at_200k_pct_30d: ctx.costUSD > 0 ? Math.round(((ctx.costUSD - (ctx.cappedCostUSD[200_000] ?? ctx.costUSD)) / ctx.costUSD) * 100) : 0,
+      saving_at_200k_pct_30d: savingAt(200_000),
+      saving_at_own_ceiling_pct_30d: ownCeiling ? savingAt(ownCeiling) : null,
+      autocompact_ceiling_inert: ownCeiling ? ceilingInert : null,
       last_snapshot_at: now.toISOString(),
     },
     setOnce: {

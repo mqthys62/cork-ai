@@ -7,6 +7,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { saveClaudeSettings } from '../../src/cli/claude-settings.js'
 import { CONFIG_FILE, CORK_HOME, saveConfig } from '../../src/cli/config.js'
 import { STATS_FILE } from '../../src/cli/persistent-stats.js'
 import { buildSavingsSnapshot, projectsBucket, snapshotDue, SNAPSHOT_INTERVAL_MS } from '../../src/cli/savings.js'
@@ -60,6 +61,32 @@ describe('buildSavingsSnapshot', () => {
     for (const bag of [e.properties, e.set ?? {}, e.setOnce ?? {}]) {
       for (const [key, value] of Object.entries(bag)) expect(['string', 'number', 'boolean', 'undefined'].includes(typeof value) || value === null, key).toBe(true)
     }
+  })
+
+  /**
+   * The bug this guards: `saving_at_200k` was the only ceiling ever reported,
+   * so someone running a 300k window was read as if they were at 200k — their
+   * setting's real worth was nowhere in the data, and a 1M window (which never
+   * fires) counted as "configured" just the same.
+   */
+  it('rapporte le plafond réellement réglé à côté du contrefactuel à 200k', () => {
+    saveClaudeSettings({ autoCompactWindow: 300_000 })
+    const e = buildSavingsSnapshot('gain', now)
+    expect(e.properties.autocompact_window).toBe(300_000)
+    expect(e.properties).toHaveProperty('saving_at_own_ceiling_pct_30d')
+    expect(e.properties).toHaveProperty('autocompact_ceiling_inert')
+    // 200k stays, unchanged and comparable across installs
+    expect(e.properties.saving_at_200k_pct_30d).toEqual(expect.any(Number))
+    expect(e.set?.saving_at_own_ceiling_pct_30d).toBe(e.properties.saving_at_own_ceiling_pct_30d)
+  })
+
+  it('sans plafond réglé, le gain au plafond propre est null — pas zéro', () => {
+    saveClaudeSettings({})
+    const e = buildSavingsSnapshot('gain', now)
+    expect(e.properties.autocompact_window).toBeNull()
+    // null, never 0: "no ceiling" and "a ceiling worth nothing" must stay apart
+    expect(e.properties.saving_at_own_ceiling_pct_30d).toBeNull()
+    expect(e.properties.autocompact_ceiling_inert).toBeNull()
   })
 
   it('reste sain sans aucune donnée locale', () => {

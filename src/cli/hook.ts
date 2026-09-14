@@ -22,6 +22,7 @@ import path from 'path'
 import { estimateTokensFast } from '../core/tokenizer.js'
 import { inputPriceForModel, resolvePricing } from '../pricing/index.js'
 import { parseBashEdit, parseBashRead } from './bash-read.js'
+import { loadClaudeSettingsOrEmpty } from './claude-settings.js'
 import { loadConfig, updateConfig } from './config.js'
 import { writeDigest, type SessionDigest } from './digests.js'
 import { evaluateGuard, guardHookOutput } from './context-guard.js'
@@ -633,7 +634,11 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
   const transcriptPath = event.transcript_path as string | undefined
   pruneLiveState(deps.now())
   if (!sessionId || !transcriptPath) return
-  const profile = sessionContextProfile(transcriptPath, [200_000])
+  // 200k for cross-install comparability, plus whatever this machine is set to
+  // — a 300k window is worth reporting on its own terms, not as if it were 200k.
+  const ownWindow = loadClaudeSettingsOrEmpty().autoCompactWindow
+  const ownCeiling = typeof ownWindow === 'number' && ownWindow > 0 ? ownWindow : undefined
+  const profile = sessionContextProfile(transcriptPath, ownCeiling ? [...new Set([200_000, ownCeiling])] : [200_000])
   if (!profile) return
 
   const live = readActiveLiveSessions().find(s => s.sessionId === sessionId)
@@ -659,6 +664,8 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
     maxContextTokens: profile.maxContextTokens,
     costUSD: profile.costUSD,
     cappedCost200kUSD: profile.cappedCostUSD[200_000],
+    autocompactWindow: ownCeiling,
+    cappedCostOwnUSD: ownCeiling ? profile.cappedCostUSD[ownCeiling] : undefined,
     compactions: profile.compactions,
     compressions: live?.requests ?? 0,
     reReads: live?.reReads ?? 0,
@@ -694,6 +701,9 @@ function handleSessionEnd(event: Record<string, unknown>, deps: Required<HookDep
       max_context: contextBucket(profile.maxContextTokens),
       cost: costBucket(profile.costUSD),
       saving_at_200k_pct: profile.costUSD > 0 ? Math.round(((profile.costUSD - digest.cappedCost200kUSD) / profile.costUSD) * 100) : 0,
+      // What this session's own setting was worth, and what that setting is.
+      saving_at_own_ceiling_pct: ownCeiling && profile.costUSD > 0 ? Math.round(((profile.costUSD - (digest.cappedCostOwnUSD ?? profile.costUSD)) / profile.costUSD) * 100) : null,
+      autocompact_window: ownCeiling ?? null,
       compactions: profile.compactions,
       compressions: digest.compressions,
       rereads: digest.reReads,
