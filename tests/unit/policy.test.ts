@@ -5,6 +5,8 @@ import {
   DEFAULT_AMPLIFICATION,
   MIN_SAVED_TOKENS,
   POLICY_FILE,
+  POOLED_PRIOR_MAX,
+  POOLED_PRIOR_MIN_SAMPLES,
   PRIOR_WEIGHT,
   PROBATION_MIN_SAMPLES,
   PROBE_EVERY,
@@ -52,6 +54,39 @@ describe('apprentissage par extension', () => {
     expect(s[0]).toMatchObject({ ext: '.tsx', compressions: 2, editsAfter: 1 })
     expect(s[0].reReadRate).toBeCloseTo(0.5)
     expect(loadPolicy().ext['.tsx'].lastAt).toBeTruthy()
+  })
+})
+
+describe('prior empirique pour une extension jamais vue', () => {
+  it('reste sur le prior fixe tant que la machine a trop peu de preuves', () => {
+    for (let i = 0; i < POOLED_PRIOR_MIN_SAMPLES - 1; i++) recordCompression('/p/a.md')
+    expect(reReadProbability('.rs')).toBe(0.5)
+  })
+
+  it('hérite du taux mesuré sur les autres extensions du même scope', () => {
+    // 20 compressions, 0 relecture ailleurs : la machine sait que les outlines
+    // marchent ici, une extension neuve ne doit pas repartir d’une pièce jetée.
+    for (let i = 0; i < 20; i++) recordCompression('/p/a.md')
+    expect(reReadProbability('.rs')).toBeCloseTo(0.3, 5)
+  })
+
+  it('plafonne le prior pour qu’une extension neuve garde son premier essai', () => {
+    for (let i = 0; i < 20; i++) { recordCompression('/p/a.md'); recordReRead('/p/a.md') }
+    expect(reReadProbability('.rs')).toBeCloseTo(POOLED_PRIOR_MAX, 5)
+    // Au plafond, une extension neuve n’est pas en probation : 0 échantillon.
+    expect(policySummary().find(e => e.ext === '.rs')).toBeUndefined()
+  })
+
+  it('ne mélange pas les scopes', () => {
+    for (let i = 0; i < 20; i++) { recordCompression('/p/a.md'); recordReRead('/p/a.md') }
+    // Le scope cache n’a aucune preuve à lui : il garde son propre prior.
+    expect(reReadProbability('cache:.rs')).toBe(0.3)
+  })
+
+  it('n’utilise pas sa propre histoire comme prior', () => {
+    for (let i = 0; i < 20; i++) { recordCompression('/p/a.md'); recordReRead('/p/a.md') }
+    // .md se juge sur ses 20 observations, pas sur le pool (qui l’exclut).
+    expect(reReadProbability('.md')).toBeCloseTo((0.5 * PRIOR_WEIGHT + 20) / (PRIOR_WEIGHT + 20), 5)
   })
 })
 

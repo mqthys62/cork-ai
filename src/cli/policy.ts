@@ -58,6 +58,10 @@ const PRIOR_RE_READ_CACHE = 0.3
 export const PRIOR_WEIGHT = 2
 /** Above this measured re-read rate an extension is put on probation. */
 export const PROBATION_RATE = 0.35
+/** Pooled evidence needed before the machine's own rate beats the fixed prior. */
+export const POOLED_PRIOR_MIN_SAMPLES = 8
+/** Cap on the pooled prior, so a new extension always gets its own first try. */
+export const POOLED_PRIOR_MAX = PROBATION_RATE
 /**
  * An outline must point at real structure to be worth serving. Below this
  * density the model has to re-read, so compressing only buys an extra turn.
@@ -223,8 +227,41 @@ export function reReadProbability(key: string, state: PolicyState = loadPolicy()
   const e = state.ext[key]
   const n = e?.compressions ?? 0
   const k = e?.reReads ?? 0
-  const prior = key.startsWith('cache:') ? PRIOR_RE_READ_CACHE : PRIOR_RE_READ
-  return (prior * PRIOR_WEIGHT + k) / (PRIOR_WEIGHT + n)
+  return (priorFor(key, state) * PRIOR_WEIGHT + k) / (PRIOR_WEIGHT + n)
+}
+
+/**
+ * Prior for a key with no history of its own.
+ *
+ * A fixed coin flip treats every new extension as a blank slate, which is
+ * wrong in both directions: on a machine where outlines work (`.md`, `.php`:
+ * 0% re-read over the beta fleet) a new extension is needlessly suspected,
+ * and on one where they backfire it gets PROBATION_MIN_SAMPLES paid failures
+ * to discover what the machine already knew. So the prior is the machine's own
+ * pooled rate over its other keys in the same scope, and the fixed constant is
+ * only the fallback before any evidence exists at all.
+ *
+ * Scopes stay separate because they behave differently — a re-read cache hint
+ * (`cache:`) is a smaller leap than an outline — and pooling is capped away
+ * from certainty so a new extension is never refused before its first try.
+ */
+function priorFor(key: string, state: PolicyState): number {
+  const scope = key.startsWith('cache:') ? 'cache:' : key.startsWith('ro:') ? 'ro:' : ''
+  const fallback = scope === 'cache:' ? PRIOR_RE_READ_CACHE : PRIOR_RE_READ
+  let n = 0
+  let k = 0
+  for (const [other, e] of Object.entries(state.ext)) {
+    if (other === key) continue
+    const otherScope = other.startsWith('cache:') ? 'cache:' : other.startsWith('ro:') ? 'ro:' : ''
+    if (otherScope !== scope) continue
+    n += e.compressions
+    k += e.reReads
+  }
+  if (n < POOLED_PRIOR_MIN_SAMPLES) return fallback
+  // Never below the cache prior and never so high that an unseen extension is
+  // refused on its first read: the pooled rate informs the guess, it does not
+  // replace the evidence the key has yet to produce.
+  return Math.min(Math.max(k / n, PRIOR_RE_READ_CACHE), POOLED_PRIOR_MAX)
 }
 
 export interface GateInput {
