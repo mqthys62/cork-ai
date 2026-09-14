@@ -30,6 +30,89 @@ if (!KEY) {
   process.exit(1)
 }
 
+// ─── Progression ─────────────────────────────────────────────────────────────
+
+// Chaque étape est un aller-retour réseau, en série, et il y en a une
+// centaine. Sans retour à l'écran, le script ressemble à un blocage : on ne
+// peut pas distinguer « c'est long » de « c'est planté ». Donc chaque ligne
+// s'annonce AVANT de partir sur le réseau, et se complète au retour.
+
+const TTY = process.stdout.isTTY && !process.env.NO_COLOR
+const COLS = 56
+
+/** Le ticker en cours, s'il y en a un : une erreur doit pouvoir le faire taire. */
+let liveTicker = null
+
+/**
+ * Une exception qui s'imprime par-dessus une ligne de progression en train de
+ * se réécrire donne une trace illisible, entrelacée avec la barre. On coupe le
+ * ticker et on dégage la ligne avant de laisser Node afficher quoi que ce soit.
+ */
+function clearLine() {
+  if (liveTicker) { clearInterval(liveTicker); liveTicker = null }
+  if (TTY) process.stdout.write(`\r${' '.repeat(COLS + 44)}\r`)
+}
+process.on('uncaughtException', (err) => { clearLine(); console.error(err); process.exit(1) })
+process.on('unhandledRejection', (err) => { clearLine(); console.error(err); process.exit(1) })
+
+/** Barre pleine/vide, toujours la même largeur, pour que rien ne tremble. */
+function bar(done, total, width = 22) {
+  const filled = total ? Math.round((done / total) * width) : width
+  return `${'█'.repeat(filled)}${'░'.repeat(width - filled)}`
+}
+
+function hhmmss(ms) {
+  const s = Math.round(ms / 1000)
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`
+}
+
+/**
+ * Suit une série d'appels réseau : `p.step(label)` avant, `p.done(mark)` après.
+ * Sur un TTY, la ligne en cours se réécrit sur place ; sinon (CI, `| tee`),
+ * chaque étape s'écrit une fois, terminée, pour que le journal reste lisible.
+ */
+function progress(title, total) {
+  const began = Date.now()
+  let n = 0, label = '', stepBegan = 0, ticker = null
+  const paint = (suffix) => {
+    if (!TTY) return
+    const count = `${String(n).padStart(String(total).length)}/${total}`
+    process.stdout.write(`\r  ${bar(n, total)} ${count}  ${label.padEnd(COLS)}${suffix.padEnd(14)}`)
+  }
+  // La barre n'avance qu'au retour du réseau. Sans compteur qui tourne pendant
+  // l'attente, un appel de huit secondes est indiscernable d'un blocage — c'est
+  // précisément la question à laquelle l'écran doit répondre.
+  const startTicker = () => {
+    if (!TTY) return
+    ticker = setInterval(() => paint(` … ${hhmmss(Date.now() - stepBegan)}`), 1000)
+    ticker.unref?.()
+    liveTicker = ticker
+  }
+  const stopTicker = () => { if (ticker) { clearInterval(ticker); ticker = null; liveTicker = null } }
+  return {
+    step(text) {
+      label = text.length > COLS ? `${text.slice(0, COLS - 1)}…` : text
+      stepBegan = Date.now()
+      paint(' …')
+      startTicker()
+    },
+    done(mark = '✔') {
+      stopTicker()
+      n++
+      const ms = Date.now() - stepBegan
+      if (TTY) paint(` ${mark} ${ms}ms`)
+      else console.log(`  [${String(n).padStart(String(total).length)}/${total}] ${mark} ${label} (${ms}ms)`)
+    },
+    /** Rien à faire pour cette étape : elle compte quand même dans l'avancement. */
+    skip() { this.done('·') },
+    end(summary) {
+      stopTicker()
+      if (TTY) process.stdout.write(`\r${' '.repeat(COLS + 44)}\r`)
+      console.log(`  ${bar(total, total)} ${title} — ${summary} en ${hhmmss(Date.now() - began)}`)
+    },
+  }
+}
+
 // ─── HTTP ────────────────────────────────────────────────────────────────────
 
 async function api(method, route, body) {
@@ -44,13 +127,22 @@ async function api(method, route, body) {
   return res.status === 204 ? {} : res.json()
 }
 
-async function listAll(route) {
+async function listAll(route, what) {
   const out = []
   let next = `${HOST}/api/projects/${PROJECT}/${route}${route.includes('?') ? '&' : '?'}limit=100`
+  let pages = 0
   while (next) {
+    // Une page de 100 par aller-retour : sur un projet fourni, l'inventaire
+    // seul prend plusieurs secondes avant que quoi que ce soit ne s'affiche.
+    if (what && TTY) process.stdout.write(`\r  inventaire — ${what}: ${out.length}…`.padEnd(50))
     const page = await api('GET', next)
     out.push(...(page.results ?? []))
     next = page.next
+    pages++
+  }
+  if (what) {
+    if (TTY) process.stdout.write('\r' + ' '.repeat(50) + '\r')
+    console.log(`  · inventaire — ${what}: ${out.length} (${pages} page${pages > 1 ? 's' : ''})`)
   }
   return out
 }
@@ -153,24 +245,31 @@ const PROPERTY_DESCRIPTIONS = {
 }
 
 async function describeDefinitions() {
-  const events = await listAll('event_definitions/')
-  let n = 0
-  for (const def of events) {
-    const description = EVENT_DESCRIPTIONS[def.name]
-    if (!description || def.description === description) continue
-    await api('PATCH', `event_definitions/${def.id}/`, { description })
-    n++
+  const events = await listAll('event_definitions/', 'événements connus')
+  const props = await listAll('property_definitions/?type=event', 'propriétés connues')
+
+  // On ne compte que ce qu'on va vraiment écrire : une barre qui passe son
+  // temps à sauter des lignes ne dit rien de la durée qui reste.
+  const todoEvents = events.filter(d => EVENT_DESCRIPTIONS[d.name] && d.description !== EVENT_DESCRIPTIONS[d.name])
+  const todoProps = props.filter(d => PROPERTY_DESCRIPTIONS[d.name] && d.description !== PROPERTY_DESCRIPTIONS[d.name])
+  const total = todoEvents.length + todoProps.length
+  if (!total) {
+    console.log(`  · descriptions déjà à jour (${events.length} événements, ${props.length} propriétés)`)
+    return
   }
-  console.log(`  ✔ ${n} event description(s) written (${events.filter(e => EVENT_DESCRIPTIONS[e.name]).length} known events seen so far)`)
-  const props = await listAll('property_definitions/?type=event')
-  let m = 0
-  for (const def of props) {
-    const description = PROPERTY_DESCRIPTIONS[def.name]
-    if (!description || def.description === description) continue
-    await api('PATCH', `property_definitions/${def.id}/`, { description })
-    m++
+
+  const p = progress('descriptions', total)
+  for (const def of todoEvents) {
+    p.step(`événement ${def.name}`)
+    await api('PATCH', `event_definitions/${def.id}/`, { description: EVENT_DESCRIPTIONS[def.name] })
+    p.done()
   }
-  console.log(`  ✔ ${m} property description(s) written`)
+  for (const def of todoProps) {
+    p.step(`propriété ${def.name}`)
+    await api('PATCH', `property_definitions/${def.id}/`, { description: PROPERTY_DESCRIPTIONS[def.name] })
+    p.done()
+  }
+  p.end(`${todoEvents.length} événement(s), ${todoProps.length} propriété(s)`)
 }
 
 // ─── 3. Dashboards and insights ──────────────────────────────────────────────
@@ -370,40 +469,45 @@ const DASHBOARDS = [
 ]
 
 async function ensureDashboards() {
-  const existingDashboards = await listAll('dashboards/?limit=100')
-  const existingInsights = await listAll('insights/?limit=100')
+  const existingDashboards = await listAll('dashboards/?limit=100', 'dashboards')
+  const existingInsights = await listAll('insights/?limit=100', 'insights')
+
+  // Un appel réseau par insight, en série, plus un par dashboard : une
+  // quarantaine d'allers-retours. La barre porte sur le total, pas sur chaque
+  // dashboard pris isolément — c'est la fin du script qu'on veut pouvoir
+  // estimer, pas la fin de la section en cours.
+  const total = DASHBOARDS.length + DASHBOARDS.reduce((n, d) => n + d.insights.length, 0)
+  const p = progress('dashboards', total)
+  let created = 0, updated = 0
+
   for (const spec of DASHBOARDS) {
+    p.step(`dashboard ${spec.name}`)
     let dashboard = existingDashboards.find(d => d.name === spec.name && !d.deleted)
     if (dashboard) {
       await api('PATCH', `dashboards/${dashboard.id}/`, { description: spec.description, pinned: spec.pinned, tags: [TAG] })
-      console.log(`  · dashboard "${spec.name}" (#${dashboard.id}) updated`)
+      p.skip()
     } else {
       dashboard = await api('POST', 'dashboards/', { name: spec.name, description: spec.description, pinned: spec.pinned, tags: [TAG] })
-      console.log(`  ✔ dashboard "${spec.name}" (#${dashboard.id}) created`)
+      p.done()
     }
-    // Un appel réseau par insight, en série : sans retour à l'écran, une
-    // quarantaine d'allers-retours passent pour un blocage. On annonce chaque
-    // ligne avant de partir sur le réseau, pas après.
-    let created = 0, updated = 0
-    const total = spec.insights.length
-    for (const [i, insight] of spec.insights.entries()) {
+
+    for (const insight of spec.insights) {
+      p.step(`${spec.name} · ${insight.name}`)
       const found = existingInsights.find(x => x.name === insight.name && !x.deleted)
       const body = { name: insight.name, description: insight.description ?? '', query: insight.query, tags: [TAG], saved: true }
-      const step = `    [${String(i + 1).padStart(2)}/${total}] ${insight.name}`
-      process.stdout.write(`${step.padEnd(64).slice(0, 64)} …`)
-      const began = Date.now()
       if (found) {
         const dashboards = [...new Set([...(found.dashboards ?? []), dashboard.id])]
         await api('PATCH', `insights/${found.id}/`, { ...body, dashboards })
         updated++
+        p.skip()
       } else {
         await api('POST', 'insights/', { ...body, dashboards: [dashboard.id] })
         created++
+        p.done()
       }
-      console.log(`\r${step.padEnd(64).slice(0, 64)} ${found ? '·' : '✔'} ${Date.now() - began}ms`)
     }
-    console.log(`    insights: ${created} created, ${updated} updated`)
   }
+  p.end(`${created} créé(s), ${updated} mis à jour`)
 }
 
 // ─── Run ─────────────────────────────────────────────────────────────────────
