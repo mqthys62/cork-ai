@@ -79,6 +79,8 @@ function fmt(n: number): string { return n.toLocaleString('en-US') }
 function fmtPct(n: number): string { return `${n.toFixed(1)}%` }
 function fmtUsd(n: number): string { return `$${n.toFixed(4)}` }
 function fmtUsdLong(n: number): string { return `$${n.toFixed(2)}` }
+// A restated figure can flip sign, and "$-2.87" reads as a typo.
+function fmtSignedUsd(n: number): string { return `${n < 0 ? '-' : ''}$${Math.abs(n).toFixed(2)}` }
 
 function fmtDate(iso: string): string {
   return new Date(iso).toLocaleString('en-US', {
@@ -404,9 +406,9 @@ function showAllTime(): void {
   // read as prompt/completion tokens, which cork-ai never sees via the hook.
   console.log(`  ${C.dim('Read raw')}            ${C.cyan(fmt(totalOriginal))} tokens`)
   console.log(`  ${C.dim('After compression')}   ${C.green(fmt(totalOriginal - totalSaved))} tokens`)
-  console.log(`  ${C.dim('Saved')}               ${C.green(fmt(totalSaved))} tokens`)
+  console.log(`  ${C.dim('Kept out of context')} ${C.green(fmt(totalSaved))} tokens ${C.dim('(measured)')}`)
   console.log()
-  console.log(`  ${C.bold('Overall savings')}   ${C.green(bar(pct))}`)
+  console.log(`  ${C.bold('Compression ratio')} ${C.green(bar(pct))}`)
   console.log(`  ${C.bold('Avg / session')}     ${C.green(fmt(Math.round(avgPerSession)))} tokens`)
   console.log()
 
@@ -417,7 +419,7 @@ function showAllTime(): void {
   const life = lifetimeSavings(sessionsForLifetime)
   const penalty = life.measured > 0 ? life.penalty : reReadPenalty(stats)
 
-  console.log(`  ${C.bold('Cost saved')}`)
+  console.log(`  ${C.bold('Estimated value')} ${C.dim('— inferred from your transcripts, not a measured bill')}`)
   if (life.measured > 0) {
     console.log(`    ${C.dim('First pass only')}      ${C.dim(`${fmtUsdLong(life.firstPass)} USD`)}`)
     console.log(`    ${C.dim('Lifetime in context')}  ${C.green(fmtUsdLong(life.lifetime))} USD`)
@@ -426,12 +428,28 @@ function showAllTime(): void {
       console.log(`    ${C.dim('Re-read extra turns')}  ${C.yellow(`-${fmtUsdLong(life.extraTurnPenalty)}`)} USD ${C.dim(`(${fmt(life.extraTurns)} turns that only existed to re-read an outlined file, at their real cost)`)}`)
     }
     const net = life.lifetime - penalty - life.extraTurnPenalty
-    console.log(`    ${C.bold('Net')}                  ${(net >= 0 ? C.green : C.red)(fmtUsdLong(net))} USD`)
+    console.log(`    ${C.bold('Net (estimated)')}      ${(net >= 0 ? C.green : C.red)(fmtUsdLong(net))} USD`)
     console.log(
       `    ${C.dim('Amplification')}        ${C.cyan(`${life.medianAmplification.toFixed(1)}x`)} ` +
       `${C.dim(`median cache reads per token written · ${life.measured}/${life.total} sessions measured` +
         (life.compactions > 0 ? ` · ${life.compactions} compactions` : ''))}`,
     )
+    // The figure above is a counterfactual: what these tokens would have cost
+    // had they entered the context and stayed. That is a claim about a world
+    // that did not happen, not about the invoice. JetBrains' A/B of a similar
+    // tool (rtk, 2026-07) found its self-reported 99.8% saving sat alongside a
+    // 7.6% *increase* in real spend, so this caveat is not boilerplate.
+    console.log()
+    console.log(`    ${C.dim('No A/B test yet confirms an effect on your actual bill.')}`)
+    console.log(`    ${C.dim('Tokens kept out of context are measured; dollars are inferred.')}`)
+    // A migration that moves the headline explains itself rather than just
+    // showing a smaller number than the user saw yesterday.
+    const restated = stats?.restated
+    if (restated) {
+      console.log()
+      console.log(`    ${C.yellow('Restated')} ${C.dim(`${fmtSignedUsd(restated.from)} → ${fmtSignedUsd(restated.to)} USD on ${restated.at.slice(0, 10)}`)}`)
+      console.log(`    ${C.dim(restated.reason)}`)
+    }
   } else if (penalty > 0) {
     console.log(`    ${C.dim('Gross')}                ${C.green(fmtUsdLong(totalCost + penalty))} USD`)
     console.log(`    ${C.dim('Re-read penalty')}      ${C.yellow(`-${fmtUsdLong(penalty)}`)} USD`)
