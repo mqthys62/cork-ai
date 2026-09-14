@@ -120,6 +120,43 @@ Two lessons the harness now depends on:
   treatment arm's `CORK_AI_HOME` recorded compressions — the report prints this,
   and a run with zero compressions measures agent variance, not this tool.
 
+## Does the benchmark even exercise the tool?
+
+Probing the treatment arm alone (half the cost of a pair) on four tasks:
+
+| task | cost | turns | compressions | tools used |
+|---|---|---|---|---|
+| software-dependency-audit | $1.30 | 31 | 0 | Bash x29 |
+| citation-check | $0.54 | 9 | 0 | Bash x8 |
+| python-scala-translation | $1.74 | 24 | **2** (1,766 tok) | Bash x23 |
+| organize-messy-files | $1.06 | 20 | 0 | Bash x18 |
+| simpo-code-reproduction | $0.74 | 20 | 0 | Bash x19 |
+| invoice-fraud-detection | $0.50 | 13 | 0 | Bash x12 |
+| lean4-proof, flink-query, data-to-d3 | — | — | 0 | timed out at 7 min |
+
+**Not one `Read` call across 110 tool uses on six completed tasks**, including
+two that ask the agent to modify existing source files. SkillsBench tasks are
+data-processing work — grep, python, jq — so the agent works through `Bash`
+throughout. The single task that did trigger cork-ai did so through the Bash
+hook, on a `cat` of a 340-line SKILL.md, and the outcome was the good one:
+`rangeReads: 1, reReads: 0` — the agent read the region it needed instead of
+re-reading the file.
+
+This matters for interpretation. In real use `Read` is **99.5%** of cork-ai's
+savings and Bash is 0.5%, so a benchmark where the agent never calls `Read`
+measures the tool almost exactly where it does not act. A null result here
+would be evidence about SkillsBench, not about cork-ai — and it is worth
+asking how much of the rtk result was the same effect.
+
+Probe before spending: `scripts/ab-probe.mjs` runs the treatment arm alone on a
+list of tasks and reports what cork-ai actually did. Eight tasks cost $4.59 to
+probe and produced two compressions in total — enough to say that a paired
+smoke over these tasks would mostly measure agent variance.
+
+A benchmark that exercises the read path is still needed. Tasks where an agent
+edits real source files — the work `Read` is for — are the missing piece, and
+SkillsBench does not supply them.
+
 ## Reading the result
 
 The report gives a **median ratio** of treatment over control, with a paired
