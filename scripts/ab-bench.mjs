@@ -193,6 +193,13 @@ function imageFor(task) {
   return built.get(task)
 }
 
+/** Give the caller back everything the root verifier wrote into the mount. */
+function chownBack(dir) {
+  if (!process.getuid) return
+  sh('docker', ['run', '--rm', '-v', `${dir}:/target`, 'alpine:latest',
+    'chown', '-R', `${process.getuid()}:${process.getgid()}`, '/target'], { timeout: 60_000 })
+}
+
 /** SkillsBench's own verifier, in Docker, with the agent's files mounted in place. */
 function verify(task, workdir) {
   const image = imageFor(task)
@@ -214,6 +221,11 @@ function verify(task, workdir) {
   // as judging the work wrong: null is excluded from the success count, 0 is
   // counted as a failure.
   const reward = fs.existsSync(rewardFile) ? Number(fs.readFileSync(rewardFile, 'utf-8').trim()) : null
+  // The verifier runs as root — several need a writable HOME and install
+  // packages, so dropping privileges breaks them — and it writes into a bind
+  // mount, leaving root-owned files the user cannot delete. Hand ownership
+  // back now rather than leaving the mess for `rm -rf` to fail on later.
+  chownBack(workdir)
   return { reward, verifierRan: r.status === 0 }
 }
 
