@@ -5,6 +5,76 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0-rc.4] — 2026-09-14
+
+Fourth candidate, entirely about honesty. JetBrains A/B-tested rtk against a
+control and found it **increased** Claude Code's median cost by 7.6% while
+`rtk gain` reported 99.8% savings. cork-ai avoids the two errors behind that
+gap — it prices the counterfactual on the truncated slice Claude Code actually
+delivers, and it prices cache reads at 0.1× — but an audit of its own figures
+against beta telemetry found biases in the same direction, and a learning loop
+that was silently not learning. Everything below either removes an optimistic
+bias or makes the tool refuse work it cannot justify. **Several headline
+numbers go down. That is the point.**
+
+### Fixed
+- **Policy counters no longer lost under concurrent hooks.** Claude Code runs
+  the hooks of parallel tool calls at the same time, and `bump()` did a plain
+  load-modify-save on one shared file. Measured at six processes × 50
+  increments: **93 of 300 survived — 69% vanished**. The loss fell hardest on
+  re-reads, which arrive in bursts of parallel reads, so the learning loop was
+  biased optimistic by its own bug and probation was unreachable in the field
+  (`policy.json` showed 12 lifetime compressions against 459 requests in
+  `stats.json`). Writes now take an atomic `mkdir` lock, bounded and
+  best-effort: a rare lost increment beats a hook that stalls a read.
+- **An outline with no structure is never served.** 7 of 87 eligible files
+  produced **zero entries** and 21 more were near-empty — 32% of files — and
+  the gate approved them all, because an empty outline saves the most tokens.
+  The model then re-read the file: pure added cost. The outliner now
+  recognises `describe` / `it` / `test` / `suite` / `context` / `bench`
+  (including `.each`) and a much wider range of YAML and structured text;
+  zero-entry files went 7 → **0**, near-empty 21 → **2**. The gate refuses an
+  outline with no entries outright, and refuses one below one entry per 40
+  lines on files over 60 lines.
+- **NaN no longer passes the gate.** `if (ev <= 0)` is false for NaN, so a
+  non-finite expected value compressed. Now guarded with `Number.isFinite`.
+- **Every induced turn is billed.** A re-read costs an extra API turn that
+  re-reads the whole context from cache, and that turn was only priced for the
+  24% of re-reads a transcript could measure. It is now charged on every
+  re-read, at the live context size when known and a conservative 100k floor
+  otherwise.
+- **Avoided tokens are no longer valued for the whole session.** Amplification
+  assumed every avoided token would have survived to the end of the context.
+  Measured over 60 compactions, the mean compression happens 27.8% of the way
+  through, so amplification is scaled by the share of the context a token
+  actually survives (0.72).
+- **Spilled shell output is counted as delivered, not as written.** Bash output
+  over 30KB never reaches the model — Claude Code spills it to a file and shows
+  a 2KB preview — but the counterfactual was priced against the whole buffer.
+  This is exactly the truncated-counterfactual error the JetBrains study found
+  in rtk, on the 0.5% of savings that come from Bash.
+
+### Changed
+- **Probation engages four times sooner.** `PROBATION_MIN_SAMPLES` 10 → 4 and
+  the prior weight 4 → 2, now that the counters are accurate. Ten paid failures
+  before the brake engages was too many on a surface of ~12% of reads.
+- **A new extension inherits what the machine already measured.** Every unseen
+  extension used to start from a coin flip. The prior is now this machine's own
+  pooled re-read rate over the other keys in the same scope (capped at the
+  probation rate, so a new extension always gets its own first try), which
+  generalises to whatever extensions users bring next without a table to
+  maintain.
+- **`gain` separates measured from inferred.** Tokens kept out of context are
+  counted and now say `(measured)`; dollars are a counterfactual and now say
+  `Estimated value — inferred from your transcripts, not a measured bill`, with
+  `Net (estimated)` and a standing note that **no A/B test yet confirms an
+  effect on your actual bill**.
+- **A restated figure explains itself.** The stats file migrates to version 3,
+  re-pricing historic induced turns, and `gain` shows the old lifetime value,
+  the new one and the reason — instead of quietly displaying a smaller number
+  than yesterday. On the maintainer's machine the stored lifetime figure moves
+  **+$2.88 → −$2.87**, and the session net **$37.77 → $33.92**.
+
 ## [1.0.0-rc.3] — 2026-09-09
 
 Third candidate. One change: the update notice earns its place.
