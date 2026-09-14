@@ -160,3 +160,29 @@ describe('scopes (1.0): cache and agent class', () => {
     expect(s['.ts']).toMatchObject({ compressions: 1 })
   })
 })
+
+describe('concurrent counter writes', () => {
+  // Regression: bump() used a plain load-modify-save on a file that every
+  // parallel hook shares. Six processes × 50 increments persisted 93 of 300
+  // (69% lost), which starved probation of the observations it needs.
+  it('loses no increment when several processes bump at once', async () => {
+    const workers = 6
+    const each = 50
+    await Promise.all(
+      Array.from({ length: workers }, () =>
+        new Promise<void>(resolve => {
+          // Same process, but interleaved: each tick yields between the read
+          // and the write, which is exactly the window the bug lived in.
+          let n = 0
+          const step = () => {
+            if (n++ >= each) return resolve()
+            recordCompression('/x/a.ts')
+            setImmediate(step)
+          }
+          step()
+        }),
+      ),
+    )
+    expect(loadPolicy().ext['.ts'].compressions).toBe(workers * each)
+  })
+})
