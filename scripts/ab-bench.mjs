@@ -61,6 +61,21 @@ function makeControlHome(dir) {
   if (fs.existsSync(creds)) fs.copyFileSync(creds, path.join(dir, '.credentials.json'))
 }
 
+/** Consecutive dead runs after which something is wrong with the setup, not the task. */
+const MAX_CONSECUTIVE_FAILURES = 3
+
+/**
+ * Did this run die because the subscription's window is exhausted?
+ *
+ * There is no machine-readable signal for it, so this matches the CLI's own
+ * wording on a run that produced no JSON at all. It is a hint, not a
+ * contract — MAX_CONSECUTIVE_FAILURES is the real backstop.
+ */
+function looksLikeUsageLimit(r) {
+  if (r.costUSD !== null) return false
+  return /usage limit|rate limit|quota|too many requests|429/i.test(r.stderr ?? '')
+}
+
 function runArm({ arm, task, rep, workdir, prompt }) {
   const home = path.join(OUT, 'homes', `${task}-${arm}-${rep}`)
   fs.rmSync(home, { recursive: true, force: true })
@@ -108,6 +123,27 @@ function runArm({ arm, task, rep, workdir, prompt }) {
  * paths — mounting to the wrong one fails every run of both arms equally,
  * which looks like a null result instead of a broken harness.
  */
+/**
+ * Pairs already measured, from a previous session's results.jsonl.
+ *
+ * A subscription's 5-hour window rarely covers the whole plan, so the
+ * benchmark is expected to be stopped and restarted. Only WHOLE pairs count:
+ * a half-finished pair is worthless — the arms must run close together for
+ * the comparison to hold — so it is simply redone.
+ */
+function loadCompletePairs(resultsPath) {
+  const done = new Set()
+  if (!fs.existsSync(resultsPath)) return done
+  const prior = fs.readFileSync(resultsPath, 'utf-8').trim().split('\n')
+    .filter(Boolean).map(l => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+  for (const r of prior.filter(r => r.ok && r.arm === 'treatment')) {
+    if (prior.some(c => c.ok && c.arm === 'control' && c.task === r.task && c.rep === r.rep)) {
+      done.add(`${r.task}#${r.rep}`)
+    }
+  }
+  return done
+}
+
 function workdirFor(task) {
   const df = path.join(ROOT, 'tasks', task, 'environment', 'Dockerfile')
   const lines = fs.existsSync(df) ? fs.readFileSync(df, 'utf-8').split('\n') : []
@@ -170,8 +206,11 @@ function main() {
     .filter(t => fs.existsSync(path.join(ROOT, 'tasks', t)))
   fs.mkdirSync(OUT, { recursive: true })
 
-  const plan = tasks.length * REPEATS * 2
-  console.log(`${tasks.length} tasks x ${REPEATS} repeats x 2 arms = ${plan} runs`)
+  const resultsPath = path.join(OUT, 'results.jsonl')
+  const done = loadCompletePairs(resultsPath)
+  const remaining = tasks.length * REPEATS - done.size
+  console.log(`${tasks.length} tasks x ${REPEATS} repeats x 2 arms = ${tasks.length * REPEATS * 2} runs`)
+  if (done.size) console.log(`${done.size} pair(s) already done; ${remaining * 2} run(s) left to do.`)
   console.log(`Order is interleaved per task so drift hits both arms equally.`)
   if (DRY) {
     console.log('\n--dry-run: no agent is launched, nothing is consumed.\n')
@@ -180,18 +219,21 @@ function main() {
       const files = fs.existsSync(envDir) ? fs.readdirSync(envDir).length : 0
       console.log(`  ${t.padEnd(34)} ${String(files).padStart(3)} files  task.md ${fs.existsSync(path.join(ROOT, 'tasks', t, 'task.md')) ? 'ok' : 'MISSING'}`)
     }
+    if (remaining === 0) console.log('\nEverything in this plan is already done.')
     console.log('\nEach task image is built once on the first real run (several minutes).')
     console.log('Remove --dry-run to execute.')
     return
   }
 
   const results = []
-  const resultsPath = path.join(OUT, 'results.jsonl')
+  // Stop rather than burn the rest of the plan on runs that cannot succeed.
+  let consecutiveFailures = 0
   for (const task of tasks) {
     const taskDir = path.join(ROOT, 'tasks', task)
     const prompt = fs.readFileSync(path.join(taskDir, 'task.md'), 'utf-8')
       .replace(/^---[\s\S]*?\n---\n/, '').trim()
     for (let rep = 0; rep < REPEATS; rep++) {
+      if (done.has(`${task}#${rep}`)) continue
       // Interleave: a slow API hour must not land on one arm only.
       for (const arm of (rep % 2 === 0 ? ['treatment', 'control'] : ['control', 'treatment'])) {
         const workdir = path.join(OUT, 'work', `${task}-${arm}-${rep}`)
@@ -206,10 +248,25 @@ function main() {
         results.push(r)
         fs.appendFileSync(resultsPath, JSON.stringify(r) + '\n')
         console.log(`${r.ok ? '' : 'FAILED '}$${(r.costUSD ?? 0).toFixed(4)}  ${r.turns ?? '?'} turns  reward=${r.reward ?? '?'}  ${Math.round(r.wallMs / 1000)}s`)
+
+        if (r.ok) { consecutiveFailures = 0; continue }
+        consecutiveFailures++
+        // A run that produced no JSON at all and said so is the usage limit:
+        // continuing would spend the remaining plan on runs that cannot work,
+        // and leave half-pairs behind. Stopping keeps the file resumable.
+        if (looksLikeUsageLimit(r) || consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          console.log(`\n  Stopping: ${looksLikeUsageLimit(r) ? 'usage limit reached' : `${consecutiveFailures} runs failed in a row`}.`)
+          console.log(`  ${results.filter(x => x.ok).length} good run(s) saved. Re-run the same command later to resume.`)
+          return finish(results, resultsPath)
+        }
       }
     }
   }
-  console.log(`\n${results.length} runs written to ${resultsPath}`)
+  return finish(results, resultsPath)
+}
+
+function finish(results, resultsPath) {
+  console.log(`\n${results.length} run(s) this session, appended to ${resultsPath}`)
   console.log(`Analyse with: node scripts/ab-report.mjs ${resultsPath}`)
 }
 

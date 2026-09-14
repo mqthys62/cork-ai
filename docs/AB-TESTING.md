@@ -66,6 +66,28 @@ This is not optional: measured on `citation-check`, a generic `python:3.12-slim`
 made the verifier reinstall curl and uv and take **over 20 minutes**, against
 about a second on the task's own image.
 
+### Stopping and resuming
+
+A subscription's 5-hour window rarely covers 60 runs, so the harness is built
+to be interrupted. Re-run the same command and it skips the pairs already in
+`results.jsonl`; `--dry-run` reports how many runs are left before you commit
+any quota to it.
+
+Only **whole pairs** are skipped. A half-finished pair is redone, because the
+two arms must run close together for the comparison to hold.
+
+It also stops on its own rather than burning the rest of the plan: on a run
+that produced no result and mentions a usage limit, or after three failures in
+a row. Everything measured so far stays on disk.
+
+### What it costs
+
+Nothing beyond the subscription — but it is real quota. A trivial run already
+costs about $0.10 of list-price equivalent in start-up alone, and these tasks
+are the dense ones, so budget roughly **$1–3 of equivalent per run**: about
+**$60–180 for the full 60-run smoke**. Plan it for a window where you are not
+working.
+
 Docker is needed for the verifier only — the agent runs on the host, so
 credentials never enter a container built from third-party Dockerfiles.
 
