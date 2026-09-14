@@ -197,6 +197,40 @@ function verify(task, workdir) {
   return { reward, verifierRan: r.status === 0 }
 }
 
+/**
+ * The treatment arm runs whatever binary the hook in settings.json points at,
+ * which is the *installed* cork-ai — not the working tree. Measuring a stale
+ * install and reporting it as a verdict on the current code would be the same
+ * category of error this harness exists to catch, so say so up front.
+ */
+function warnIfStaleInstall() {
+  const hookCmd = (() => {
+    try {
+      const sp = path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude'), 'settings.json')
+      const raw = JSON.parse(fs.readFileSync(sp, 'utf-8'))
+      for (const group of Object.values(raw.hooks ?? {}).flat()) {
+        for (const h of group.hooks ?? []) if (/cork-ai/.test(h.command ?? '')) return h.command
+      }
+    } catch { /* no settings, no warning */ }
+    return null
+  })()
+  if (!hookCmd) {
+    console.log('!  No cork-ai hook found in settings.json — the treatment arm would be identical to the control.\n')
+    return
+  }
+  const bin = hookCmd.split('"').filter(Boolean)[0]
+  const installed = sh(bin, ['--version'], { timeout: 20_000 }).stdout?.trim()
+  let local = null
+  try { local = fs.readFileSync(path.join(process.cwd(), 'src/cli/version.ts'), 'utf-8').match(/VERSION = '([^']+)'/)?.[1] } catch { /* not in the repo */ }
+  if (local && installed && !installed.includes(local)) {
+    console.log(`!  The hook runs ${installed}, but this tree is ${local}.`)
+    console.log(`!  The treatment arm would measure the INSTALLED build, not your changes.`)
+    console.log(`!  Install the current build first, or the result says nothing about this code.\n`)
+  } else if (installed) {
+    console.log(`Treatment arm runs ${installed} via ${bin}\n`)
+  }
+}
+
 function main() {
   if (!ROOT || !fs.existsSync(ROOT)) {
     console.error('Set SKILLSBENCH_DIR to a checkout of github.com/benchflow-ai/skillsbench')
@@ -211,7 +245,8 @@ function main() {
   const remaining = tasks.length * REPEATS - done.size
   console.log(`${tasks.length} tasks x ${REPEATS} repeats x 2 arms = ${tasks.length * REPEATS * 2} runs`)
   if (done.size) console.log(`${done.size} pair(s) already done; ${remaining * 2} run(s) left to do.`)
-  console.log(`Order is interleaved per task so drift hits both arms equally.`)
+  console.log(`Order is interleaved per task so drift hits both arms equally.\n`)
+  warnIfStaleInstall()
   if (DRY) {
     console.log('\n--dry-run: no agent is launched, nothing is consumed.\n')
     for (const t of tasks) {
@@ -232,6 +267,7 @@ function main() {
     const taskDir = path.join(ROOT, 'tasks', task)
     const prompt = fs.readFileSync(path.join(taskDir, 'task.md'), 'utf-8')
       .replace(/^---[\s\S]*?\n---\n/, '').trim()
+    const taskWorkdir = workdirFor(task)
     for (let rep = 0; rep < REPEATS; rep++) {
       if (done.has(`${task}#${rep}`)) continue
       // Interleave: a slow API hour must not land on one arm only.
@@ -241,8 +277,15 @@ function main() {
         fs.mkdirSync(path.dirname(workdir), { recursive: true })
         fs.cpSync(path.join(taskDir, 'environment'), workdir, { recursive: true })
 
+        // The task states absolute paths (/root/package-lock.json) because it
+        // was written for its container. Out of the container those paths are
+        // unwritable, and an agent will burn its whole budget fighting a
+        // permission error instead of doing the task — measured: 20 turns and
+        // zero tool results on the first real run. Point them at the copy.
+        const localPrompt = prompt.split(taskWorkdir + '/').join(workdir + '/')
+          .split(taskWorkdir).join(workdir)
         process.stdout.write(`  ${task} rep${rep} ${arm.padEnd(9)} `)
-        const r = runArm({ arm, task, rep, workdir, prompt })
+        const r = runArm({ arm, task, rep, workdir, prompt: localPrompt })
         const v = verify(task, workdir)
         Object.assign(r, v)
         results.push(r)
