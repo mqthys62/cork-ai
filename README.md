@@ -34,6 +34,13 @@ and what every further tool call costs — /compact or /autocompact fixes that
 > **Where the money really goes.** On a real 2-month history (16k turns, $4.3k), **78% of the spend was cache reads of the conversation prefix** — the whole context re-sent on every tool call, 400k tokens on average, on sessions that ran to the 1M window. Replayed with auto-compaction at 200k, the same work costs **57% less**. Read compression moves ~1%. `cork-ai context` shows this for your own history; `cork-ai context --set-autocompact 200k` applies the fix. How every figure is computed, and where it is weakest: [docs/METHODOLOGY.md](docs/METHODOLOGY.md).
 
 <!-- cork-ai:stats -->
+> **Community numbers** — from the 5 installs that opted into telemetry (`cork-ai telemetry on`), updated 2026-09-14.
+>
+> | Tokens kept out of context | Net saved | Sessions | Median cache amplification | Avg. saving with auto-compact at 200k |
+> |---:|---:|---:|---:|---:|
+> | **4.9M** | **$41** | 49 | 74.3× | 45.4% |
+>
+> Net = gross saving at cache-read prices minus every re-read penalty. Raw figures and method: [docs/stats.json](docs/stats.json), [docs/TELEMETRY.md](docs/TELEMETRY.md).
 <!-- /cork-ai:stats -->
 
 ---
