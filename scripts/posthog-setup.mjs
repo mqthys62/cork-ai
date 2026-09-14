@@ -72,12 +72,23 @@ async function ensureProjectHygiene() {
 
   const name = 'cork-ai: GeoIP at country level only'
   const existing = (await listAll('hog_functions/?type=transformation')).find(f => f.name === name)
-  const props = [...GEOIP_PRECISE, ...GEOIP_PRECISE.map(p => `$set.${p}`), ...GEOIP_PRECISE.map(p => `$set_once.${p}`)].join(', ')
+  // PostHog's own GeoIP step also writes person properties, by a path of its
+  // own: `$geoip_*` under $set, and `$initial_geoip_*` under $set_once, frozen
+  // at first sight. Filtering the event properties alone leaves a city and a
+  // pair of coordinates on the person record — which is exactly what
+  // docs/TELEMETRY.md promises is erased. Found on all 7 person records before
+  // this line existed.
+  const initial = GEOIP_PRECISE.map(p => p.replace('$geoip_', '$initial_geoip_'))
+  const props = [
+    ...GEOIP_PRECISE, ...initial,
+    ...GEOIP_PRECISE.map(p => `$set.${p}`), ...initial.map(p => `$set.${p}`),
+    ...GEOIP_PRECISE.map(p => `$set_once.${p}`), ...initial.map(p => `$set_once.${p}`),
+  ].join(', ')
   const payload = {
     type: 'transformation',
     template_id: 'template-filter-properties',
     name,
-    description: 'Blanks the city, postal code, coordinates and region PostHog derives from the IP. Country, continent and time zone are kept — enough to know where cork-ai is used, not where someone lives.',
+    description: 'Blanks the city, postal code, coordinates and region PostHog derives from the IP — on the event and on the person record, including the $initial_* copies frozen at first sight. Country, continent and time zone are kept — enough to know where cork-ai is used, not where someone lives.',
     enabled: true,
     execution_order: 2,
     inputs: { propertiesToFilter: { value: props } },
