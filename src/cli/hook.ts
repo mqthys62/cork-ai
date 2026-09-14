@@ -29,7 +29,7 @@ import { eligibility, CODE_EXTS, TEXT_EXTS, BINARY_EXTS } from './file-eligibili
 import { noteSessionSeen, readSessionsSeen, writeHeartbeat } from './heartbeat.js'
 import { outline } from './outline.js'
 import { LIVE_DIR, accumulateInSession, readActiveLiveSessions, readGlobalStats } from './persistent-stats.js'
-import { agentClassOf, gate, recordCompression, recordEditAfter, recordProbationRead, recordRangeRead, recordReRead, type AgentClass, type PolicyScope } from './policy.js'
+import { agentClassOf, gate, recordCompression, recordEditAfter, recordProbationRead, recordRangeRead, recordReRead, RE_READ_OUTPUT_TOKENS, type AgentClass, type PolicyScope } from './policy.js'
 import { isSkipped, markSkipped } from './skip-list.js'
 import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
 import { lifetimeSavings, snapshotDue, type SnapshotReason } from './savings.js'
@@ -257,21 +257,39 @@ function cacheReminder(filePath: string, lines: number, turnsAgo: number): strin
   ].join('\n')
 }
 
-function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, detectedModel: string | undefined, ext: string, scope: PolicyScope): void {
+/**
+ * USD of the extra assistant turn a re-read costs.
+ *
+ * The turn exists only because we compressed: the model spends output tokens
+ * asking for the file again, and that whole turn re-reads the context from
+ * cache. Priced here, live, from the context size at the moment it happened —
+ * reconstructing it afterwards from the transcript only reached 24% of
+ * re-reads, because half the savings come from sessions whose transcript has
+ * since been deleted. Savings were permanent, penalties evaporated.
+ */
+export function reReadTurnCostUSD(contextTokens: number, model: string | undefined): number {
+  const p = resolvePricing(model)
+  return (contextTokens / 1_000_000) * p.cacheRead + (RE_READ_OUTPUT_TOKENS / 1_000_000) * p.output
+}
+
+function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, detectedModel: string | undefined, ext: string, scope: PolicyScope, contextTokens: number): void {
   markSkipped(ctx.filePath, 're-read')
   recordReRead(ctx.filePath, scope)
+  const turnCost = reReadTurnCostUSD(contextTokens, detectedModel)
   try {
     accumulateInSession({
       projectPath: (ctx.event.cwd as string) || process.cwd(),
       originalTokens: 0, compressedTokens: 0, savedTokens: 0,
       // The second read only exists because the first one was compressed —
-      // its full raw cost is induced by us. Deduct it.
-      estimatedCostSaved: -(rawTokens / 1_000_000) * inputPriceForModel(detectedModel),
+      // its full raw cost is induced by us, and so is the turn that asked for
+      // it. Deduct both.
+      estimatedCostSaved: -(rawTokens / 1_000_000) * inputPriceForModel(detectedModel) - turnCost,
       byModule: {},
       model: detectedModel,
       sessionId,
       reRead: true,
       reReadTokensServed: rawTokens,
+      reReadTurnCostUSD: turnCost,
     })
   } catch (err) { debugLog('hook.reRead.accumulate', err) }
   ctx.deps.telemetry({ event: 'hook_reread', properties: { kind: 'full', ext, source: ctx.source, tokens: tokenBucket(rawTokens), model: modelFamily(detectedModel), agent_class: scope.agentClass } })
@@ -283,7 +301,18 @@ function accountReRead(ctx: ReadContext, sessionId: string, rawTokens: number, d
  * region and it read just that. The intended follow-up — recorded, but it
  * does not count against the extension; only a full re-read does.
  */
-function noteRangeRead(event: Record<string, unknown>, filePath: string, deps: Required<HookDeps>): void {
+/** Live context size and model for an event, or zeros when the transcript is unreadable. */
+function liveTurn(event: Record<string, unknown>): { contextTokens: number; model?: string } {
+  try {
+    const agent = typeof event.agent_id === 'string' ? event.agent_id : null
+    const mainTranscript = (event.transcript_path as string) || undefined
+    const ownTranscript = agentTranscriptPath(mainTranscript, agent)
+    const turn = lastMainTurnUsage(ownTranscript ?? mainTranscript, undefined, ownTranscript !== undefined)
+    return { contextTokens: turn?.contextTokens ?? 0, model: turn?.model || (event.model as string) || loadConfig().detectedModel }
+  } catch { return { contextTokens: 0 } }
+}
+
+function noteRangeRead(event: Record<string, unknown>, filePath: string, deps: Required<HookDeps>, contextTokens = 0, model?: string): void {
   const sessionId = (event.session_id as string) || ''
   if (!sessionId) return
   const reads = loadSessionReads(sessionId)
@@ -292,6 +321,22 @@ function noteRangeRead(event: Record<string, unknown>, filePath: string, deps: R
   reads.files[key] = 2
   saveSessionReads(sessionId, reads)
   recordRangeRead(filePath, { agentClass: agentClassOf(event) })
+  // The outline worked — but the follow-up is still an API round trip that
+  // only exists because we compressed. Cheaper than a full re-read (no raw
+  // file re-injected), never free. Counting it as a pure win was the same
+  // self-serving counterfactual the whole audit is about.
+  if (contextTokens > 0) {
+    const turnCost = reReadTurnCostUSD(contextTokens, model)
+    try {
+      accumulateInSession({
+        projectPath: (event.cwd as string) || process.cwd(),
+        originalTokens: 0, compressedTokens: 0, savedTokens: 0,
+        estimatedCostSaved: -turnCost,
+        byModule: {}, model, sessionId,
+        reReadTurnCostUSD: turnCost,
+      })
+    } catch (err) { debugLog('hook.rangeRead.accumulate', err) }
+  }
   deps.telemetry({ event: 'hook_reread', properties: { kind: 'range', ext: telemetryExt(filePath), agent_class: agentClassOf(event) } })
 }
 
@@ -398,7 +443,7 @@ function handleRead(ctx: ReadContext): HookOutput {
   if (reads && reads.files[key]) {
     reads.files[key] += 1
     saveSessionReads(sessionId, reads)
-    accountReRead(ctx, sessionId, originalTokens, detectedModel, ext, scope)
+    accountReRead(ctx, sessionId, originalTokens, detectedModel, ext, scope, contextTokens)
     servedRaw()
     return undefined
   }
@@ -418,8 +463,9 @@ function handleRead(ctx: ReadContext): HookOutput {
         projectPath: (event.cwd as string) || process.cwd(),
         originalTokens: 0, compressedTokens: 0, savedTokens: 0,
         // The induced cost is the extra turn: one cache read of the whole context plus its output.
-        estimatedCostSaved: -((contextTokens / 1_000_000) * resolvePricing(detectedModel).cacheRead + (300 / 1_000_000) * resolvePricing(detectedModel).output),
+        estimatedCostSaved: -reReadTurnCostUSD(contextTokens, detectedModel),
         byModule: {}, model: detectedModel, sessionId, reRead: true, reReadTokensServed: originalTokens,
+        reReadTurnCostUSD: reReadTurnCostUSD(contextTokens, detectedModel),
       })
     } catch (err) { debugLog('hook.afterCache.accumulate', err) }
     deps.telemetry({ event: 'hook_reread', properties: { kind: 'after-cache', ext, source: ctx.source, tokens: tokenBucket(originalTokens), model: modelFamily(detectedModel), agent_class: agentClass } })
@@ -525,7 +571,7 @@ function handleBash(event: Record<string, unknown>, deps: Required<HookDeps>): H
 
   const read = parseBashRead(command, cwd, event.tool_name === 'PowerShell' ? 'powershell' : 'bash')
   if (!read) return undefined
-  if (read.kind === 'range') { noteRangeRead(event, read.file, deps); return undefined }
+  if (read.kind === 'range') { const t = liveTurn(event); noteRangeRead(event, read.file, deps, t.contextTokens, t.model); return undefined }
   return handleRead({ event, filePath: read.file, source: read.tool, deps })
 }
 
@@ -698,7 +744,8 @@ export function handleHookEvent(event: Record<string, unknown>, partialDeps: Hoo
 
   // Explicit offset/limit = the model is targeting a precise zone. Never compress those.
   if (toolInput.offset !== undefined || toolInput.limit !== undefined) {
-    noteRangeRead(event, filePath, deps)
+    const t = liveTurn(event)
+    noteRangeRead(event, filePath, deps, t.contextTokens, t.model)
     return undefined
   }
   return handleRead({ event, filePath, source: 'Read', deps })

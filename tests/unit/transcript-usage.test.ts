@@ -2,7 +2,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { scanTranscript, sessionAmplification, transcriptSince } from '../../src/cli/transcript-usage.js'
+import { COMPRESSION_SURVIVAL_SHARE, scanTranscript, sessionAmplification, transcriptSince } from '../../src/cli/transcript-usage.js'
 import { costOfUsage, costOfAvoidedTokens } from '../../src/pricing/index.js'
 
 let dir: string
@@ -161,7 +161,8 @@ describe('sessionAmplification', () => {
     expect(amp.turns).toBe(4)
     expect(amp.cacheWriteTokens).toBe(1000)
     expect(amp.cacheReadTokens).toBe(3000)
-    expect(amp.amplification).toBeCloseTo(3)
+    // Scaled by the share of the session a compressed token survives.
+    expect(amp.amplification).toBeCloseTo(3 * COMPRESSION_SURVIVAL_SHARE)
   })
 
   it('exclut les tours de sous-agents — ils ne relisent pas le contexte principal', () => {
@@ -173,7 +174,7 @@ describe('sessionAmplification', () => {
 
     const amp = sessionAmplification('sess-b')
     expect(amp.turns).toBe(2)
-    expect(amp.amplification).toBeCloseTo(1)
+    expect(amp.amplification).toBeCloseTo(COMPRESSION_SURVIVAL_SHARE)
   })
 
   it("s'arrête à la frontière de compaction", () => {
@@ -187,7 +188,7 @@ describe('sessionAmplification', () => {
     const amp = sessionAmplification('sess-c')
     expect(amp.compactions).toBe(1)
     expect(amp.turns).toBe(2)
-    expect(amp.amplification).toBeCloseTo(1)
+    expect(amp.amplification).toBeCloseTo(COMPRESSION_SURVIVAL_SHARE)
   })
 
   it('signale found:false quand aucun transcript ne correspond', () => {

@@ -58,7 +58,7 @@ export interface LifetimeSavings {
  * excluded from `measured` so partial coverage stays visible.
  */
 export function lifetimeSavings(
-  sessions: Array<{ sessionId: string; byModel?: Record<string, ModelUsage>; reReadTokensServed?: number }>,
+  sessions: Array<{ sessionId: string; byModel?: Record<string, ModelUsage>; reReadTokensServed?: number; reReadTurnCostUSD?: number }>,
 ): LifetimeSavings {
   const out: LifetimeSavings = {
     firstPass: 0,
@@ -78,6 +78,10 @@ export function lifetimeSavings(
   const ampBySession = new Map<string, number>()
   const cache = new Map<string, ReturnType<typeof sessionAmplification>>()
   const seenSessions = new Set<string>()
+  // Sessions whose extra turns the transcript could price. Everything else
+  // falls back to what the hook recorded live — which is the only figure that
+  // survives the transcript being deleted, and half of them are.
+  const transcriptPriced = new Map<string, number>()
 
   for (const session of sessions) {
     const models = Object.entries(session.byModel ?? {})
@@ -100,6 +104,7 @@ export function lifetimeSavings(
       if (turns.found) {
         out.extraTurnPenalty += turns.extraTurnCostUSD
         out.extraTurns += turns.reReads
+        transcriptPriced.set(session.sessionId, turns.extraTurnCostUSD)
       }
     }
     // No transcript → amplification 0, which collapses costOfAvoidedTokens()
@@ -129,6 +134,24 @@ export function lifetimeSavings(
       const model = models.sort((a, b) => b[1].savedTokens - a[1].savedTokens)[0][0]
       out.penalty += costOfAvoidedTokens(reRead, model, factor)
     }
+  }
+
+  // Live-recorded turn costs for the sessions the transcript could not price.
+  //
+  // A transcript prices only the re-read turns still present in it, so when it
+  // finds fewer turns than the hook recorded, it is the transcript that is
+  // incomplete — the file gets trimmed and deleted, the recorded cost does
+  // not. Take the larger of the two per session: never double-count, never let
+  // a truncated transcript quietly forgive a penalty.
+  const recordedBySession = new Map<string, number>()
+  for (const session of sessions) {
+    const recorded = session.reReadTurnCostUSD ?? 0
+    if (recorded > 0) recordedBySession.set(session.sessionId, (recordedBySession.get(session.sessionId) ?? 0) + recorded)
+  }
+  for (const [sessionId, recorded] of recordedBySession) {
+    if (!transcriptPriced.has(sessionId)) { out.extraTurnPenalty += recorded; continue }
+    const fromTranscript = transcriptPriced.get(sessionId) ?? 0
+    if (recorded > fromTranscript) out.extraTurnPenalty += recorded - fromTranscript
   }
 
   out.measured = ampBySession.size
@@ -187,7 +210,7 @@ export function projectsBucket(n: number): string {
 export function buildSavingsSnapshot(reason: SnapshotReason, now: Date = new Date()): TelemetryEvent {
   const stats = readGlobalStats()
   const live = readActiveLiveSessions()
-  const records: Array<{ sessionId: string; byModel?: Record<string, ModelUsage>; reReadTokensServed?: number }> = [...(stats?.sessions ?? []), ...live]
+  const records: Array<{ sessionId: string; byModel?: Record<string, ModelUsage>; reReadTokensServed?: number; reReadTurnCostUSD?: number }> = [...(stats?.sessions ?? []), ...live]
 
   const requests = (stats?.allTime.totalRequests ?? 0) + live.reduce((s, l) => s + (l.requests ?? 0), 0)
   const rawTokens = (stats?.allTime.totalOriginalTokens ?? 0) + live.reduce((s, l) => s + (l.originalTokens ?? 0), 0)

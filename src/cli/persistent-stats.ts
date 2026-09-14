@@ -11,7 +11,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import type { MeasuredUsageStats } from '../types/index.js'
-import { inputPriceForModel } from '../pricing/index.js'
+import { inputPriceForModel, resolvePricing } from '../pricing/index.js'
 import { writeFileAtomic } from './fs-utils.js'
 
 // CORK_AI_HOME overrides the data directory (tests isolate through it —
@@ -28,10 +28,20 @@ export interface ModelUsage {
   lastUsedAt: string
 }
 
+/** A one-time restatement of the headline, kept so `gain` can explain it. */
+export interface Restatement {
+  at: string
+  from: number
+  to: number
+  reason: string
+}
+
 export interface GlobalStats {
   version: string
   createdAt: string
   updatedAt: string
+  /** Set once when a migration changes the headline figure, so it can be explained. */
+  restated?: Restatement
   allTime: {
     totalRequests: number
     totalOriginalTokens: number
@@ -45,6 +55,8 @@ export interface GlobalStats {
     reReads?: number
     /** Raw tokens served on those re-reads (induced cost, already deducted from savings) */
     reReadTokensServed?: number
+    /** USD of the extra API turns those re-reads induced, priced live when they happened. */
+    reReadTurnCostUSD?: number
     /** Edits that failed on a file only seen compressed (old_string missing from signatures) */
     editFailuresAfterCompression?: number
   }
@@ -67,6 +79,8 @@ export interface SessionRecord {
   measured?: MeasuredUsageStats
   reReads?: number
   reReadTokensServed?: number
+  /** USD of the extra API turns those re-reads induced, priced live when they happened. */
+  reReadTurnCostUSD?: number
   editFailuresAfterCompression?: number
 }
 
@@ -115,7 +129,17 @@ function ensureDir(): void {
   fs.mkdirSync(GLOBAL_DIR, { recursive: true })
 }
 
-export const STATS_VERSION = '2'
+export const STATS_VERSION = '3'
+
+/**
+ * Context size used to back-price historic re-read turns during the v3
+ * migration. The real size at each past re-read is unrecoverable; this floor
+ * sits well under the ~370k these sessions averaged, so the restated penalty
+ * is an under-estimate rather than an invention.
+ */
+const MIGRATION_CONTEXT_TOKENS = 100_000
+/** Output tokens of the assistant turn that issues a re-read (mirrors policy.ts). */
+const RE_READ_TURN_OUTPUT_TOKENS = 300
 
 /**
  * v1 → v2: reprice stored savings with the corrected pricing table.
@@ -166,6 +190,42 @@ function migrateStats(stats: GlobalStats): boolean {
     stats.allTime.byModel,
     stats.allTime.reReadTokensServed ?? 0,
   )
+
+  // v3: back-price the extra turn every historic re-read induced.
+  //
+  // Until now that turn was only ever reconstructed from the transcript, which
+  // reached 24% of re-reads because half the savings come from sessions whose
+  // transcript has since been deleted. Savings were permanent, penalties
+  // evaporated — a structural bias in cork-ai's own favour.
+  //
+  // The live context size at each historic re-read is gone, so it is priced at
+  // a deliberately conservative floor: MIGRATION_CONTEXT_TOKENS, well below the
+  // 370k average these sessions actually ran at. This under-states the penalty
+  // rather than inventing one.
+  if (Number(stats.version) < 3) {
+    const before = stats.allTime.estimatedCostSaved
+    for (const session of stats.sessions) {
+      const n = session.reReads ?? 0
+      if (n <= 0 || session.reReadTurnCostUSD !== undefined) continue
+      const model = Object.entries(session.byModel ?? {})
+        .sort((a, b) => b[1].requests - a[1].requests)[0]?.[0]
+      const p = resolvePricing(model)
+      const cost = n * ((MIGRATION_CONTEXT_TOKENS / 1_000_000) * p.cacheRead + (RE_READ_TURN_OUTPUT_TOKENS / 1_000_000) * p.output)
+      session.reReadTurnCostUSD = cost
+      session.estimatedCostSaved -= cost
+    }
+    const total = stats.sessions.reduce((sum, x) => sum + (x.reReadTurnCostUSD ?? 0), 0)
+    stats.allTime.reReadTurnCostUSD = total
+    stats.allTime.estimatedCostSaved -= total
+    // Kept so `gain` can show what changed and why, instead of silently
+    // restating the headline.
+    stats.restated = {
+      at: new Date().toISOString(),
+      from: before,
+      to: stats.allTime.estimatedCostSaved,
+      reason: 'extra turns induced by re-reads are now billed on every re-read, not only the 24% a transcript could price',
+    }
+  }
 
   stats.version = STATS_VERSION
   return true
@@ -255,6 +315,9 @@ function applySessionToAllTime(stats: GlobalStats, session: SessionRecord): void
   if (session.reReadTokensServed) {
     stats.allTime.reReadTokensServed = (stats.allTime.reReadTokensServed ?? 0) + session.reReadTokensServed
   }
+  if (session.reReadTurnCostUSD) {
+    stats.allTime.reReadTurnCostUSD = (stats.allTime.reReadTurnCostUSD ?? 0) + session.reReadTurnCostUSD
+  }
   if (session.editFailuresAfterCompression) {
     stats.allTime.editFailuresAfterCompression =
       (stats.allTime.editFailuresAfterCompression ?? 0) + session.editFailuresAfterCompression
@@ -314,6 +377,8 @@ export interface LiveSession {
   byModel?: Record<string, ModelUsage>
   reReads?: number
   reReadTokensServed?: number
+  /** USD of the extra API turns those re-reads induced, priced live when they happened. */
+  reReadTurnCostUSD?: number
   editFailuresAfterCompression?: number
 }
 
@@ -415,6 +480,7 @@ function flushLiveSessionToHistory(live: LiveSession): void {
     byModel: live.byModel,
     reReads: live.reReads,
     reReadTokensServed: live.reReadTokensServed,
+    reReadTurnCostUSD: live.reReadTurnCostUSD,
     editFailuresAfterCompression: live.editFailuresAfterCompression,
   }
   stats.sessions.push(record)
@@ -438,6 +504,8 @@ export interface SessionEvent {
   reRead?: boolean
   /** Raw tokens served on the re-read (induced cost) */
   reReadTokensServed?: number
+  /** USD of the extra API turns those re-reads induced, priced live when they happened. */
+  reReadTurnCostUSD?: number
   /** This event is an Edit failure on a file only seen compressed */
   editFailure?: boolean
 }
@@ -486,6 +554,7 @@ export function accumulateInSession(event: SessionEvent): void {
     if (event.reRead) {
       live.reReads = (live.reReads ?? 0) + 1
       live.reReadTokensServed = (live.reReadTokensServed ?? 0) + (event.reReadTokensServed ?? 0)
+      live.reReadTurnCostUSD = (live.reReadTurnCostUSD ?? 0) + (event.reReadTurnCostUSD ?? 0)
     }
     if (event.editFailure) {
       live.editFailuresAfterCompression = (live.editFailuresAfterCompression ?? 0) + 1
@@ -504,7 +573,7 @@ export function accumulateInSession(event: SessionEvent): void {
       byModule: { ...event.byModule },
       byModel: eventByModel,
       ...(event.reRead
-        ? { reReads: 1, reReadTokensServed: event.reReadTokensServed ?? 0 }
+        ? { reReads: 1, reReadTokensServed: event.reReadTokensServed ?? 0, reReadTurnCostUSD: event.reReadTurnCostUSD ?? 0 }
         : {}),
       ...(event.editFailure ? { editFailuresAfterCompression: 1 } : {}),
     }

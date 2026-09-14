@@ -79,7 +79,7 @@ export const PROBE_EVERY = 10
 /** Cache reads per token written when no session measurement is available. */
 export const DEFAULT_AMPLIFICATION = 50
 /** Output tokens of the assistant turn that issues a re-read. */
-const RE_READ_OUTPUT_TOKENS = 300
+export const RE_READ_OUTPUT_TOKENS = 300
 /** Compressed reads must save at least this many tokens to be worth the risk at all. */
 export const MIN_SAVED_TOKENS = 1_500
 /**

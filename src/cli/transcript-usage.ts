@@ -91,8 +91,11 @@ interface AnalysisEntry {
   reReadTurns?: ReReadTurns
 }
 
+/** Bump whenever a cached figure's formula changes, to invalidate old entries. */
+const ANALYSIS_CACHE_VERSION = 2
+
 interface AnalysisCache {
-  version: 1
+  version: number
   files: Record<string, AnalysisEntry>
 }
 
@@ -104,13 +107,18 @@ function loadAnalysisCache(): AnalysisCache {
     const parsed = JSON.parse(fs.readFileSync(ANALYSIS_CACHE_FILE, 'utf-8')) as AnalysisCache
     if (parsed && parsed.files && typeof parsed.files === 'object') return (analysisCache = parsed)
   } catch { /* first run */ }
-  return (analysisCache = { version: 1, files: {} })
+  return (analysisCache = { version: ANALYSIS_CACHE_VERSION, files: {} })
 }
 
 function readAnalysisCache(file: string): AnalysisEntry | undefined {
   try {
     const stat = fs.statSync(file)
-    const entry = loadAnalysisCache().files[file]
+    const cache = loadAnalysisCache()
+    // A cached figure computed by an older formula is worse than no cache:
+    // the amplification correction below would never reach an existing
+    // install. The version bump invalidates every stale entry.
+    if (cache.version !== ANALYSIS_CACHE_VERSION) return undefined
+    const entry = cache.files[file]
     if (entry && entry.size === stat.size && entry.mtimeMs === stat.mtimeMs) return entry
   } catch { /* no file */ }
   return undefined
@@ -122,6 +130,7 @@ function writeAnalysisCache(file: string, patch: Omit<AnalysisEntry, 'size' | 'm
     const cache = loadAnalysisCache()
     const prev = cache.files[file]
     const same = prev && prev.size === stat.size && prev.mtimeMs === stat.mtimeMs
+    cache.version = ANALYSIS_CACHE_VERSION
     cache.files[file] = { ...(same ? prev : {}), ...patch, size: stat.size, mtimeMs: stat.mtimeMs }
     // Drop entries whose transcript is gone (Claude Code purges after 30 days).
     for (const key of Object.keys(cache.files)) if (!fs.existsSync(key)) delete cache.files[key]
@@ -379,10 +388,29 @@ function computeAmplification(file: string): SessionAmplification {
     acc.cacheWriteTokens += usage.cache_creation_input_tokens ?? 0
   }
 
-  acc.amplification =
-    acc.cacheWriteTokens > 0 ? acc.cacheReadTokens / acc.cacheWriteTokens : 0
+  // Cache reads per token written, over the part of the session a compressed
+  // token would actually have survived.
+  //
+  // The raw ratio prices every avoided token as if it had entered the context
+  // on turn one and stayed to the end. It does not: compression happens when
+  // the model first opens a file, measured at a mean relative position of
+  // 0.278 through the session, so an avoided token escapes roughly the last
+  // 72% of the turns, not 100%. Charging the full ratio overstated the saving
+  // by about 1.38x — the same flattering-counterfactual error this whole audit
+  // is about, just pointed at our own headline.
+  const readsPerWrite = acc.cacheWriteTokens > 0 ? acc.cacheReadTokens / acc.cacheWriteTokens : 0
+  acc.amplification = readsPerWrite * COMPRESSION_SURVIVAL_SHARE
   return acc
 }
+
+/**
+ * Share of a session that still lies ahead when a file is first compressed.
+ *
+ * Measured over 60 real compressions in this machine's transcripts: mean
+ * relative position 0.278, so 0.722 of the turns remain. Conservative to keep
+ * low — it multiplies every saving cork-ai claims.
+ */
+export const COMPRESSION_SURVIVAL_SHARE = 0.72
 
 export interface TranscriptFile {
   path: string
