@@ -31,6 +31,7 @@ const ROOT = process.env.SKILLSBENCH_DIR
 const OUT = process.env.AB_OUT ?? path.join(process.cwd(), 'ab-results')
 const REPEATS = Number(process.env.AB_REPEATS ?? 3)
 const TIMEOUT_MS = Number(process.env.AB_TIMEOUT_MS ?? 900_000)
+const VERIFY_TIMEOUT_MS = Number(process.env.AB_VERIFY_TIMEOUT_MS ?? 300_000)
 const DRY = process.argv.includes('--dry-run')
 const TASKS = (process.env.AB_TASKS ?? '').split(',').filter(Boolean)
 
@@ -144,14 +145,20 @@ function verify(task, workdir) {
   const logs = path.join(workdir, '.ab-logs')
   fs.mkdirSync(logs, { recursive: true })
   // Network stays on: some verifiers resolve citations or fetch packages.
+  // Its own timeout, well under the agent's: on the task image a verifier runs
+  // in seconds, so minutes means it is stuck, and a stuck verifier would hold
+  // up the whole benchmark.
   const r = sh('docker', ['run', '--rm',
     '-v', `${workdir}:${workdirFor(task)}`,
     '-v', `${path.join(taskDir, 'verifier')}:/verifier:ro`,
     '-v', `${logs}:/logs`,
-    image, 'bash', '/verifier/test.sh'])
+    image, 'bash', '/verifier/test.sh'], { timeout: VERIFY_TIMEOUT_MS })
   const rewardFile = path.join(logs, 'verifier', 'reward.txt')
+  // No reward file means the verifier could not judge, which is not the same
+  // as judging the work wrong: null is excluded from the success count, 0 is
+  // counted as a failure.
   const reward = fs.existsSync(rewardFile) ? Number(fs.readFileSync(rewardFile, 'utf-8').trim()) : null
-  return { reward, verifierRan: r.status !== null }
+  return { reward, verifierRan: r.status === 0 }
 }
 
 function main() {

@@ -58,7 +58,13 @@ node scripts/ab-bench.mjs                    # 10 tasks x 3 repeats x 2 arms
 node scripts/ab-report.mjs ab-results/results.jsonl
 ```
 
-Knobs: `AB_TASKS` (comma-separated), `AB_REPEATS`, `AB_TIMEOUT_MS`, `AB_OUT`.
+Knobs: `AB_TASKS` (comma-separated), `AB_REPEATS`, `AB_TIMEOUT_MS` (per agent
+run), `AB_VERIFY_TIMEOUT_MS`, `AB_OUT`.
+
+The first real run builds each task's image (~1.4GB each, several minutes).
+This is not optional: measured on `citation-check`, a generic `python:3.12-slim`
+made the verifier reinstall curl and uv and take **over 20 minutes**, against
+about a second on the task's own image.
 
 Docker is needed for the verifier only — the agent runs on the host, so
 credentials never enter a container built from third-party Dockerfiles.
