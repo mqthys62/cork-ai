@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cork-ai fleet</title>
+<style>
+  /* Self-contained on purpose: system fonts, inline SVG charts, no CDN.
+     A fleet dashboard has to run on a closed network. */
+  :root {
+    --ground: #f6f7f8; --sheet: #fff; --sunk: #eef0f2;
+    --ink: #16191d; --ink-2: #4e555d; --ink-3: #868e98;
+    --rule: rgba(22,25,29,.10); --rule-2: rgba(22,25,29,.18);
+    --accent: #2f6f6b; --accent-soft: rgba(47,111,107,.10);
+    --warn: #8a6420; --warn-soft: rgba(138,100,32,.10);
+    --bad: #97453c; --bad-soft: rgba(151,69,60,.10);
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #131517; --sheet: #1b1e21; --sunk: #23272b;
+      --ink: #e9ecef; --ink-2: #aab2ba; --ink-3: #6f777f;
+      --rule: rgba(233,236,239,.10); --rule-2: rgba(233,236,239,.18);
+      --accent: #6fb3ad; --accent-soft: rgba(111,179,173,.13);
+      --warn: #d3a355; --warn-soft: rgba(211,163,85,.13);
+      --bad: #cc7d72; --bad-soft: rgba(204,125,114,.13);
+    }
+  }
+  * { box-sizing: border-box }
+  body { margin: 0; background: var(--ground); color: var(--ink); font: 14px/1.55 var(--sans); -webkit-font-smoothing: antialiased }
+  .num { font-variant-numeric: tabular-nums }
+  code { font-family: var(--mono); font-size: .88em; background: var(--sunk); padding: 1px 5px; border-radius: 4px }
+  .wrap { max-width: 1240px; margin: 0 auto; padding: 0 26px 80px }
+
+  header.top { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; padding: 26px 0 20px; border-bottom: 1px solid var(--rule); margin-bottom: 28px }
+  header.top h1 { font-size: 19px; font-weight: 600; letter-spacing: -.02em; margin: 0 }
+  header.top .src { font-family: var(--mono); font-size: 12px; color: var(--ink-3) }
+  .grow { flex: 1 }
+  .btn { font: inherit; font-size: 13px; border: 1px solid var(--rule-2); background: var(--sheet); color: var(--ink); padding: 6px 13px; border-radius: 8px; cursor: pointer }
+  .btn:hover { border-color: var(--ink-3) }
+  .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+  section { margin-bottom: 34px }
+  h2 { font-size: 15px; font-weight: 600; letter-spacing: -.01em; margin: 0 0 3px }
+  .kicker { color: var(--ink-3); font-size: 13px; margin: 0 0 14px }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px }
+  .tile { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 15px 17px }
+  .tile .k { color: var(--ink-3); font-size: 12px }
+  .tile .v { font-size: 25px; font-weight: 600; letter-spacing: -.025em; margin-top: 5px; font-variant-numeric: tabular-nums }
+  .tile .d { color: var(--ink-3); font-size: 12px; margin-top: 4px }
+  .tile .d.warn { color: var(--warn) } .tile .d.bad { color: var(--bad) } .tile .d.ok { color: var(--accent) }
+
+  .panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden }
+  .scroll { overflow-x: auto }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums }
+  th { text-align: left; font-weight: 500; font-size: 11.5px; letter-spacing: .03em; text-transform: uppercase; color: var(--ink-3); padding: 11px 13px; border-bottom: 1px solid var(--rule); white-space: nowrap; background: var(--sheet); position: sticky; top: 0 }
+  td { padding: 10px 13px; border-bottom: 1px solid var(--rule); white-space: nowrap; color: var(--ink-2) }
+  tr:last-child td { border-bottom: 0 }
+  td.r, th.r { text-align: right }
+  td.strong { color: var(--ink); font-weight: 500 }
+  td.mono { font-family: var(--mono); font-size: 12px }
+  tbody tr:hover td { background: var(--sunk) }
+  .name { color: var(--ink); font-weight: 500 }
+  .sub { color: var(--ink-3); font-size: 11.5px; font-family: var(--mono) }
+
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 500; background: var(--sunk); color: var(--ink-2) }
+  .pill.ok { background: var(--accent-soft); color: var(--accent) }
+  .pill.warn { background: var(--warn-soft); color: var(--warn) }
+  .pill.bad { background: var(--bad-soft); color: var(--bad) }
+
+  .bars { display: flex; flex-direction: column; gap: 9px }
+  .bar { display: grid; grid-template-columns: 150px 1fr auto; gap: 11px; align-items: center; font-size: 13px }
+  .bar .lbl { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+  .bar .track { height: 7px; background: var(--sunk); border-radius: 4px; overflow: hidden }
+  .bar .fill { height: 100%; background: var(--accent); border-radius: 4px }
+  .bar .val { color: var(--ink); font-variant-numeric: tabular-nums; font-size: 12.5px }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start }
+  @media (max-width: 860px) { .two { grid-template-columns: 1fr } }
+
+  .empty { padding: 40px 26px; color: var(--ink-3); font-size: 13.5px; text-align: center }
+  .empty code { display: inline-block; margin-top: 10px }
+  .warnbox { background: var(--warn-soft); border: 1px solid var(--warn); border-radius: 9px; padding: 13px 16px; font-size: 13px; color: var(--ink); margin-bottom: 14px }
+  footer { margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--rule); color: var(--ink-3); font-size: 12.5px }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>cork-ai fleet</h1>
+    <span class="src" id="src"></span>
+    <span class="grow"></span>
+    <button class="btn" id="refresh">Refresh</button>
+  </header>
+  <main id="main"><div class="empty">Loading…</div></main>
+  <footer>Reads only the JSON reports your workstations wrote. No PostHog key, no account, no outbound call.</footer>
+</div>
+
+<script>
+const $ = s => document.querySelector(s)
+const fmt = n => Number(n ?? 0).toLocaleString()
+const fmtK = n => { n = Number(n ?? 0); return n >= 1e9 ? (n/1e9).toFixed(1)+'B' : n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n) }
+const usd = n => (Number(n ?? 0) < 0 ? '-$' : '$') + Math.abs(Number(n ?? 0)).toFixed(2)
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]))
+const ago = iso => { if (!iso) return '—'; const s = (Date.now() - new Date(iso).getTime())/1000
+  if (s < 3600) return Math.max(1, Math.round(s/60)) + 'm ago'
+  if (s < 86400) return Math.round(s/3600) + 'h ago'
+  return Math.round(s/86400) + 'd ago' }
+
+function bars(rows, { max } = {}) {
+  if (!rows.length) return '<div class="empty">Nothing yet.</div>'
+  const top = max ?? Math.max(...rows.map(r => r[1]), 1)
+  return `<div class="bars">${rows.map(([label, value, extra]) => `
+    <div class="bar"><span class="lbl" title="${esc(label)}">${esc(label)}</span>
+      <span class="track"><span class="fill" style="width:${Math.max(2, value / top * 100)}%"></span></span>
+      <span class="val">${esc(extra ?? fmt(value))}</span></div>`).join('')}</div>`
+}
+
+/** Inline SVG so the page needs no chart library on a closed network. */
+function areaChart(points, { height = 160 } = {}) {
+  if (points.length < 2) return '<div class="empty">Not enough days yet.</div>'
+  const w = 900, h = height, pad = { t: 12, r: 8, b: 22, l: 8 }
+  const max = Math.max(...points.map(p => p.value), 1)
+  const x = i => pad.l + (i / (points.length - 1)) * (w - pad.l - pad.r)
+  const y = v => pad.t + (1 - v / max) * (h - pad.t - pad.b)
+  const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ')
+  const area = `${line} L${x(points.length - 1).toFixed(1)},${h - pad.b} L${x(0).toFixed(1)},${h - pad.b} Z`
+  const ticks = [0, Math.floor((points.length - 1) / 2), points.length - 1]
+  return `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" role="img" aria-label="Tokens saved per day">
+    <path d="${area}" fill="var(--accent-soft)" stroke="none"></path>
+    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"></path>
+    ${points.map((p, i) => i === points.length - 1 ? `<circle cx="${x(i).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="3.5" fill="var(--accent)"></circle>` : '').join('')}
+    ${ticks.map(i => `<text x="${x(i).toFixed(1)}" y="${h - 6}" fill="var(--ink-3)" font-size="11" font-family="var(--sans)" text-anchor="${i === 0 ? 'start' : i === points.length - 1 ? 'end' : 'middle'}">${esc(points[i].day)}</text>`).join('')}
+    <text x="${pad.l}" y="${pad.t + 2}" fill="var(--ink-3)" font-size="11" font-family="var(--sans)">peak ${esc(fmtK(max))} tokens</text>
+  </svg>`
+}
+
+function windowCell(w) {
+  if (!w) return '<span class="pill warn">not set</span>'
+  return `<span class="pill ${w > 500000 ? 'warn' : 'ok'}">${fmtK(w)}</span>`
+}
+
+let labels = {}
+async function saveLabel(key, patch) {
+  const res = await fetch('/api/labels', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, ...patch }) })
+  const body = await res.json()
+  if (!res.ok) throw new Error(body.error ?? res.status)
+  labels = body
+  load()
+}
+
+function render(d) {
+  labels = d.labels ?? {}
+  $('#src').textContent = d.reportsFolder
+  const t = d.totals
+
+  if (d.missingFolder || !d.machines.length) {
+    $('#main').innerHTML = `<div class="panel"><div class="empty">
+      <div><strong>No reports yet.</strong></div>
+      <div style="margin-top:8px">Run the collector on a workstation, pointing at the folder this dashboard reads:</div>
+      <code>node collect.mjs --out ${esc(d.reportsFolder)}</code>
+      ${d.unreadable?.length ? `<div style="margin-top:14px" class="pill bad">${d.unreadable.length} file(s) could not be parsed</div>` : ''}
+    </div></div>`
+    return
+  }
+
+  const H = []
+
+  if (d.unreadable?.length) H.push(`<div class="warnbox"><strong>${d.unreadable.length} file(s) skipped.</strong> ${d.unreadable.map(u => esc(u.file)).join(', ')} — a collector may have been mid-write; the next run repairs it.</div>`)
+
+  H.push(`<section><div class="tiles">
+    <div class="tile"><div class="k">Workstations</div><div class="v">${fmt(t.machines)}</div><div class="d ${t.stale ? 'warn' : ''}">${t.stale ? `${t.stale} not reporting for 7d+` : 'all reporting recently'}</div></div>
+    <div class="tile"><div class="k">Tokens kept out of context</div><div class="v">${fmtK(t.savedTokens)}</div><div class="d">${t.savedPct}% of what was read</div></div>
+    <div class="tile"><div class="k">${t.costSaved < 0 ? 'Estimated extra cost' : 'Estimated cost saved'}</div><div class="v">${usd(t.costSaved)}</div><div class="d ${t.costSaved < 0 ? 'bad' : ''}">${t.costSaved < 0 ? 'the outline is costing more than it saves' : 'summed from each machine'}</div></div>
+    <div class="tile"><div class="k">Sessions</div><div class="v">${fmt(t.sessions)}</div><div class="d">${fmt(t.requests)} reads decided</div></div>
+    <div class="tile"><div class="k">Re-read rate</div><div class="v">${t.rereadRate}%</div><div class="d ${t.rereadRate > 35 ? 'bad' : t.rereadRate > 25 ? 'warn' : 'ok'}">${t.rereadRate > 25 ? 'outlines are being re-read often' : 'healthy'}</div></div>
+    <div class="tile"><div class="k">Without auto-compaction</div><div class="v">${fmt(t.withoutWindow)}</div><div class="d ${t.withoutWindow ? 'warn' : 'ok'}">${t.withoutWindow ? 'cheapest lever left' : 'every machine has a ceiling'}</div></div>
+  </div></section>`)
+
+  if (d.daily.length > 1) {
+    H.push(`<section><h2>Tokens saved per day</h2><p class="kicker">Merged across every workstation that reported.</p>
+      <div class="panel" style="padding:14px 16px">${areaChart(d.daily.map(x => ({ day: x.day.slice(5), value: x.savedTokens })))}</div></section>`)
+  }
+
+  H.push(`<section><h2>Workstations</h2><p class="kicker">Click a name to label it. Names are stored in this dashboard's folder, never sent anywhere.</p>
+    <div class="panel scroll"><table><thead><tr>
+      <th>Machine</th><th>Team</th><th>Environment</th><th>cork-ai</th><th>Auto-compact</th>
+      <th class="r">Sessions</th><th class="r">Saved</th><th class="r">Cost saved</th><th class="r">Re-reads</th><th>Last report</th>
+    </tr></thead><tbody>${d.machines.map(m => {
+      const l = labels[m.key] ?? {}
+      const title = l.name || m.hostname || m.key
+      const sub = [m.user, m.hostname && l.name ? m.hostname : null].filter(Boolean).join(' · ') || m.key.slice(0, 12)
+      const rate = m.requests ? Math.round(m.rereads / m.requests * 100) : 0
+      return `<tr data-key="${esc(m.key)}" style="cursor:pointer">
+        <td><span class="name">${esc(title)}</span><br><span class="sub">${esc(sub)}</span></td>
+        <td>${l.team ? esc(l.team) : '<span class="sub">—</span>'}</td>
+        <td>${esc(m.environment ?? '—')}</td>
+        <td class="mono">${esc((m.version ?? '—').replace(/^cork-ai /, ''))}</td>
+        <td>${windowCell(m.autoCompactWindow)}</td>
+        <td class="r">${fmt(m.sessions)}</td>
+        <td class="r strong">${fmtK(m.savedTokens)}</td>
+        <td class="r strong" style="${m.costSaved < 0 ? 'color:var(--bad)' : ''}">${usd(m.costSaved)}</td>
+        <td class="r"><span class="pill ${rate > 35 ? 'bad' : rate > 25 ? 'warn' : ''}">${rate}%</span></td>
+        <td>${m.staleDays != null && m.staleDays > 7 ? `<span class="pill warn">${ago(m.generatedAt)}</span>` : ago(m.generatedAt)}</td>
+      </tr>`
+    }).join('')}</tbody></table></div></section>`)
+
+  H.push(`<section class="two">
+    <div><h2>Versions</h2><p class="kicker">A fleet on one version is a fleet whose numbers compare.</p>
+      <div class="panel" style="padding:15px 17px">${bars(d.versions.map(([v, n]) => [v.replace(/^cork-ai /, ''), n, `${n} machine${n === 1 ? '' : 's'}`]))}</div></div>
+    <div><h2>Environments</h2><p class="kicker">A Windows and a WSL install on one laptop are two machines, with two sets of numbers.</p>
+      <div class="panel" style="padding:15px 17px">${bars(d.environments.map(([e, n]) => [e, n, `${n} machine${n === 1 ? '' : 's'}`]))}</div></div>
+  </section>`)
+
+  if (d.projects.length) {
+    H.push(`<section><h2>Projects</h2><p class="kicker">Only from reports sent at <code>--privacy default</code> or higher; <code>minimal</code> reports carry no project names.</p>
+      <div class="panel" style="padding:15px 17px">${bars(d.projects.slice(0, 12).map(p => [p.project, p.savedTokens, `${fmtK(p.savedTokens)} · ${usd(p.costSaved)}`]))}</div></section>`)
+  }
+
+  $('#main').innerHTML = H.join('')
+}
+
+document.addEventListener('click', async e => {
+  const row = e.target.closest('[data-key]')
+  if (!row) return
+  const key = row.dataset.key
+  const cur = labels[key] ?? {}
+  const name = prompt(`Name for this workstation (empty to clear):`, cur.name ?? '')
+  if (name === null) return
+  const team = prompt(`Team (optional):`, cur.team ?? '')
+  try { await saveLabel(key, { name, team: team ?? '', note: cur.note ?? '' }) }
+  catch (err) { alert(`Could not save: ${err.message}`) }
+})
+
+async function load() {
+  try {
+    const res = await fetch('/api/fleet')
+    render(await res.json())
+  } catch (err) {
+    $('#main').innerHTML = `<div class="panel"><div class="empty">Could not load: ${esc(err.message)}</div></div>`
+  }
+}
+$('#refresh').addEventListener('click', load)
+load()
+</script>
+</body>
+</html>
