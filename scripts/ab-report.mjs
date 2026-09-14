@@ -80,6 +80,16 @@ metric('cache read', r => r.usage?.cache_read_input_tokens)
 metric('cache write', r => r.usage?.cache_creation_input_tokens)
 metric('output', r => r.usage?.output_tokens)
 
+// A pair where cork-ai compressed nothing measures how two agent sessions
+// happened to differ, not what this tool does. Say so before any cost figure
+// is read as a verdict.
+const inert = pairs.filter(p => (p.t.compressions ?? 0) === 0).length
+if (inert) {
+  console.log(`\n  ! ${inert} of ${pairs.length} pair(s) had ZERO compressions in the treatment arm.`)
+  console.log(`  ! cork-ai never acted there, so those pairs measure agent variance, not this tool.`)
+  if (inert === pairs.length) console.log(`  ! That is every pair: this run says nothing about cork-ai.`)
+}
+
 const solved = arm => rows.filter(r => r.arm === arm && r.reward === 1).length
 const attempted = arm => rows.filter(r => r.arm === arm && r.reward !== null).length
 console.log(`\nTask success (a tool that saves tokens by failing has saved nothing):`)

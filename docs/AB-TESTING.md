@@ -91,6 +91,35 @@ working.
 Docker is needed for the verifier only — the agent runs on the host, so
 credentials never enter a container built from third-party Dockerfiles.
 
+## What two real runs already showed
+
+A first paired run on `software-dependency-audit` (rc.4 installed, both arms):
+
+| | treatment | control |
+|---|---|---|
+| cost | $1.3035 | $0.8769 |
+| turns | 31 | 19 |
+| cache reads | 1,223,873 | 509,207 |
+| Bash calls | 29 (5 backgrounded) | 18 (0 backgrounded) |
+| **Read calls** | **0** | **0** |
+| **cork-ai compressions** | **0** | — |
+
+Read as a verdict this says cork-ai costs 49% more. It says nothing of the
+kind. **Neither arm ever called `Read`**, so the hook had nothing to intercept
+and cork-ai recorded zero compressions and zero saved tokens. The gap is one
+agent choosing to background five scans and burn turns waiting, and the other
+not — ordinary between-session variance.
+
+Two lessons the harness now depends on:
+
+- **A single pair proves nothing.** Session-to-session variance on these tasks
+  is larger than the effect being measured. Only the repeated, paired design
+  with a rank test separates them, which is why `AB_REPEATS` exists.
+- **Check that cork-ai actually ran.** A task that solves itself through `Bash`
+  never touches the read path. Before reading any cost number, confirm the
+  treatment arm's `CORK_AI_HOME` recorded compressions — the report prints this,
+  and a run with zero compressions measures agent variance, not this tool.
+
 ## Reading the result
 
 The report gives a **median ratio** of treatment over control, with a paired

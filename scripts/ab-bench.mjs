@@ -76,6 +76,21 @@ function looksLikeUsageLimit(r) {
   return /usage limit|rate limit|quota|too many requests|429/i.test(r.stderr ?? '')
 }
 
+/** Compressions and saved tokens this run's cork-ai actually recorded. */
+function corkActivity(home) {
+  let compressions = 0
+  let savedTokens = 0
+  try {
+    const dir = path.join(home, 'digests')
+    for (const f of fs.readdirSync(dir)) {
+      const d = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'))
+      compressions += d.compressions ?? 0
+      savedTokens += d.savedTokens ?? 0
+    }
+  } catch { /* no digest: nothing ran */ }
+  return { compressions, savedTokens }
+}
+
 function runArm({ arm, task, rep, workdir, prompt }) {
   const home = path.join(OUT, 'homes', `${task}-${arm}-${rep}`)
   fs.rmSync(home, { recursive: true, force: true })
@@ -107,6 +122,11 @@ function runArm({ arm, task, rep, workdir, prompt }) {
   try { json = JSON.parse(res.stdout) } catch { /* crashed or timed out */ }
   return {
     arm, task, rep, wallMs,
+    // What cork-ai actually did. A task solved entirely through Bash never
+    // touches the read path, so the hook has nothing to intercept and the cost
+    // difference measures agent variance, not this tool. Measured on the first
+    // real pair: 0 compressions in both arms, yet a 49% cost gap.
+    ...(arm === 'treatment' ? corkActivity(home) : {}),
     ok: !!json && !json.is_error,
     costUSD: json?.total_cost_usd ?? null,
     turns: json?.num_turns ?? json?.usage?.iterations?.length ?? null,
@@ -290,7 +310,8 @@ function main() {
         Object.assign(r, v)
         results.push(r)
         fs.appendFileSync(resultsPath, JSON.stringify(r) + '\n')
-        console.log(`${r.ok ? '' : 'FAILED '}$${(r.costUSD ?? 0).toFixed(4)}  ${r.turns ?? '?'} turns  reward=${r.reward ?? '?'}  ${Math.round(r.wallMs / 1000)}s`)
+        const cork = r.arm === 'treatment' ? `  ${r.compressions} compressed` : ''
+        console.log(`${r.ok ? '' : 'FAILED '}$${(r.costUSD ?? 0).toFixed(4)}  ${r.turns ?? '?'} turns  reward=${r.reward ?? '?'}${cork}  ${Math.round(r.wallMs / 1000)}s`)
 
         if (r.ok) { consecutiveFailures = 0; continue }
         consecutiveFailures++
