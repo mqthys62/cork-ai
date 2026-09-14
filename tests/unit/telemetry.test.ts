@@ -85,3 +85,42 @@ describe('postCapture', () => {
     expect(await postCapture({ event: 'x' })).toBe(false)
   })
 })
+
+describe("uninstall — mesurer le départ sans dater la personne", () => {
+  it("'uninstall' est un nom d'événement valide", () => {
+    // Le type est vérifié à la compilation ; ici on verrouille le fait que le
+    // payload se construit, parce qu'un départ non mesuré est indistinguable
+    // de vacances.
+    const body = capturePayload(
+      { event: 'uninstall', properties: { days_installed: 12, sessions: 40, saved_tokens: 1_200_000 } },
+      'install-uuid',
+      new Date('2026-09-14T10:00:00Z'),
+    )
+    expect(body.event).toBe('uninstall')
+    expect(body.properties.days_installed).toBe(12)
+  })
+
+  it("n'emporte aucune date d'installation — une durée, jamais un instant", () => {
+    const body = capturePayload(
+      { event: 'uninstall', properties: { days_installed: 12, sessions: 40, saved_tokens: 1_200_000 } },
+      'install-uuid',
+      new Date('2026-09-14T10:00:00Z'),
+    )
+    // Le timestamp de l'événement est celui de l'envoi, pas celui de l'install.
+    // Aucune autre propriété ne doit ressembler à une date : savoir quand
+    // quelqu'un a commencé, c'est le situer.
+    const dates = Object.entries(body.properties)
+      .filter(([k, v]) => k !== 'first_seen' && typeof v === 'string' && /\d{4}-\d{2}-\d{2}/.test(v))
+    expect(dates).toEqual([])
+  })
+
+  it('accepte null quand la machine ne sait pas depuis quand elle a cork-ai', () => {
+    // Une install d'avant l'ajout de `installedAt` n'a pas la donnée. Elle doit
+    // pouvoir partir quand même, en le disant.
+    const body = capturePayload(
+      { event: 'uninstall', properties: { days_installed: null, sessions: null, saved_tokens: null } },
+      'install-uuid',
+    )
+    expect(body.properties.days_installed).toBeNull()
+  })
+})

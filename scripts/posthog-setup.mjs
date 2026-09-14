@@ -381,10 +381,17 @@ async function ensureDashboards() {
       dashboard = await api('POST', 'dashboards/', { name: spec.name, description: spec.description, pinned: spec.pinned, tags: [TAG] })
       console.log(`  ✔ dashboard "${spec.name}" (#${dashboard.id}) created`)
     }
+    // Un appel réseau par insight, en série : sans retour à l'écran, une
+    // quarantaine d'allers-retours passent pour un blocage. On annonce chaque
+    // ligne avant de partir sur le réseau, pas après.
     let created = 0, updated = 0
-    for (const insight of spec.insights) {
-      const found = existingInsights.find(i => i.name === insight.name && !i.deleted)
+    const total = spec.insights.length
+    for (const [i, insight] of spec.insights.entries()) {
+      const found = existingInsights.find(x => x.name === insight.name && !x.deleted)
       const body = { name: insight.name, description: insight.description ?? '', query: insight.query, tags: [TAG], saved: true }
+      const step = `    [${String(i + 1).padStart(2)}/${total}] ${insight.name}`
+      process.stdout.write(`${step.padEnd(64).slice(0, 64)} …`)
+      const began = Date.now()
       if (found) {
         const dashboards = [...new Set([...(found.dashboards ?? []), dashboard.id])]
         await api('PATCH', `insights/${found.id}/`, { ...body, dashboards })
@@ -393,6 +400,7 @@ async function ensureDashboards() {
         await api('POST', 'insights/', { ...body, dashboards: [dashboard.id] })
         created++
       }
+      console.log(`\r${step.padEnd(64).slice(0, 64)} ${found ? '·' : '✔'} ${Date.now() - began}ms`)
     }
     console.log(`    insights: ${created} created, ${updated} updated`)
   }

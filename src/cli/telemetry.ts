@@ -28,6 +28,7 @@ export const POSTHOG_PROJECT_TOKEN = 'phc_u5LpaZ4J9TNdPbZU3UF3Jh5Egn3BTFxcBxtX9F
 
 export type TelemetryEventName =
   | 'install'
+  | 'uninstall'
   | 'telemetry_toggled'
   | 'command'
   | 'session_start'

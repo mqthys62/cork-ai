@@ -21,6 +21,13 @@ export interface CorkConfig {
   telemetry?: boolean
   /** Random id generated when telemetry is first enabled. Not derived from the machine. */
   installId?: string
+  /**
+   * When the hooks were first installed. Local only, and sent nowhere as a
+   * date: it exists so an uninstall can report how many days the install
+   * lasted, which is the difference between "tried it once" and "used it for a
+   * month and then left".
+   */
+  installedAt?: string
   /** Last model seen in a hook event — used for cost estimates when the transcript is silent. */
   detectedModel?: string
   /** Median cache reads per token written, measured by `gain --all`; feeds the EV gate. */

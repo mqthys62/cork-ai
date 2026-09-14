@@ -959,6 +959,10 @@ async function hooksInstall(): Promise<void> {
 
   if (cfg.telemetry === undefined) await askTelemetryConsent()
   await askAutoCompact(settings)
+  // Posée une seule fois : une réinstallation par-dessus une install existante
+  // ne remet pas le compteur à zéro, sans quoi la durée de vie mesurée serait
+  // celle du dernier `hooks install`, pas celle de l'usage.
+  if (!loadConfig().installedAt) updateConfig({ installedAt: new Date().toISOString() })
   sendTelemetry({ event: 'install', properties: {
     hooks: changed.length,
     upgrade: changed.length < specs.length,
@@ -1064,8 +1068,30 @@ function hooksRemove(): void {
   }
 
   saveClaudeSettings(settings)
+  // Leaving is the most honest measurement cork-ai can take. Without it,
+  // someone who uninstalls is indistinguishable from someone on holiday, and
+  // the product cannot know when it disappoints. What goes out is how long the
+  // install lasted and what it produced — never the date it started, which
+  // would date the person.
+  sendTelemetry({ event: 'uninstall', properties: { ...lifetimeUse() } })
   console.log(`\n${C.green('✔')}  cork-ai hooks removed from ${C.cyan(CLAUDE_SETTINGS)}\n`)
   console.log(`   Restart Claude Code to apply.\n`)
+}
+
+/**
+ * What the install lived and produced before it left. An uninstall after three
+ * sessions and one after three hundred do not mean the same thing, and this is
+ * the only way to tell "not convinced" from "never really tried it".
+ */
+function lifetimeUse(): Record<string, number | null> {
+  const at = loadConfig().installedAt
+  const ms = at ? Date.now() - new Date(at).getTime() : NaN
+  const stats = readGlobalStats()
+  return {
+    days_installed: Number.isFinite(ms) && ms >= 0 ? Math.round(ms / 86_400_000) : null,
+    sessions: stats?.sessions.length ?? null,
+    saved_tokens: stats?.allTime.totalSavedTokens ?? null,
+  }
 }
 
 function hooksStatus(): void {
