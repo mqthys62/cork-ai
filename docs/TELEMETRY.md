@@ -20,6 +20,13 @@ Sending never delays a hook: the event is handed to a detached child process tha
 
 The `distinct_id` is a random UUID generated on this machine when telemetry is first enabled (`installId` in `~/.cork-ai/config.json`). It is not derived from hardware, user name, hostname or anything else, and `cork-ai reset` never changes it. Delete the key from the config file to start over.
 
+```bash
+cork-ai telemetry id          # prints the id, nothing else
+cork-ai telemetry id --json   # plus whether telemetry is on and when the last snapshot went out
+```
+
+Because the id is random, nothing on our side links it back to you — which cuts both ways: if you want your own numbers looked at ("why is my re-read rate so high?"), that id is the only way to point at your rows, and only you can hand it over. Reading it never creates one: with telemetry off and nothing ever sent, the command says so instead of minting an id.
+
 ## What is sent
 
 Every event carries `version`, `os`, `arch`, `runtime` (`bun-1` for the standalone binary, `node-22` from npm) and `claude_version` (Claude Code's, read from the transcript). Events emitted from inside a hook also carry `hook_ms`: how long the hook process had been running when it decided, process start included — the latency Claude Code waited for. Every event also refreshes the install's **person profile** in PostHog (`$set`: version, OS, arch, runtime, Claude Code version, telemetry and guard state, whether a Claude Code *managed settings* file exists (the file an IT team deploys — its presence only, never its content), autoCompactWindow, hooks installed, projects bucket over 30 days, lifetime sessions / saved tokens / net USD, median amplification, top model family, average context and saving at 200k over the last 30 days, time of the last snapshot; `$set_once`: first version, first seen).

@@ -21,7 +21,7 @@
  *   cork-ai doctor                Diagnose the install and hook coverage
  *   cork-ai context               Context-size cost report; --days, --ceiling, --set-autocompact <tokens>, guard on|off
  *   cork-ai calibrate [model]     Measure token factors against the count_tokens API
- *   cork-ai telemetry on|off      Opt-in anonymous telemetry; status, preview
+ *   cork-ai telemetry on|off      Opt-in anonymous telemetry; status, id, preview
  *   cork-ai statusline            Status-line segment
  *   cork-ai hook                  Internal: handle Claude Code hook events (stdin/stdout)
  *   cork-ai reset [--all]         Clear stats / learned policy / skip-list / caches
@@ -170,6 +170,7 @@ ${C.bold('Maintenance:')}
   cork-ai reset             Clear stats (--policy, --skip-list, --spend-cache, --digests, --all)
   cork-ai telemetry on|off  Anonymous usage stats, opt-in (docs/TELEMETRY.md); telemetry status
   cork-ai telemetry preview Show exactly what the daily snapshot would send
+  cork-ai telemetry id      Print this machine's anonymous install id
   cork-ai --version         Show version
 
 ${C.bold('Stats file:')} ${STATS_FILE}
@@ -1712,10 +1713,46 @@ function telemetryStatus(): void {
   if (cfg.telemetry === undefined) console.log(`  ${C.dim('(never configured — run cork-ai telemetry on to enable)')}`)
   if (process.env.DO_NOT_TRACK === '1') console.log(`  ${C.dim('(overridden by DO_NOT_TRACK=1)')}`)
   if (process.env.CORK_AI_TELEMETRY === '0') console.log(`  ${C.dim('(overridden by CORK_AI_TELEMETRY=0)')}`)
-  if (cfg.installId) console.log(`  Install id: ${C.dim(cfg.installId)} ${C.dim('(random, not derived from this machine)')}`)
+  if (cfg.installId) console.log(`  Install id: ${C.dim(cfg.installId)} ${C.dim('(random, not derived from this machine)')}  ${C.cyan('cork-ai telemetry id')}`)
   console.log(`  Endpoint:   ${C.dim(`${POSTHOG_HOST} (PostHog Cloud EU)`)}`)
   if (enabled) console.log(`  Last daily snapshot: ${C.dim(cfg.lastSnapshotAt ? fmtDate(cfg.lastSnapshotAt) : 'not yet — sent after the next session ends, or on cork-ai gain')}`)
   console.log(`  ${C.dim('Preview the exact payloads:')} ${C.cyan('cork-ai telemetry preview')}`)
+  console.log()
+}
+
+/**
+ * Prints the install id on its own line, and nothing else — so it can be
+ * piped, copied, or pasted into a bug report.
+ *
+ * People ask "which row on your dashboard is me?": the id is the only link
+ * between this machine and a row over there, and it is deliberately the one
+ * thing only they can tell us. Reading it must never mint one, though —
+ * `installId()` creates an id as a side effect, which would hand a random
+ * uuid to someone who has telemetry off and has never sent anything.
+ */
+function telemetryInstallId(json: boolean): void {
+  const cfg = loadConfig()
+  const id = cfg.installId
+  if (json) {
+    console.log(JSON.stringify({ installId: id ?? null, telemetry: isTelemetryEnabled(), sent: Boolean(id && cfg.lastSnapshotAt), lastSnapshotAt: cfg.lastSnapshotAt ?? null }, null, 2))
+    return
+  }
+  if (!id) {
+    console.log()
+    console.log(`  ${C.yellow('No install id yet.')} One is minted the first time telemetry is enabled.`)
+    console.log(`  ${C.dim('Nothing has ever been sent from this machine, so there is no row to point at.')}`)
+    console.log(`  ${C.dim('Enable it with')} ${C.cyan('cork-ai telemetry on')}${C.dim(', or see what it would send:')} ${C.cyan('cork-ai telemetry preview')}`)
+    console.log()
+    return
+  }
+  console.log()
+  console.log(`  ${C.bold(id)}`)
+  console.log()
+  console.log(`  ${C.dim('This is the anonymous id this machine is known by — random, not derived from the hardware.')}`)
+  if (!isTelemetryEnabled()) console.log(`  ${C.yellow('Telemetry is off')}${C.dim(', so nothing new is being sent under this id.')}`)
+  else if (!cfg.lastSnapshotAt) console.log(`  ${C.dim('No daily snapshot sent yet — it goes out after the next session ends, or on')} ${C.cyan('cork-ai gain')}`)
+  else console.log(`  ${C.dim(`Last daily snapshot: ${fmtDate(cfg.lastSnapshotAt)}`)}`)
+  console.log(`  ${C.dim('Share it if you want your own numbers looked at. See everything it is attached to:')} ${C.cyan('cork-ai telemetry preview')}`)
   console.log()
 }
 
@@ -1976,7 +2013,7 @@ async function runUpdate(args: string[]): Promise<void> {
 
 const KNOWN_COMMANDS = new Set(['hooks', 'gain', 'context', 'doctor', 'statusline', 'calibrate', 'models', 'report', 'update', 'config', 'reset', 'telemetry', '--help', '-h', '--version', '-v'])
 const KNOWN_SUBCOMMANDS = new Set([
-  'install', 'uninstall', 'remove', 'status', 'on', 'off', 'guard', 'list', 'get', 'set', 'unset', 'preview',
+  'install', 'uninstall', 'remove', 'status', 'on', 'off', 'guard', 'list', 'get', 'set', 'unset', 'preview', 'id', 'install-id',
   '--all', '--history', '--sessions', '--models', '--json', '--days', '--ceiling', '--set-autocompact', '--check',
   '--stats', '--policy', '--skip-list', '--spend-cache', '--digests', '--daily', '--weekly', '--monthly', '--projects', '--forecast', '--force',
   '--pre', '--stable',
@@ -2029,7 +2066,8 @@ const NOTICE_COMMANDS = new Set(['gain', 'context', 'doctor', 'hooks', 'report',
     else if (sub === 'off') telemetryOff()
     else if (sub === 'status' || !sub) telemetryStatus()
     else if (sub === 'preview') telemetryPreview(args.includes('--json'))
-    else { console.error(`\nUsage: cork-ai telemetry [on|off|status|preview [--json]]\n`); process.exit(1) }
+    else if (sub === 'id' || sub === 'install-id') telemetryInstallId(args.includes('--json'))
+    else { console.error(`\nUsage: cork-ai telemetry [on|off|status|id|preview [--json]]\n`); process.exit(1) }
   } else if (cmd === 'config') {
     runConfig(args.slice(1))
   } else if (cmd === 'update') {

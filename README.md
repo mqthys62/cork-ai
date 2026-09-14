@@ -189,11 +189,12 @@ cork-ai config set policy.readonlyAgentsAggressive false  # Explore/Plan follow 
 cork-ai reset             # clear stats · --policy (learned re-read rates) · --skip-list · --all
 cork-ai telemetry on      # anonymous usage events, opt-in — what is sent: docs/TELEMETRY.md
 cork-ai telemetry preview # the exact daily payload, byte for byte, before you decide
+cork-ai telemetry id      # this machine's anonymous id — share it to have your own numbers looked at
 ```
 
 ### Share your numbers
 
-Telemetry is **off by default**. Turned on, cork-ai sends anonymous events to [PostHog Cloud EU](https://eu.posthog.com) — never a path, a file name, a project name, a prompt or a line of code — plus one daily aggregate of what it saved you: tokens kept out of context, what they were worth, re-read rate, how much auto-compaction would save. Those aggregates are what the community numbers above and the Savings dashboard are built from, and what decides where the tool goes next. `cork-ai telemetry preview` prints the payload; [docs/TELEMETRY.md](docs/TELEMETRY.md) lists every event.
+Telemetry is **off by default**. Turned on, cork-ai sends anonymous events to [PostHog Cloud EU](https://eu.posthog.com) — never a path, a file name, a project name, a prompt or a line of code — plus one daily aggregate of what it saved you: tokens kept out of context, what they were worth, re-read rate, how much auto-compaction would save. Those aggregates are what the community numbers above and the Savings dashboard are built from, and what decides where the tool goes next. `cork-ai telemetry preview` prints the payload; [docs/TELEMETRY.md](docs/TELEMETRY.md) lists every event. The id your events are filed under is random and known only to you — `cork-ai telemetry id` prints it, for when you want your own numbers looked at.
 
 ### `cork-ai calibrate`
 
