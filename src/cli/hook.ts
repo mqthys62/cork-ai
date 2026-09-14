@@ -107,6 +107,8 @@ const CACHE_REMINDER_TOKENS = 80
 const READ_DEFAULT_LINES = 2_000
 /** Above this, Claude Code spills a Bash tool's output to a file and shows a preview: the model did not get the content. */
 const SHELL_OUTPUT_SPILL_BYTES = 30_000
+/** What the model sees of a spilled shell output: Claude Code shows "Preview (first 2KB)". */
+const SHELL_OUTPUT_PREVIEW_BYTES = 2_048
 /**
  * Files above this are never outlined nor hashed: reading and hashing a 100 MB
  * log costs 360 ms and 300 MB of memory for an outline of its first 2000
@@ -431,8 +433,18 @@ function handleRead(ctx: ReadContext): HookOutput {
   const allLines = content.split('\n')
   const totalLines = allLines.length
   const slice = allLines.slice(0, READ_DEFAULT_LINES).join('\n')
-  const originalTokens = estimateTokensFast(slice)
   deliveredWhole = totalLines <= READ_DEFAULT_LINES && (ctx.source === 'Read' || buf.length <= SHELL_OUTPUT_SPILL_BYTES)
+  // What the model would actually have received without us — the counterfactual
+  // the whole saving is measured against. For a shell read Claude Code spills
+  // anything past SHELL_OUTPUT_SPILL_BYTES to a file and shows a short preview,
+  // so counting the full output as "kept out of context" credits us with tokens
+  // that were never going to arrive. That is precisely the error this audit set
+  // out to avoid; the constant existed but only gated the re-read cache.
+  const delivered =
+    ctx.source !== 'Read' && buf.length > SHELL_OUTPUT_SPILL_BYTES
+      ? slice.slice(0, SHELL_OUTPUT_PREVIEW_BYTES)
+      : slice
+  const originalTokens = estimateTokensFast(delivered)
 
   const turn = lastMainTurnUsage(transcriptPath, undefined, own)
   const detectedModel = turn?.model || (event.model as string) || cfg.detectedModel
