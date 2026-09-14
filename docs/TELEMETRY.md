@@ -14,7 +14,11 @@ cork-ai telemetry off
 
 Events are sent to [PostHog Cloud EU](https://eu.posthog.com) (`https://eu.i.posthog.com/capture/`), hosted in the European Union. The project token embedded in the binary is a write-only key: it can record events, not read them. There is no cork-ai server.
 
-Sending never delays a hook: the event is handed to a detached child process that makes one HTTPS request with a 4-second timeout and exits. Offline, the event is simply lost.
+Sending never delays a hook. Rare events (an install, a `doctor` run, a CLI command) are handed straight to a detached child process that makes one HTTPS request and exits.
+
+The frequent ones — those tied to a file read — wait in a spool instead: `~/.cork-ai/telemetry-spool.json`. They leave together, in a single batched request, when the turn ends (`Stop`), when the session ends, or once 25 events have piled up. A read used to cost its own process and its own TLS handshake, so a burst of thirty parallel reads cost thirty of each; now it costs one.
+
+The spool is bounded on purpose: at most 500 events, and nothing older than seven days. Offline, events wait for the next flush rather than being lost, but a machine that cannot reach PostHog for a week drops its oldest rather than growing without limit — `cork-ai doctor` says so when the spool stays full. Events are taken out of the spool *before* they are sent, so a sender that dies mid-flight loses that batch rather than sending it twice: a duplicate would inflate every count.
 
 ## Identity
 
@@ -61,7 +65,9 @@ The property builders live in `src/cli/telemetry.ts` and `src/cli/hook.ts`; the 
 
 ## Location
 
-PostHog derives a location from the IP at ingestion. The project anonymises IPs and a transformation blanks the city, postal code, coordinates and region before storage; only the country, continent and time zone remain.
+PostHog derives a location from the IP at ingestion. The project anonymises IPs and a transformation blanks the city, postal code, coordinates and region before storage; only the country, continent and time zone remain — enough to know that installs exist in France or Brazil, never where in France.
+
+The transformation runs at ingestion and covers both the event properties and the copies PostHog writes onto the person profile (`$geoip_*` and the `$initial_geoip_*` set at first sight). It applies to what arrives, never to what is already stored: rows ingested before a fix keep whatever they carried, and clearing them is a separate, deliberate pass over the person records.
 
 ## For maintainers
 

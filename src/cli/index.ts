@@ -64,7 +64,8 @@ import { channelFor, markPreNoticed, readUpdateCheck, scheduleUpdateCheck, updat
 import { VERSION, compareVersions } from './version.js'
 import { CONFIG_FILE, CONFIG_KEYS, CORK_HOME, getConfigValue, loadConfig, saveConfig, setConfigValue, updateConfig, parseTokens, isTelemetryEnabled } from './config.js'
 import { readHeartbeat, readSessionsSeen } from './heartbeat.js'
-import { sendTelemetry, runSendTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST, errorClass, installChannel, managedSettingsPresent, type TelemetryEvent } from './telemetry.js'
+import { sendTelemetry, runSendTelemetry, runFlushTelemetry, sendSnapshotDetached, capturePayload, POSTHOG_HOST, errorClass, installChannel, managedSettingsPresent, type TelemetryEvent } from './telemetry.js'
+import { spoolSize, SPOOL_MAX } from './telemetry-spool.js'
 import {
   CALIBRATION_FILE,
   countTokensRaw,
@@ -1482,6 +1483,20 @@ async function runDoctor(args: string[]): Promise<void> {
       summary: ageH === undefined ? 'telemetry on but no daily snapshot sent yet — cork-ai gain or the end of a session sends one' : ageH > 48 ? `last daily snapshot ${ageH} h ago — cork-ai gain sends a new one` : `last daily snapshot ${ageH} h ago`,
       data: { lastSnapshotAt: cfgNow.lastSnapshotAt ?? null, ageHours: ageH ?? null },
     })
+    // A spool that stays full is the visible symptom of a machine that cannot
+    // reach PostHog — worth saying, because every other telemetry number then
+    // silently stops moving.
+    const waiting = spoolSize()
+    push({
+      name: 'spool',
+      status: waiting >= SPOOL_MAX ? 'warn' : 'info',
+      summary: waiting === 0
+        ? 'no telemetry waiting to be sent'
+        : waiting >= SPOOL_MAX
+          ? `${waiting} events waiting and the spool is full — the oldest are being dropped, so sending is failing (offline? proxy?)`
+          : `${waiting} event(s) waiting, sent together at the end of a turn`,
+      data: { spooled: waiting, max: SPOOL_MAX },
+    })
   }
   {
     const has = (f: string) => { try { return fs.statSync(f).size > 2 } catch { return false } }
@@ -2072,6 +2087,8 @@ const NOTICE_COMMANDS = new Set(['gain', 'context', 'doctor', 'hooks', 'report',
     await runHook().catch(() => { /* a hook must never fail a tool call */ })
   } else if (cmd === '__send-telemetry') {
     await runSendTelemetry(sub)
+  } else if (cmd === '__flush-telemetry') {
+    await runFlushTelemetry()
   } else if (cmd === '__check-update') {
     // Detached daily check: refresh the cache the notice reads. Silent by design.
     await fetchLatestRelease()

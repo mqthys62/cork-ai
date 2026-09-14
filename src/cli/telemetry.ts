@@ -21,6 +21,7 @@ import fs from 'fs'
 import path from 'path'
 import { installId, isTelemetryEnabled, loadConfig } from './config.js'
 import { readHeartbeat } from './heartbeat.js'
+import { spool, takeSpool, type SpooledEvent } from './telemetry-spool.js'
 import { VERSION } from './version.js'
 
 export const POSTHOG_HOST = 'https://eu.i.posthog.com'
@@ -208,9 +209,45 @@ export async function postCapture(body: Record<string, unknown>, host = POSTHOG_
 export function sendTelemetry(e: TelemetryEvent): void {
   if (!isTelemetryEnabled()) return
   try {
-    const body = JSON.stringify(capturePayload(e, installId()))
+    const payload = capturePayload(e, installId())
+    // High-frequency events wait in the spool and leave together. One read used
+    // to mean one 81 MB process and one TLS handshake; a burst of thirty
+    // parallel reads meant thirty of each. The rare events keep going out
+    // immediately — waiting would cost more than it saves, and `uninstall` in
+    // particular has to leave before the person stops running cork-ai at all.
+    if (SPOOLED_EVENTS.has(e.event)) {
+      if (spool(payload as unknown as SpooledEvent)) flushTelemetryDetached()
+      return
+    }
+    sendOneDetached(payload)
+  } catch { /* never blocks execution */ }
+}
+
+/**
+ * The events that go through the spool: the ones tied to a file read, which
+ * arrive in bursts and dominate the volume. Everything else — install,
+ * uninstall, doctor, a CLI command — is rare enough to send on the spot.
+ */
+const SPOOLED_EVENTS = new Set<TelemetryEventName>(['hook_read', 'hook_reread', 'guard_notice', 'session_start'])
+
+/** One event, one detached child. The path the rare events still take. */
+function sendOneDetached(payload: Record<string, unknown>): void {
+  const body = JSON.stringify(payload)
+  const compiled = !/\b(node|bun)(\.exe)?$/i.test(path.basename(process.execPath))
+  const args = compiled ? ['__send-telemetry', body] : [process.argv[1], '__send-telemetry', body]
+  const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true })
+  child.unref()
+}
+
+/**
+ * Asks a detached child to drain the spool. Called when the spool fills up and
+ * at the moments a session pauses — the hook itself never waits for the network.
+ */
+export function flushTelemetryDetached(): void {
+  if (!isTelemetryEnabled()) return
+  try {
     const compiled = !/\b(node|bun)(\.exe)?$/i.test(path.basename(process.execPath))
-    const args = compiled ? ['__send-telemetry', body] : [process.argv[1], '__send-telemetry', body]
+    const args = compiled ? ['__flush-telemetry'] : [process.argv[1], '__flush-telemetry']
     const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', windowsHide: true })
     child.unref()
   } catch { /* never blocks execution */ }
@@ -239,4 +276,33 @@ export async function runSendTelemetry(rawBody: string | undefined): Promise<voi
   let body: Record<string, unknown>
   try { body = JSON.parse(rawBody) } catch { return }
   await postCapture(body)
+}
+
+/**
+ * Posts many events in one request. PostHog's /capture/ accepts
+ * `{ api_key, batch: [...] }` on the same endpoint with the same write-only
+ * key — the form scripts/adoption.mjs already uses.
+ *
+ * The per-event `api_key` is dropped: it belongs to the envelope here, and
+ * repeating it in every entry would trip PostHog's own validation.
+ */
+export async function postBatch(events: Array<Record<string, unknown>>, host = POSTHOG_HOST, timeoutMs = 10_000): Promise<boolean> {
+  if (events.length === 0) return true
+  const batch = events.map(({ api_key: _drop, ...rest }) => rest)
+  return postCapture({ api_key: POSTHOG_PROJECT_TOKEN, batch }, host, timeoutMs)
+}
+
+/**
+ * Entry point of the detached child: `cork-ai __flush-telemetry`.
+ *
+ * Takes the spool and sends it as one batch. On failure the events are put
+ * back, so a machine that is briefly offline keeps them for the next flush
+ * rather than losing them — bounded by the spool's own ceiling and max age,
+ * which is what stops a week offline from growing without limit.
+ */
+export async function runFlushTelemetry(): Promise<void> {
+  const events = takeSpool()
+  if (events.length === 0) return
+  const ok = await postBatch(events as unknown as Array<Record<string, unknown>>)
+  if (!ok) for (const e of events) spool(e)
 }

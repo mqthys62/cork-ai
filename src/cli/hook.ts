@@ -32,8 +32,9 @@ import { outline } from './outline.js'
 import { LIVE_DIR, accumulateInSession, readActiveLiveSessions, readGlobalStats } from './persistent-stats.js'
 import { agentClassOf, gate, recordCompression, recordEditAfter, recordProbationRead, recordRangeRead, recordReRead, RE_READ_OUTPUT_TOKENS, type AgentClass, type PolicyScope } from './policy.js'
 import { isSkipped, markSkipped } from './skip-list.js'
-import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
+import { contextBucket, costBucket, modelFamily, sendTelemetry, sendSnapshotDetached, flushTelemetryDetached, tokenBucket, type TelemetryEvent } from './telemetry.js'
 import { lifetimeSavings, snapshotDue, type SnapshotReason } from './savings.js'
+import { spoolSize } from './telemetry-spool.js'
 import { agentTranscriptPath, lastMainTurnUsage, lastUserPromptFromTranscript, sessionContextProfile, transcriptSince } from './transcript-usage.js'
 import { writeFileAtomic, debugLog } from './fs-utils.js'
 
@@ -44,6 +45,8 @@ export interface HookDeps {
   telemetry?: (e: TelemetryEvent) => void
   /** Daily savings snapshot trigger; defaults to a detached `cork-ai __send-snapshot`. */
   snapshot?: (reason: SnapshotReason) => void
+  /** Drains the telemetry spool; defaults to a detached `cork-ai __flush-telemetry`. */
+  flush?: () => void
   now?: () => Date
 }
 
@@ -723,6 +726,7 @@ export function handleHookEvent(event: Record<string, unknown>, partialDeps: Hoo
   const deps: Required<HookDeps> = {
     telemetry: partialDeps.telemetry ?? sendTelemetry,
     snapshot: partialDeps.snapshot ?? (reason => sendSnapshotDetached(reason)),
+    flush: partialDeps.flush ?? flushTelemetryDetached,
     now: partialDeps.now ?? (() => new Date()),
   }
   const toolName = (event.tool_name as string) ?? ''
@@ -745,12 +749,22 @@ export function handleHookEvent(event: Record<string, unknown>, partialDeps: Hoo
     case 'PostToolUseFailure':
       handlePostToolUseEdit(event, deps.now(), true)
       return undefined
-    case 'UserPromptSubmit':
     case 'Stop':
+      // Claude has finished answering: the burst of reads is over and nothing
+      // is waiting on us. The natural moment to empty the spool in one request.
+      deps.flush()
+      return runGuard(event, hookEvent, deps)
     case 'SessionStart':
+      // Anything a previous session left behind — it crashed, the machine slept,
+      // the network was down at its last Stop. Without this the leftovers would
+      // sit until the spool's own max age drops them unsent.
+      if (spoolSize() > 0) deps.flush()
+      return runGuard(event, hookEvent, deps)
+    case 'UserPromptSubmit':
       return runGuard(event, hookEvent, deps)
     case 'SessionEnd':
       handleSessionEnd(event, deps)
+      deps.flush()
       return undefined
     case 'PreToolUse':
       break
