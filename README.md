@@ -43,6 +43,13 @@ and what every further tool call costs — /compact or /autocompact fixes that
 > Net = gross saving at cache-read prices minus every re-read penalty. Raw figures and method: [docs/stats.json](docs/stats.json), [docs/TELEMETRY.md](docs/TELEMETRY.md).
 <!-- /cork-ai:stats -->
 
+> **These are counterfactuals, not a bill.** They say what the avoided tokens
+> would have cost, which no tool can measure about itself — JetBrains A/B-tested
+> `rtk` and found it *raised* Claude Code's cost by 7.6% while reporting 99.8%
+> savings. cork-ai avoids the two errors behind that gap, but avoiding known
+> errors is not proof: a control arm is. The harness that settles it ships with
+> the tool — [docs/AB-TESTING.md](docs/AB-TESTING.md).
+
 ---
 
 ## Installation
