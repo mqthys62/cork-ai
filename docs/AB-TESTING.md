@@ -157,6 +157,43 @@ A benchmark that exercises the read path is still needed. Tasks where an agent
 edits real source files — the work `Read` is for — are the missing piece, and
 SkillsBench does not supply them.
 
+## First measured result (2026-09-15)
+
+24 runs, 12 paired, four read-heavy questions about this repository, rc.4
+installed on the treatment arm. $54.95 of list-price equivalent, 1.7 hours.
+
+| metric | treatment vs control | p |
+|---|---|---|
+| **cost** | **-14.8%** | 0.126 |
+| cache read | -27.3% | 0.170 |
+| cache write | -17.5% | 0.092 |
+| turns | -8.3% | 0.410 |
+| output | -1.1% | 0.610 |
+
+Every metric moves the right way — the opposite sign to the rtk result
+(+7.6%) — but **nothing reaches significance at n=12**, so the honest reading
+is: no penalty detected, and a saving that is suggestive, not established.
+
+Splitting by whether cork-ai actually acted sharpens it, and the split is
+consistent with the tool causing the difference rather than chance:
+
+| pairs | n | median cost |
+|---|---|---|
+| cork-ai compressed something | 8 | **-26.9%** |
+| zero compressions (inert) | 4 | -3.5% |
+
+Across all 24 runs: **15 compressions, 30,880 tokens kept out of context,
+6 targeted range reads, and 0 full re-reads.** The failure mode that made rtk
+expensive — an outline the model rejects and re-reads in full — did not occur
+once.
+
+Two limits worth stating plainly. Answer quality is not scored: these are
+open questions with no automated verifier, so `Task success` reads 0/12 on
+both arms; answer length was comparable (20.5KB vs 20.4KB median), which
+shows cork-ai is not saving by producing less, but says nothing about
+correctness. And two of the twelve pairs swung the other way (+28%, +17%),
+which is what n=12 and this much session variance look like.
+
 ## Reading the result
 
 The report gives a **median ratio** of treatment over control, with a paired
