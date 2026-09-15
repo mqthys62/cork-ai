@@ -67,10 +67,33 @@ so before spending anything.
 - **Answer quality.** These are open questions with no automated verifier, so
   correctness is unscored. Answer length was comparable (21.0KB treatment vs
   20.2KB control), which rules out saving by producing *less* — not by being
-  wrong.
+  wrong. This is the weakest point in the result: a tool that shows the model
+  less of a file could buy its saving with worse answers, and length cannot
+  tell the difference.
 - **Other people's workloads.** One codebase, four tasks, one machine, one
   model. The direction is consistent; the magnitude should not be transplanted.
 - **Significance.** n=12. Roughly 30-40 pairs would settle an effect this size.
+- **Other models.** Both arms ran Opus. A token saved is worth roughly ten
+  times less on a cheap model, so the percentage saving is not portable across
+  models even if the token saving is.
+
+### What the next campaign adds
+
+Each of the first three gaps has a harness change behind it, so the follow-up
+measures them rather than repeating the same run at greater length:
+
+| Gap | How it is addressed |
+|---|---|
+| Answer quality unscored | `scripts/ab-judge.mjs` grades every pair blind: the two answers are shown to a fresh judge as "A" and "B" in a seeded random order, with no mention of cork-ai, and the judge verifies each claim against the repository before scoring errors, completeness and specificity. Un-blinding happens only after the verdict. |
+| One codebase | Four new tasks on a second, deliberately unlike repository — a large NestJS + Angular monorepo against a small TypeScript CLI. cork-ai's decision depends on file size, extension and re-read rate, all of which differ between them. |
+| n=12 | 8 tasks x 3 repeats = 24 pairs, resumable, so an interrupted campaign continues instead of restarting. |
+
+The model is now pinned explicitly in both arms (`--model`, default Opus) and
+recorded per run. It was not recorded in the runs above. The two arms read
+different settings files — the control's is empty by construction, so it never
+sees a configured model — and they agreed only because the CLI default and the
+configured model happened to be the same. That is not something a measurement
+should rely on.
 
 ## Reproducing
 

@@ -72,8 +72,14 @@ The raw runs are in this repository and the figures recompute from them:
 node docs/evidence/verify.mjs
 ```
 
+What this does **not** yet show: whether the answers are as good. Both arms
+produced comparable answer length, which rules out saving by writing *less* —
+but not by being wrong. The next campaign grades every pair blind, on a second
+unrelated codebase, at the ~30 pairs this effect size needs.
+
 Method, limits, and what was thrown out along the way (including three of our
-own false results): [docs/AB-TESTING.md](docs/AB-TESTING.md).
+own false results): [docs/AB-TESTING.md](docs/AB-TESTING.md). Raw runs and the
+full list of what is still unmeasured: [docs/evidence/](docs/evidence/).
 
 ---
 

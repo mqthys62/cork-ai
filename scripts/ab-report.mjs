@@ -90,6 +90,35 @@ if (inert) {
   if (inert === pairs.length) console.log(`  ! That is every pair: this run says nothing about cork-ai.`)
 }
 
+// The read-heavy tasks are where cork-ai is expected to win; the adverse ones
+// are ordinary work where the hook still runs on every call and has little to
+// compress. A single pooled average hides both, and the adverse half is the
+// one that decides whether this tool is worth installing for someone whose
+// work does not look like the flattering half. rtk was +7.6% overall for
+// exactly this reason: a permanent cost against an occasional gain.
+const profiles = [...new Set(pairs.map(p => p.t.profile).filter(Boolean))]
+if (profiles.length > 1) {
+  console.log(`\nBy workload profile — the adverse half is the one that decides this:`)
+  for (const prof of profiles.sort()) {
+    const sub = pairs.filter(p => p.t.profile === prof)
+    const ratios = sub.map(p => p.t.costUSD / p.c.costUSD).filter(Number.isFinite)
+    if (!ratios.length) continue
+    const med = median(ratios)
+    const { p: pv } = wilcoxon(ratios.map(Math.log))
+    const pct = (med - 1) * 100
+    const sig = pv === null ? 'n too small' : pv < 0.05 ? `p=${pv.toFixed(4)} significant` : `p=${pv.toFixed(3)} not significant`
+    const comp = sub.reduce((a, b) => a + (b.t.compressions ?? 0), 0)
+    console.log(`  ${prof.padEnd(12)} cost ${(pct >= 0 ? '+' : '') + pct.toFixed(1)}%   n=${sub.length}   ${comp} compression(s)   ${sig}`)
+  }
+  const adv = pairs.filter(p => p.t.profile === 'adverse')
+  if (adv.length) {
+    const advMed = median(adv.map(p => p.t.costUSD / p.c.costUSD).filter(Number.isFinite))
+    console.log(advMed > 1.05
+      ? `  ! cork-ai costs MORE on ordinary work. That is the rtk failure mode; the overall figure is not the whole story.`
+      : `  Ordinary work is not penalised, so the saving on read-heavy work is not bought from elsewhere.`)
+  }
+}
+
 const solved = arm => rows.filter(r => r.arm === arm && r.reward === 1).length
 const attempted = arm => rows.filter(r => r.arm === arm && r.reward !== null).length
 console.log(`\nTask success (a tool that saves tokens by failing has saved nothing):`)

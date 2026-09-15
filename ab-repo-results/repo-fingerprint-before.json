@@ -1,0 +1,12 @@
+{
+  "cork-ai": {
+    "head": "094b3241b6e3c97b1e63cdcd39b37356172c984c",
+    "dirtyCount": 6,
+    "dirty": " M README.md\n M docs/evidence/README.md\n M scripts/ab-repo.mjs\n?? ab-repo-results/\n?? docs/evidence/NEXT-CAMPAIGN.md\n?? scripts/ab-judge.mjs\n"
+  },
+  "essenly": {
+    "head": "d0758fad1dd9b5fce7f797f9aae1cd2c6d0dbdca",
+    "dirtyCount": 38,
+    "dirty": " M AGENTS.md\n M CLAUDE.md\n D backend/dist/mail/templates/templates/birthday.hbs\n D backend/dist/mail/templates/templates/booking-cancelled.hbs\n D backend/dist/mail/templates/templates/booking-confirmed.hbs\n D backend/dist/mail/templates/templates/booking-received.hbs\n D backend/dist/mail/templates/templates/gift-card.hbs\n D backend/dist/mail/templates/templates/inactivity-suspended.hbs\n D backend/dist/mail/templates/templates/inactivity-warning.hbs\n D backend/dist/mail/templates/templates/login-otp.hbs\n D backend/dist/mail/templates/templates/low-stock-alert.hbs\n D backend/dist/mail/templates/templates/payment-confirmed.hbs\n D backend/dist/mail/templates/templates/post-appointment.hbs\n D backend/dist/mail/templates/templates/reminder-24h.hbs\n D backend/dist/mail/templates/templates/reminder-2h.hbs\n D backend/dist/mail/templates/templates/reminder.hbs\n D backend/dist/mail/templates/templates/reset-password.hbs\n D backend/dist/mail/templates/templates/verify-email.hbs\n D backend/dist/mail/templates/templates/waitlist-slot-available.hbs\n D backend/dist/mail/templates/templates/welcome-pro.hbs\n D backend/dist/mail/templates/templates/welcome.hbs\n D backend/dist/mail/templates/templates/win-back.hbs\n M backend/dist/tsconfig.build.tsbuildinfo\n M frontend/dist/frontend/3rdpartylicenses.txt\n D frontend/dist/frontend/browser/chunk-MY6T5UG3.js\n M frontend/dist/frontend/browser/index.html\n D frontend/dist/frontend/browser/main-J4JBEIGL.js\n M frontend/dist/frontend/browser/ngsw.json\n M frontend/package-lock.json\n M frontend/package.json\n M frontend/src/app/features/public-site/pages/home/home.html\n M frontend/src/app/features/public-site/pages/home/home.scss\n M frontend/src/app/features/public-site/pages/home/home.ts\n?? frontend/dist/frontend/browser/chunk-O4KYIEQG.js\n?? frontend/dist/frontend/browser/main-UKWJXNVT.js\n?? frontend/src/app/core/directives/scroll-reveal.ts\n?? frontend/src/app/core/services/smooth-scroll.service.ts\n?? frontend/src/app/core/utils/gsap-setup.ts\n"
+  }
+}

@@ -33,15 +33,30 @@ const OUT = process.env.AB_OUT ?? path.join(process.cwd(), 'ab-repo-results')
 const REPEATS = Number(process.env.AB_REPEATS ?? 3)
 const TIMEOUT_MS = Number(process.env.AB_TIMEOUT_MS ?? 900_000)
 const DRY = process.argv.includes('--dry-run')
+/**
+ * The model both arms run. cork-ai's saving is denominated in tokens, but the
+ * bill is tokens times a per-model price, so the arms must agree on the model
+ * or the comparison measures the price difference instead. Opus is the
+ * default here because it is what this tool is used with in practice and it
+ * is where a token saved is worth the most.
+ */
+const MODEL = process.env.AB_MODEL ?? 'opus'
 const ONLY = (process.env.AB_TASKS ?? '').split(',').filter(Boolean)
 
 /**
- * Read-heavy questions about a real codebase.
+ * Read-heavy questions about real codebases.
  *
  * Every one requires opening several source files to answer: no task can be
  * satisfied by `ls`, a single `grep`, or the README. They are questions, not
  * edits — the agent has no reason to modify anything, and its copy is thrown
  * away regardless.
+ *
+ * Two repositories, deliberately: a small single-purpose CLI (cork-ai, ~6k
+ * lines of TypeScript) and a large NestJS + Angular monorepo (essenly, ~50k
+ * files). A result measured on one codebase is a fact about that codebase.
+ * cork-ai's decision depends on file size, extension and re-read rate, all of
+ * which differ sharply between the two, so a saving that holds on both is
+ * evidence about the tool rather than about one repository's shape.
  */
 const TASKS = [
   {
@@ -63,6 +78,55 @@ const TASKS = [
     name: 'explain-outline',
     repo: 'cork-ai',
     prompt: `Explore this repository and explain how a compressed summary is produced from a source file. Cover which file kinds are recognised and how, the patterns that detect top-level structure and what each is meant to match, how the preview head is chosen, how entries are rendered and truncated, and what makes a summary get rejected as too sparse. Write your answer to ANSWER.md in the repository root, naming the constants and their values.`,
+  },
+  // --- Tasks where cork-ai has little or nothing to gain. ---
+  //
+  // The four above are read-heavy by construction: they are where this tool
+  // wins, and measuring only them would answer "is cork-ai good at what it is
+  // good at". The bill an actual user pays is dominated by work like the
+  // tasks below, where the hook still runs on every Read and every Bash and
+  // still costs its overhead, but finds little worth compressing.
+  //
+  // This is exactly how rtk ended up +7.6% more expensive while reporting a
+  // 99.8% saving: a permanent per-call cost against an occasional gain. If
+  // cork-ai is a net loss on ordinary work, it has to show up here.
+  {
+    name: 'small-files-edit',
+    profile: 'adverse',
+    repo: 'cork-ai',
+    prompt: `Work through the test suite in this repository and report on its coverage. For each area of behaviour the project implements, say whether tests exist for it, and name three specific behaviours that are currently untested and would be worth covering. Do not write any code; write your findings to ANSWER.md in the repository root.`,
+  },
+  {
+    name: 'shell-heavy',
+    profile: 'adverse',
+    repo: 'cork-ai',
+    prompt: `Using shell commands rather than reading source files, characterise this repository: how many files of each language, the largest directories by size, the commit frequency over the project's life, which files change most often together, and the dependency count. Write the numbers and the commands that produced them to ANSWER.md in the repository root.`,
+  },
+  {
+    name: 'config-question',
+    profile: 'adverse',
+    repo: 'essenly',
+    prompt: `Determine how this project is built, configured and deployed. Cover the package scripts and what each does, the environment variables the application expects and where they are consumed, the container setup, and the database migration mechanism. Write your answer to ANSWER.md in the repository root.`,
+  },
+  {
+    name: 'explain-booking',
+    repo: 'essenly',
+    prompt: `Explore this repository and explain how an appointment booking is validated and persisted on the server side. Follow the request from the controller that accepts it through to the database write, naming each class and method in order. Cover which fields are validated and how, how conflicting or overlapping bookings are detected, what happens inside a transaction and what does not, and every side effect that is triggered once a booking succeeds. Write your answer to ANSWER.md in the repository root, citing file and line for each claim.`,
+  },
+  {
+    name: 'map-auth',
+    repo: 'essenly',
+    prompt: `Explore this repository and map its authentication and authorization end to end. Cover how a credential is verified and what is stored, how a session or token is issued, refreshed and revoked, every guard or decorator that protects a route and what each one checks, how roles or permissions are represented, and where the client keeps its credential and attaches it to requests. Write your answer to ANSWER.md in the repository root, naming the classes and the files they live in.`,
+  },
+  {
+    name: 'trace-payment',
+    repo: 'essenly',
+    prompt: `Explore this repository and trace how a payment or a cash-register transaction is recorded. Identify the entities involved and their relationships, follow the code from the endpoint that receives the operation to the rows it writes, explain how totals and any tax or discount are computed and where rounding happens, and describe what is done to keep the ledger consistent if a step fails partway. Write your answer to ANSWER.md in the repository root, citing file and line.`,
+  },
+  {
+    name: 'audit-frontend-state',
+    repo: 'essenly',
+    prompt: `Explore the client application in this repository and explain how it manages state and talks to the server. Cover the pattern used to hold shared state and where it lives, how a view obtains data and what happens while it is loading or when it fails, how server errors surface to the user, and every place a call is retried, cached or de-duplicated. Name the services and components involved. Write your answer to ANSWER.md in the repository root.`,
   },
 ]
 
@@ -137,24 +201,50 @@ function runArm({ arm, task, rep, workdir }) {
     env.CORK_AI_HOME = home
   }
 
+  // Pin the model explicitly in BOTH arms. The control runs with an empty
+  // settings.json, so it never sees the user's configured model and would
+  // fall back to the CLI default; the treatment keeps the real config and
+  // would use the configured one. Those happen to agree today, but relying
+  // on that is how an A/B silently becomes a comparison of two models.
   const started = Date.now()
   const res = sh('claude', ['-p', task.prompt, '--output-format', 'json',
-    '--permission-mode', 'bypassPermissions'], { cwd: workdir, env })
+    '--model', MODEL, '--permission-mode', 'bypassPermissions'], { cwd: workdir, env })
   const wallMs = Date.now() - started
 
   let json = null
   try { json = JSON.parse(res.stdout) } catch { /* crashed or timed out */ }
 
+  // Keep the answer itself, not just its size. Cost is only half the question:
+  // a cheaper arm that answers worse is a regression, and bytes cannot tell
+  // the difference. These files are what scripts/ab-judge.mjs grades blind.
   const answer = path.join(workdir, 'ANSWER.md')
   const answerBytes = fs.existsSync(answer) ? fs.statSync(answer).size : 0
+  let answerPath = null
+  if (answerBytes) {
+    const kept = path.join(OUT, 'answers', `${task.name}-${arm}-${rep}.md`)
+    fs.mkdirSync(path.dirname(kept), { recursive: true })
+    fs.copyFileSync(answer, kept)
+    answerPath = path.relative(OUT, kept)
+  }
 
   return {
     arm, task: task.name, repo: task.repo, rep, wallMs,
+    // 'read-heavy' is where cork-ai should win; 'adverse' is ordinary work
+    // where it pays its overhead for little gain. Averaging the two hides
+    // both, so the profile travels with the row and the report splits on it.
+    profile: task.profile ?? 'read-heavy',
     ok: !!json && !json.is_error,
     costUSD: json?.total_cost_usd ?? null,
     turns: json?.num_turns ?? null,
     usage: json?.usage ?? null,
-    answerBytes,
+    // Which models actually ran, and on what price basis. The two arms read
+    // different settings files -- the control's is empty by construction --
+    // so they could silently end up on different models, and a cost
+    // difference between two models is not a fact about cork-ai. Recorded so
+    // the comparison can be checked rather than assumed.
+    models: json?.modelUsage ? Object.keys(json.modelUsage).sort() : null,
+    costBasis: json?.modelUsage ? [...new Set(Object.values(json.modelUsage).map(m => m.costBasis))].sort() : null,
+    answerBytes, answerPath,
     ...(arm === 'treatment' ? corkActivity(home) : {}),
     stderr: json ? '' : (res.stderr ?? '').slice(-400),
   }
@@ -179,6 +269,7 @@ function main() {
   console.log(`${tasks.length} task(s) x ${REPEATS} repeat(s) x 2 arms = ${tasks.length * REPEATS * 2} runs`)
   if (done.size) console.log(`${done.size} pair(s) already done; ${remaining * 2} run(s) left.`)
   console.log(`Your repositories are never modified: every run works on its own copy.\n`)
+  console.log(`Both arms run --model ${MODEL}\n`)
   warnIfStaleInstall()
 
   if (DRY) {
@@ -273,6 +364,7 @@ function finish(results, resultsPath, repos, before) {
   }
   if (clean) console.log(`Your repositories are byte-for-byte unchanged (HEAD and working tree verified).`)
   console.log(`Analyse with: node scripts/ab-report.mjs ${resultsPath}`)
+  console.log(`Grade the answers blind with: node scripts/ab-judge.mjs ${OUT}`)
 }
 
 main()
