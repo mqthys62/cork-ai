@@ -21,22 +21,35 @@ while true; do
 
   # The 5-hour block: what actually stops the campaign.
   if command -v ccusage >/dev/null 2>&1; then
-    block=$(ccusage blocks --active --json 2>/dev/null | jq -r '
+    # --token-limit max infers the ceiling from your own heaviest historical
+    # block. That is NOT the real server-side quota: Claude Code's status line
+    # gets the true five_hour.used_percentage injected on stdin, and nothing
+    # outside an interactive session can read it. So this percentage is
+    # "against the biggest block you have ever run", which is the right shape
+    # for the only decision here -- keep going or stop -- and is labelled as
+    # such rather than dressed up as the real number.
+    block=$(ccusage blocks --active --token-limit max --json 2>/dev/null | jq -r '
         .blocks[0] // empty |
-        "  Quota block   $\(.costUSD // 0 | .*100|round/100) used" +
-        "   \((.projection.remainingMinutes // 0) / 60 | floor)h \((.projection.remainingMinutes // 0) % 60)m left" ,
-        "  Burn rate     $\(.burnRate.costPerHour // 0 | .*100|round/100)/hr" +
-        "   projected $\(.projection.totalCost // 0 | .*100|round/100) by block end"
+        ((.totalTokens // 0) as $used |
+         (.tokenLimitStatus.limit // 0) as $lim |
+         (if $lim > 0 then ($used / $lim * 1000 | round / 10) else 0 end)) as $pctNow |
+        (.tokenLimitStatus.percentUsed // 0 | .*10|round/10) as $pctProj |
+        (.projection.remainingMinutes // 0) as $rem |
+        "  5h block      \($pctNow)% used now   ->  \($pctProj)% projected by block end",
+        "                \(($rem / 60) | floor)h \($rem % 60)m left   ·   $\(.costUSD // 0 | .*100|round/100) spent   ·   $\(.burnRate.costPerHour // 0 | .*100|round/100)/hr",
+        (if $pctProj > 90 then "  !! On track to exhaust the block before it resets."
+         elif $pctProj > 70 then "  !  Over 70% projected — watch this."
+         else empty end)
       ' 2>/dev/null)
     # Between two 5-hour blocks there is no active block at all, which is not
     # an error: it means nothing has been spent since the reset.
     if [ -n "$block" ]; then
       echo "$block"
     else
-      echo "  Quota block   no active block — a fresh 5h window starts on the next call"
+      echo "  5h block      no active block — a fresh window starts on the next call"
     fi
   else
-    echo "  Quota block   ccusage not installed — npm i -g ccusage"
+    echo "  5h block      ccusage not installed — npm i -g ccusage"
   fi
 
   echo ""
@@ -72,6 +85,8 @@ while true; do
 
   echo ""
   echo "  ──────────────────────────────────────────────────────────────"
+  echo "  % is against your heaviest past 5h block, not Anthropic's real"
+  echo "  ceiling — only an interactive session can read that one."
   echo "  Ctrl+C to stop watching (the campaign keeps running)."
   sleep 20
 done

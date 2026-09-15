@@ -1,8 +1,8 @@
 {
   "cork-ai": {
-    "head": "835b2fc36a3e6a6bf38adc1da84d004b4f59b8d4",
-    "dirtyCount": 5,
-    "dirty": " M .gitignore\n M ab-repo-results/repo-fingerprint-before.json\n M scripts/ab-judge.mjs\n M scripts/ab-repo.mjs\n?? scripts/ab-progress.mjs\n"
+    "head": "e7ea1154fc960f28ac30bc0a547f80bbd69632f1",
+    "dirtyCount": 0,
+    "dirty": ""
   },
   "essenly": {
     "head": "d0758fad1dd9b5fce7f797f9aae1cd2c6d0dbdca",
