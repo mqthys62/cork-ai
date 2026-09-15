@@ -1,0 +1,8 @@
+{"task":"citation-check","ok":true,"costUSD":0.5412505,"turns":9,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":198826}
+{"task":"python-scala-translation","ok":true,"costUSD":1.7442744999999993,"turns":24,"compressions":2,"savedTokens":1766,"reReads":0,"wallMs":291757}
+{"task":"organize-messy-files","ok":true,"costUSD":1.0639345,"turns":20,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":138046}
+{"task":"simpo-code-reproduction","ok":true,"costUSD":0.7375820000000001,"turns":20,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":220336}
+{"task":"lean4-proof","ok":false,"costUSD":null,"turns":null,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":420753}
+{"task":"flink-query","ok":false,"costUSD":null,"turns":null,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":420643}
+{"task":"data-to-d3","ok":false,"costUSD":null,"turns":null,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":420808}
+{"task":"invoice-fraud-detection","ok":true,"costUSD":0.5022375,"turns":13,"compressions":0,"savedTokens":0,"reReads":0,"wallMs":90683}

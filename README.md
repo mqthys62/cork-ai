@@ -46,9 +46,34 @@ and what every further tool call costs — /compact or /autocompact fixes that
 > **These are counterfactuals, not a bill.** They say what the avoided tokens
 > would have cost, which no tool can measure about itself — JetBrains A/B-tested
 > `rtk` and found it *raised* Claude Code's cost by 7.6% while reporting 99.8%
-> savings. cork-ai avoids the two errors behind that gap, but avoiding known
-> errors is not proof: a control arm is. The harness that settles it ships with
-> the tool — [docs/AB-TESTING.md](docs/AB-TESTING.md).
+> savings. So cork-ai was measured the only way that settles it: against a
+> control arm with no hooks at all.
+
+## Measured against a control
+
+24 runs, 12 paired, on read-heavy questions about a real codebase
+(2026-09-15, $54.95 of list-price equivalent):
+
+| | cork-ai vs no cork-ai | |
+|---|---|---|
+| cost | **−14.8%** | p=0.126 |
+| cache reads | −27.3% | p=0.170 |
+| turns | −8.3% | p=0.410 |
+| full re-reads over 15 compressions | **0** | — |
+
+Every metric moves the opposite way to the rtk result. **None of them reaches
+statistical significance at n=12**, so what this supports is "no penalty
+detected, saving suggestive" — not "cork-ai saves you 15%". Establishing an
+effect this size needs roughly 30-40 pairs.
+
+The raw runs are in this repository and the figures recompute from them:
+
+```bash
+node docs/evidence/verify.mjs
+```
+
+Method, limits, and what was thrown out along the way (including three of our
+own false results): [docs/AB-TESTING.md](docs/AB-TESTING.md).
 
 ---
 

@@ -179,8 +179,8 @@ consistent with the tool causing the difference rather than chance:
 
 | pairs | n | median cost |
 |---|---|---|
-| cork-ai compressed something | 8 | **-26.9%** |
-| zero compressions (inert) | 4 | -3.5% |
+| cork-ai compressed something | 8 | **-27.1%** |
+| zero compressions (inert) | 4 | -4.0% |
 
 Across all 24 runs: **15 compressions, 30,880 tokens kept out of context,
 6 targeted range reads, and 0 full re-reads.** The failure mode that made rtk
@@ -189,10 +189,22 @@ once.
 
 Two limits worth stating plainly. Answer quality is not scored: these are
 open questions with no automated verifier, so `Task success` reads 0/12 on
-both arms; answer length was comparable (20.5KB vs 20.4KB median), which
+both arms; answer length was comparable (21.0KB vs 20.2KB median), which
 shows cork-ai is not saving by producing less, but says nothing about
 correctness. And two of the twelve pairs swung the other way (+28%, +17%),
 which is what n=12 and this much session variance look like.
+
+## Check it yourself
+
+Every figure above comes from runs committed to this repository:
+
+```bash
+node docs/evidence/verify.mjs
+```
+
+It reads `docs/evidence/raw/*.jsonl` — the 36 runs as the harness wrote them —
+and recomputes each number with the statistics in the open. If a figure here
+disagrees with what the script prints, this page is wrong.
 
 ## Reading the result
 
