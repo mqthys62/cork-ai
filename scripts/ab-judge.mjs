@@ -20,6 +20,7 @@
  * Budget for it as roughly one extra arm.
  */
 import { spawnSync } from 'child_process'
+import { startTicker, stopTicker } from './ab-progress.mjs'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -34,7 +35,7 @@ const DRY = process.argv.includes('--dry-run')
  * that cannot tell a correct claim from a plausible one would report "tie"
  * on everything and quietly hide a real quality regression.
  */
-const JUDGE_MODEL = process.env.AB_JUDGE_MODEL ?? 'opus'
+const JUDGE_MODEL = process.env.AB_JUDGE_MODEL ?? 'opus[1m]'
 
 const REPOS = {
   'cork-ai': '/home/mathys/projects/cork-ai',
@@ -118,8 +119,12 @@ function main() {
   const questions = {}
   for (const m of src.matchAll(/name: '([^']+)',\s*\n\s*repo: '[^']+',\s*\n\s*prompt: `([^`]+)`/g)) questions[m[1]] = m[2]
 
+  const t0 = Date.now()
+  let idx = 0
+  let judgeSpent = 0
   for (const p of pairs) {
     const key = `${p.task}#${p.rep}`
+    idx++
     const aIsControl = flip(seed, key)
     const dir = path.join(OUT, 'judge', `${p.task}-${p.rep}`)
     fs.rmSync(dir, { recursive: true, force: true })
@@ -136,7 +141,12 @@ function main() {
     fs.copyFileSync(path.join(OUT, (aIsControl ? p.c : p.t).answerPath), path.join(dir, 'ANSWER_A.md'))
     fs.copyFileSync(path.join(OUT, (aIsControl ? p.t : p.c).answerPath), path.join(dir, 'ANSWER_B.md'))
 
-    process.stdout.write(`  ${p.task.padEnd(20)} rep${p.rep} `)
+    const label = `  [${String(idx).padStart(2)}/${pairs.length}] ${p.task.padEnd(20)} rep${p.rep}`
+    process.stdout.write(`${label} grading...`)
+    // Same reason as the measurement harness: spawnSync blocks everything,
+    // and a judge run reads two answers plus the files they cite, so it is
+    // slower than the runs it grades. Silence here reads as a hang.
+    const ticker = startTicker(label)
     const env = { ...process.env }
     delete env.ANTHROPIC_API_KEY
     delete env.ANTHROPIC_AUTH_TOKEN
@@ -154,14 +164,16 @@ function main() {
       '--output-format', 'json', '--model', JUDGE_MODEL, '--permission-mode', 'bypassPermissions'],
       { cwd: dir, encoding: 'utf-8', timeout: TIMEOUT_MS, env })
     const wallMs = Date.now() - started
+    stopTicker(ticker)
 
     let verdict = null
     try { verdict = JSON.parse(fs.readFileSync(path.join(dir, 'VERDICT.json'), 'utf-8')) } catch { /* judge failed */ }
     let meta = null
     try { meta = JSON.parse(res.stdout) } catch { /* crashed */ }
 
+    judgeSpent += meta?.total_cost_usd ?? 0
     if (!verdict) {
-      console.log(`no verdict (judge cost $${(meta?.total_cost_usd ?? 0).toFixed(4)})`)
+      console.log(`\r${label} no verdict (judge cost $${(meta?.total_cost_usd ?? 0).toFixed(4)})`)
       fs.rmSync(dir, { recursive: true, force: true })
       continue
     }
@@ -178,7 +190,9 @@ function main() {
       judgeCostUSD: meta?.total_cost_usd ?? null, wallMs,
     }
     fs.appendFileSync(verdictsPath, JSON.stringify(row) + '\n')
-    console.log(`${better.padEnd(9)} errors t=${treatment.errors} c=${control.errors}  $${(meta?.total_cost_usd ?? 0).toFixed(4)}  ${Math.round(wallMs/1000)}s`)
+    const eta = idx >= 2 && idx < pairs.length
+      ? `  ~${Math.round((Date.now() - t0) / idx * (pairs.length - idx) / 60000)}min left` : ''
+    console.log(`\r${label} ${better.padEnd(9)} errors t=${treatment.errors} c=${control.errors}  $${(meta?.total_cost_usd ?? 0).toFixed(4)}  ${Math.round(wallMs/1000)}s  | $${judgeSpent.toFixed(2)} spent${eta}`)
     fs.rmSync(dir, { recursive: true, force: true })
   }
 

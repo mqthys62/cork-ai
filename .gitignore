@@ -9,3 +9,7 @@ PLAN*.md
 .DS_Store
 Thumbs.db
 release/
+
+# A/B campaign output: paid runs, repo copies, per-run homes. Never committed;
+# the curated, anonymised subset lives in docs/evidence/raw/.
+ab-repo-results/

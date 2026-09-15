@@ -25,6 +25,7 @@
  * be caught and reported. Nothing is ever written back.
  */
 import { execFileSync, spawnSync } from 'child_process'
+import { startTicker, stopTicker, etaFor } from './ab-progress.mjs'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
@@ -39,8 +40,14 @@ const DRY = process.argv.includes('--dry-run')
  * or the comparison measures the price difference instead. Opus is the
  * default here because it is what this tool is used with in practice and it
  * is where a token saved is worth the most.
+ *
+ * The context window is part of the model identity, not a detail: `opus` and
+ * `opus[1m]` are priced differently, so pinning the bare alias would quietly
+ * measure a different model than the one in daily use. A stray run during
+ * development did exactly that, and it was caught only because `modelUsage`
+ * is recorded per run -- which is the reason to record it.
  */
-const MODEL = process.env.AB_MODEL ?? 'opus'
+const MODEL = process.env.AB_MODEL ?? 'opus[1m]'
 const ONLY = (process.env.AB_TASKS ?? '').split(',').filter(Boolean)
 
 /**
@@ -280,21 +287,36 @@ function main() {
 
   const results = []
   let consecutiveFailures = 0
+  const totalRuns = remaining * 2
+  let runIdx = 0
+  let spentUSD = 0
+  const t0 = Date.now()
   for (const task of tasks) {
     for (let rep = 0; rep < REPEATS; rep++) {
       if (done.has(`${task.name}#${rep}`)) continue
       for (const arm of (rep % 2 === 0 ? ['treatment', 'control'] : ['control', 'treatment'])) {
         const workdir = path.join(OUT, 'work', `${task.name}-${arm}-${rep}`)
         fs.rmSync(workdir, { recursive: true, force: true })
-        process.stdout.write(`  ${task.name.padEnd(20)} rep${rep} ${arm.padEnd(9)} `)
+        runIdx++
+        const label = `  [${String(runIdx).padStart(2)}/${totalRuns}] ${task.name.padEnd(20)} rep${rep} ${arm.padEnd(9)}`
+        process.stdout.write(`${label} copying...`)
         try { copyRepo(repos[task.repo], workdir) }
-        catch (e) { console.log(`copy failed: ${e.message}`); continue }
+        catch (e) { console.log(`\r${label} copy failed: ${e.message}`); continue }
 
+        // A run takes minutes of total silence: spawnSync blocks this process
+        // entirely, so the ticker has to live in a child that owns the line
+        // until the run returns. Without it the terminal looks hung, and the
+        // honest reaction to a hung terminal is to kill it -- which would
+        // throw away a paid run.
+        const ticker = startTicker(label)
         const r = runArm({ arm, task, rep, workdir })
+        stopTicker(ticker)
         results.push(r)
         fs.appendFileSync(resultsPath, JSON.stringify(r) + '\n')
+        spentUSD += r.costUSD ?? 0
         const cork = r.arm === 'treatment' ? `  ${r.compressions} compressed` : ''
-        console.log(`${r.ok ? '' : 'FAILED '}$${(r.costUSD ?? 0).toFixed(4)}  ${String(r.turns ?? '?').padStart(3)} turns${cork}  ${(r.answerBytes/1024).toFixed(1)}KB answer  ${Math.round(r.wallMs/1000)}s`)
+        const eta = etaFor(t0, runIdx, totalRuns)
+        console.log(`\r${label} ${r.ok ? '' : 'FAILED '}$${(r.costUSD ?? 0).toFixed(4)}  ${String(r.turns ?? '?').padStart(3)} turns${cork}  ${(r.answerBytes/1024).toFixed(1)}KB  ${Math.round(r.wallMs/1000)}s  | $${spentUSD.toFixed(2)} spent${eta}`)
 
         // The copy has served its purpose; a repo copy per run fills a disk fast.
         fs.rmSync(workdir, { recursive: true, force: true })
