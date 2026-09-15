@@ -24,6 +24,21 @@ node scripts/ab-judge.mjs ab-repo-results
 node scripts/ab-judge.mjs ab-repo-results --summary
 ```
 
+Watch it from a second terminal, which is where the quota question is
+actually answered:
+
+```bash
+./scripts/ab-watch.sh
+```
+
+It shows the 5-hour block's spend and time left, how many pairs are complete,
+and — the number that decides whether to keep going — the projected total cost
+extrapolated from the pairs finished so far.
+
+Note that Claude Code's status line does not appear during a campaign: it
+belongs to an interactive session, and these runs are `claude -p` subprocesses.
+`ab-watch.sh` reads the same underlying usage data instead.
+
 Check the plan before spending anything:
 
 ```bash
