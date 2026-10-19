@@ -1,18 +1,18 @@
 {
-  "updated": "2026-10-12",
+  "updated": "2026-10-19",
   "source": "PostHog Cloud EU — installs that opted into telemetry (cork-ai telemetry on); latest daily snapshot per install",
   "installs_with_snapshot": 9,
   "installs_ever_seen": 9,
   "active_installs_30d": 8,
   "countries": 1,
   "github_downloads": 81,
-  "tokens_saved": 5849731,
-  "net_usd_saved": 2.37,
-  "gross_usd_saved": 32.32,
-  "sessions": 134,
-  "reads_outlined": 848,
-  "avg_saved_pct": 75.1,
-  "median_amplification": 27.7,
-  "avg_reread_rate_pct": 13.6,
-  "avg_saving_at_200k_pct": 22
+  "tokens_saved": 5962473,
+  "net_usd_saved": 2.92,
+  "gross_usd_saved": 31.55,
+  "sessions": 147,
+  "reads_outlined": 873,
+  "avg_saved_pct": 75.4,
+  "median_amplification": 22.3,
+  "avg_reread_rate_pct": 14.4,
+  "avg_saving_at_200k_pct": 22.8
 }
